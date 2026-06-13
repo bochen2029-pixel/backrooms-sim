@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "contracts/geometry_v1.h"
+
 namespace br::contracts {
 
 constexpr float kChunkSize = 32.0f;  // meters per chunk edge
@@ -48,12 +50,16 @@ struct ChunkVertex {
 
 struct ChunkData {
     ChunkKey key;
-    std::vector<ChunkVertex> vertices;  // world-space triangle list
+    std::vector<ChunkVertex> vertices;     // world-space triangle list (render)
+    std::vector<BoxInstance> collision;    // world-space solid wall AABBs (sim)
     uint64_t content_hash = 0;
 };
 
 // Implemented by `gen`. Pure/total/deterministic.
 ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key);
 uint64_t ChunkContentHash(const ChunkData& c);
+
+// Geometry validator: no degenerate/floating/fat/overlapping walls (M4 gate).
+bool ValidateChunkGeometry(const ChunkData& c);
 
 }  // namespace br::contracts

@@ -8,6 +8,7 @@ every change to one reconciles ARCHITECTURE.md §5 in the same commit
 
 | Contract file | Boundary | Status |
 |---|---|---|
+| `geometry_v1.h` | shared primitive `BoxInstance` | **present (M4)** |
 | `world_view_v1.h` | core → renderers (read-only snapshot) | **present (M2)** |
 | `replay_v1.h` | input + Event Log serialization | **present (M2)** |
 | `chunk_gen_v1.h` | gen → stream/render | **present (M3)** |

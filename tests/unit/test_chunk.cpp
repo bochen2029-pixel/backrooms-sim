@@ -39,19 +39,24 @@ TEST_CASE("distinct keys/seeds produce distinct content", "[gen][chunk]") {
 }
 
 namespace {
-std::vector<std::pair<float, float>> edge_at_x(const ChunkData& c, float x) {
-    std::vector<std::pair<float, float>> out;
+// Floor-only edge vertices (y==0, upward normal) — wall side/top verts that
+// merely touch the chunk boundary are excluded; the seam invariant is floor
+// continuity (no cracks). Adjacent chunks must share these exactly.
+bool is_floor(const contracts::ChunkVertex& v) { return v.pos[1] == 0.0f && v.nrm[1] > 0.5f; }
+
+std::vector<float> floor_edge_x(const ChunkData& c, float x) {
+    std::vector<float> out;  // z values of floor verts on the x==`x` edge
     for (const auto& v : c.vertices) {
-        if (v.pos[0] == x) out.emplace_back(v.pos[1], v.pos[2]);
+        if (v.pos[0] == x && is_floor(v)) out.push_back(v.pos[2]);
     }
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
     return out;
 }
-std::vector<std::pair<float, float>> edge_at_z(const ChunkData& c, float z) {
-    std::vector<std::pair<float, float>> out;
+std::vector<float> floor_edge_z(const ChunkData& c, float z) {
+    std::vector<float> out;  // x values of floor verts on the z==`z` edge
     for (const auto& v : c.vertices) {
-        if (v.pos[2] == z) out.emplace_back(v.pos[0], v.pos[1]);
+        if (v.pos[2] == z && is_floor(v)) out.push_back(v.pos[0]);
     }
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
@@ -67,9 +72,9 @@ TEST_CASE("adjacent chunk seams match exactly (no cracks)", "[gen][chunk][seam]"
             const ChunkData bz  = GenerateChunk(77u, ChunkKey{0, cx, cz + 1});
             const float sx = static_cast<float>(cx + 1) * contracts::kChunkSize;
             const float sz = static_cast<float>(cz + 1) * contracts::kChunkSize;
-            REQUIRE(edge_at_x(a, sx) == edge_at_x(bx, sx));  // +X seam
-            REQUIRE(edge_at_z(a, sz) == edge_at_z(bz, sz));  // +Z seam
-            REQUIRE_FALSE(edge_at_x(a, sx).empty());          // seam is non-trivial
+            REQUIRE(floor_edge_x(a, sx) == floor_edge_x(bx, sx));  // +X floor seam
+            REQUIRE(floor_edge_z(a, sz) == floor_edge_z(bz, sz));  // +Z floor seam
+            REQUIRE_FALSE(floor_edge_x(a, sx).empty());            // seam is non-trivial
         }
     }
 }

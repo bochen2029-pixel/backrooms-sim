@@ -1,18 +1,17 @@
-// gen/chunk.cpp — pure procedural chunk generation (INV-2). Placeholder M3
-// geometry: a world-coordinate grid floor (per-chunk tint) plus a few interior
-// posts, enough to expose seams and verticality while the streaming harness is
-// validated. Real Level-0 rooms/doorways arrive in M4.
+// gen/chunk.cpp — Level-0 chunk geometry (M4): builds floor + maze walls from
+// the connected layout (gen/layout.h) into render vertices + collision AABBs.
 #include "contracts/chunk_gen_v1.h"
 
 #include <cstring>
 
 #include "core/rng.h"
+#include "gen/layout.h"
 
 namespace br::contracts {
 
 namespace {
-
-constexpr int kGrid = 4;  // floor cells per chunk edge (cell = 8 m)
+constexpr float kWallThick = 0.3f;   // wall thickness (m)
+constexpr float kWallHeight = 3.0f;  // wall + room height (m)
 
 void push_vertex(std::vector<ChunkVertex>& v, float x, float y, float z,
                  const float n[3], const float col[3]) {
@@ -40,61 +39,72 @@ void push_box(std::vector<ChunkVertex>& v, float x0, float y0, float z0,
     const float nxn[3]={-1,0,0}, nxp[3]={1,0,0}, nyp[3]={0,1,0}, nzn[3]={0,0,-1}, nzp[3]={0,0,1};
     push_quad(v, c000, c001, c011, c010, nxn, col);
     push_quad(v, c100, c110, c111, c101, nxp, col);
-    push_quad(v, c010, c011, c111, c110, nyp, col);
+    push_quad(v, c010, c011, c111, c110, nyp, col);  // top (visible from above)
     push_quad(v, c000, c010, c110, c100, nzn, col);
     push_quad(v, c001, c101, c111, c011, nzp, col);
 }
 
-uint64_t seed_for(uint64_t world_seed, ChunkKey key) {
-    uint64_t s = world_seed;
-    s ^= static_cast<uint64_t>(static_cast<uint64_t>(key.level) + 1u) * 0x9e3779b97f4a7c15ULL;
-    s ^= static_cast<uint64_t>(key.cx) * 0xc2b2ae3d27d4eb4fULL;
-    s ^= static_cast<uint64_t>(key.cz) * 0x165667b19e3779f9ULL;
-    return s;
+void add_wall(ChunkData& c, float x0, float z0, float x1, float z1, const float col[3]) {
+    push_box(c.vertices, x0, 0.0f, z0, x1, kWallHeight, z1, col);
+    BoxInstance bi;
+    bi.mn[0] = x0; bi.mn[1] = 0.0f; bi.mn[2] = z0;
+    bi.mx[0] = x1; bi.mx[1] = kWallHeight; bi.mx[2] = z1;
+    c.collision.push_back(bi);
 }
-
 }  // namespace
 
 ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
     ChunkData c;
     c.key = key;
-    br::core::Pcg64 rng(seed_for(world_seed, key));
+    const gen::ChunkLayout L = gen::generate_layout(world_seed, key);
 
     const float ox = static_cast<float>(key.cx) * kChunkSize;
     const float oz = static_cast<float>(key.cz) * kChunkSize;
-    const float cell = kChunkSize / static_cast<float>(kGrid);
+    const float cs = gen::kCellSize;
+    const float t = kWallThick * 0.5f;
+    const int G = gen::kCellsPerChunk;
 
-    // Per-chunk floor tint (muted backrooms palette) so neighbours differ.
+    // Per-chunk floor tint (muted backrooms palette); walls a darker shade.
+    br::core::Pcg64 rng(gen::chunk_seed(world_seed, key));
     const float floor_col[3] = {
-        0.55f + 0.25f * static_cast<float>(rng.next_double()),
-        0.50f + 0.22f * static_cast<float>(rng.next_double()),
-        0.24f + 0.16f * static_cast<float>(rng.next_double()),
+        0.58f + 0.22f * static_cast<float>(rng.next_double()),
+        0.52f + 0.20f * static_cast<float>(rng.next_double()),
+        0.26f + 0.14f * static_cast<float>(rng.next_double()),
     };
+    const float wall_col[3] = { floor_col[0] * 0.45f, floor_col[1] * 0.45f, floor_col[2] * 0.40f };
     const float up[3] = {0.0f, 1.0f, 0.0f};
 
-    // Floor grid in world coordinates (boundary vertices align with neighbours).
-    for (int i = 0; i < kGrid; ++i) {
-        for (int j = 0; j < kGrid; ++j) {
-            const float x0 = ox + static_cast<float>(i) * cell;
-            const float x1 = ox + static_cast<float>(i + 1) * cell;
-            const float z0 = oz + static_cast<float>(j) * cell;
-            const float z1 = oz + static_cast<float>(j + 1) * cell;
+    // Floor grid (world coords; boundary verts align with neighbours -> no seam).
+    for (int i = 0; i < G; ++i) {
+        for (int j = 0; j < G; ++j) {
+            const float x0 = ox + static_cast<float>(i) * cs;
+            const float x1 = ox + static_cast<float>(i + 1) * cs;
+            const float z0 = oz + static_cast<float>(j) * cs;
+            const float z1 = oz + static_cast<float>(j + 1) * cs;
             const float a[3]={x0,0.0f,z0}, b[3]={x1,0.0f,z0}, d[3]={x1,0.0f,z1}, e[3]={x0,0.0f,z1};
             push_quad(c.vertices, a, b, d, e, up, floor_col);
         }
     }
 
-    // A few interior posts (never on a chunk boundary -> no cross-chunk dupes).
-    const float post_col[3] = {0.30f, 0.28f, 0.20f};
-    const uint64_t posts = 2u + rng.bounded(3u);
-    for (uint64_t p = 0; p < posts; ++p) {
-        const int gi = 1 + static_cast<int>(rng.bounded(static_cast<uint64_t>(kGrid - 1)));
-        const int gj = 1 + static_cast<int>(rng.bounded(static_cast<uint64_t>(kGrid - 1)));
-        const float px = ox + static_cast<float>(gi) * cell;
-        const float pz = oz + static_cast<float>(gj) * cell;
-        const float r = 0.4f;
-        const float h = 2.0f + 2.0f * static_cast<float>(rng.next_double());
-        push_box(c.vertices, px - r, 0.0f, pz - r, px + r, h, pz + r, post_col);
+    // Vertical walls (on x-lines xi, spanning z-cell j).
+    for (int xi = 0; xi <= G; ++xi) {
+        for (int j = 0; j < G; ++j) {
+            if (!L.vwall[xi][j]) continue;
+            const float xc = ox + static_cast<float>(xi) * cs;
+            const float z0 = oz + static_cast<float>(j) * cs;
+            const float z1 = oz + static_cast<float>(j + 1) * cs;
+            add_wall(c, xc - t, z0, xc + t, z1, wall_col);
+        }
+    }
+    // Horizontal walls (on z-lines zj, spanning x-cell i).
+    for (int i = 0; i < G; ++i) {
+        for (int zj = 0; zj <= G; ++zj) {
+            if (!L.hwall[i][zj]) continue;
+            const float zc = oz + static_cast<float>(zj) * cs;
+            const float x0 = ox + static_cast<float>(i) * cs;
+            const float x1 = ox + static_cast<float>(i + 1) * cs;
+            add_wall(c, x0, zc - t, x1, zc + t, wall_col);
+        }
     }
 
     c.content_hash = ChunkContentHash(c);
@@ -117,6 +127,37 @@ uint64_t ChunkContentHash(const ChunkData& c) {
         mix(v.color, sizeof(v.color));
     }
     return h;
+}
+
+bool ValidateChunkGeometry(const ChunkData& c) {
+    // Thresholds sit well between the wall thickness (~0.3 m) and the cell size
+    // (4 m), so they tolerate the float-precision noise that grows with world
+    // distance (far-chunk precision is deferred to camera-relative rendering)
+    // while still rejecting genuine fat/stacked-wall bugs.
+    const float eps = 0.01f;
+    const float thin = gen::kCellSize * 0.5f;  // 2.0 m separator
+    for (const BoxInstance& b : c.collision) {
+        // Non-degenerate (positive extent on every axis).
+        if (b.mx[0] - b.mn[0] <= eps || b.mx[1] - b.mn[1] <= eps || b.mx[2] - b.mn[2] <= eps) return false;
+        // Floor-anchored (no floating walls).
+        if (b.mn[1] < -eps || b.mn[1] > eps) return false;
+        // A wall is thin in exactly one horizontal axis (not a fat block).
+        const bool thinX = (b.mx[0] - b.mn[0]) <= thin;
+        const bool thinZ = (b.mx[2] - b.mn[2]) <= thin;
+        if (thinX == thinZ) return false;
+    }
+    // No two walls overlap volumetrically beyond a shared corner (a corner is
+    // thickness-scale; a duplicate/stacked wall extends a full cell).
+    for (size_t i = 0; i < c.collision.size(); ++i) {
+        for (size_t j = i + 1; j < c.collision.size(); ++j) {
+            const BoxInstance& a = c.collision[i];
+            const BoxInstance& b = c.collision[j];
+            const float xv = (a.mx[0] < b.mx[0] ? a.mx[0] : b.mx[0]) - (a.mn[0] > b.mn[0] ? a.mn[0] : b.mn[0]);
+            const float zv = (a.mx[2] < b.mx[2] ? a.mx[2] : b.mx[2]) - (a.mn[2] > b.mn[2] ? a.mn[2] : b.mn[2]);
+            if (xv > eps && zv > eps && (xv > thin || zv > thin)) return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace br::contracts

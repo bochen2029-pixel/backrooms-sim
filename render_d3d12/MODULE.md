@@ -21,6 +21,8 @@ renderer (INV-6).
 - `render_chunks` (M3) — headless: draws resident streamed chunks (pos/nrm/color
   pipeline) with a persistently-mapped vertex-buffer pool (allocation-free
   stream-in) and a per-frame upload budget. Frees evicted chunk slots.
+- `render_topdown` (M4) — headless: orthographic top-down render of a chunk set
+  (debug golden of the maze layout).
 
 **Links:** `d3d12 dxgi dxguid d3dcompiler Psapi` (PRIVATE — implementation detail).
 

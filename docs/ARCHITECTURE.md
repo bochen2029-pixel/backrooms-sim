@@ -182,6 +182,9 @@ Convention: errors cross module boundaries as typed results, never exceptions; `
 | 019 | **M3 streaming: pure world-coord chunks + ring + worker pool** | Unbounded, seam-correct, bounded residency (INV-2/3/4); sim decoupled |
 | 020 | **M3 chunk VB pool + warmup** | Allocation-free stream-in; p99/median ≈ 1.2x; no first-frame hitch |
 | 021 | **M3 gate: p99 < 2× median @1280×720; private-bytes soak** | Aligns with NFR §9; non-flaky; soak duration parameterized |
+| 022 | **M4 Level-0: spanning-tree maze + edge-hash doorways** | Provably connected (INV-3), seam-agreed doorways (INV-2), 10k-chunk validators |
+| 023 | **M4 collision via app-gathered chunk walls; walk-bot v1** | Keeps core gen-free; deterministic 1 km traversal; variance-based stuck detect |
+| 024 | **M4 top-down ortho debug golden (3×3 chunks)** | Per-seed connectivity/seam visual audit (INV-8) |
 
 ## 9. Non-Functional Requirements
 

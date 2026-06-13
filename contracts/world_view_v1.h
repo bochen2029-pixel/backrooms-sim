@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <span>
 
+#include "contracts/geometry_v1.h"
+
 namespace br::contracts {
 
 struct CameraPose {
@@ -18,12 +20,6 @@ struct CameraPose {
     float pitch;      // radians; + looks up, clamped by the sim
     float fov_y;      // vertical field of view, radians
     float aspect;     // width / height
-};
-
-// A solid axis-aligned box in world space (M2 test room; later: debug geometry).
-struct BoxInstance {
-    float mn[3];
-    float mx[3];
 };
 
 struct WorldView {

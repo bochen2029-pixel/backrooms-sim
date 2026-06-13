@@ -72,7 +72,7 @@ struct ChunkSlot {
     D3D12_VERTEX_BUFFER_VIEW view = {};
     UINT vertex_count = 0;
 };
-constexpr size_t kChunkSlotCapacityBytes = 2048 * 36;  // 2048 verts * 36 B headroom
+constexpr size_t kChunkSlotCapacityBytes = 6144 * 36;  // up to ~3200 maze verts/chunk + headroom
 
 struct Renderer::Impl {
     ComPtr<ID3D12Device> device;
@@ -1063,6 +1063,89 @@ bool Renderer::render_chunks(const contracts::CameraPose& camera,
             last_error_ = "fence wait timed out";
             return false;
         }
+    }
+    return true;
+}
+
+bool Renderer::render_topdown(const std::vector<contracts::ResidentChunk>& chunks,
+                              float cx, float cz, float half) {
+    Impl& d = *impl_;
+    if (d.windowed || !d.rt) { last_error_ = "render_topdown is headless-only"; return false; }
+    if (!ensure_chunk_pipeline(d, last_error_)) return false;
+
+    // Sync the pool to exactly the given chunks (upload all, no budget).
+    std::set<contracts::ChunkKey> live;
+    for (const auto& rc : chunks) live.insert(rc.key);
+    for (auto it = d.chunkSlotOf.begin(); it != d.chunkSlotOf.end();) {
+        if (live.find(it->first) == live.end()) { d.chunkFree.push_back(it->second); it = d.chunkSlotOf.erase(it); }
+        else ++it;
+    }
+    for (const auto& rc : chunks) {
+        if (d.chunkSlotOf.find(rc.key) == d.chunkSlotOf.end()) {
+            if (!upload_chunk_mesh(d, rc, last_error_)) return false;
+        }
+    }
+
+    // Orthographic top-down MVP (row-major; world XZ -> screen, world Y -> depth).
+    const float minY = -1.0f, maxY = 4.0f, range = maxY - minY;
+    float constants[20] = {};
+    constants[0] = 1.0f / half;       // wx -> clip.x
+    constants[9] = 1.0f / half;       // wz -> clip.y
+    constants[6] = -1.0f / range;     // wy -> clip.z
+    constants[12] = -cx / half;
+    constants[13] = -cz / half;
+    constants[14] = maxY / range;
+    constants[15] = 1.0f;
+    constants[17] = -1.0f;            // light straight down
+
+    if (FAILED(d.alloc->Reset())) { last_error_ = "allocator reset failed"; return false; }
+    if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "command list reset failed"; return false; }
+
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = d.rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    const D3D12_CPU_DESCRIPTOR_HANDLE dsv = d.dsvHeap->GetCPUDescriptorHandleForHeapStart();
+    d.list->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+    d.list->ClearRenderTargetView(rtv, kClearFloat, 0, nullptr);
+    d.list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    D3D12_VIEWPORT vp = { 0.0f, 0.0f, static_cast<float>(d.width), static_cast<float>(d.height), 0.0f, 1.0f };
+    D3D12_RECT scissor = { 0, 0, static_cast<LONG>(d.width), static_cast<LONG>(d.height) };
+    d.list->RSSetViewports(1, &vp);
+    d.list->RSSetScissorRects(1, &scissor);
+    d.list->SetGraphicsRootSignature(d.chunkRoot.Get());
+    d.list->SetPipelineState(d.chunkPso.Get());
+    d.list->SetGraphicsRoot32BitConstants(0, 20, constants, 0);
+    d.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    for (const auto& rc : chunks) {
+        const auto it = d.chunkSlotOf.find(rc.key);
+        if (it == d.chunkSlotOf.end()) continue;
+        const ChunkSlot& cs = d.chunkPool[it->second];
+        d.list->IASetVertexBuffers(0, 1, &cs.view);
+        d.list->DrawInstanced(cs.vertex_count, 1, 0, 0);
+    }
+
+    const D3D12_RESOURCE_BARRIER toCopy = transition(
+        d.rt.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    d.list->ResourceBarrier(1, &toCopy);
+    D3D12_TEXTURE_COPY_LOCATION dst = {};
+    dst.pResource = d.readback.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = d.footprint;
+    D3D12_TEXTURE_COPY_LOCATION src = {};
+    src.pResource = d.rt.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+    d.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    const D3D12_RESOURCE_BARRIER backToRt = transition(
+        d.rt.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    d.list->ResourceBarrier(1, &backToRt);
+
+    if (FAILED(d.list->Close())) { last_error_ = "command list close failed"; return false; }
+    ID3D12CommandList* lists[] = { d.list.Get() };
+    d.queue->ExecuteCommandLists(1, lists);
+    const UINT64 v = ++d.fenceValue;
+    if (FAILED(d.queue->Signal(d.fence.Get(), v))) { last_error_ = "fence Signal failed"; return false; }
+    if (d.fence->GetCompletedValue() < v) {
+        if (FAILED(d.fence->SetEventOnCompletion(v, d.fenceEvent))) { last_error_ = "SetEventOnCompletion failed"; return false; }
+        if (WaitForSingleObject(d.fenceEvent, 5000) != WAIT_OBJECT_0) { last_error_ = "fence wait timed out"; return false; }
     }
     return true;
 }

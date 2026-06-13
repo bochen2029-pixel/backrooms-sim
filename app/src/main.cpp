@@ -27,6 +27,7 @@
 #include "core/rng.h"
 #include "core/world.h"
 #include "core/replay.h"
+#include "contracts/chunk_gen_v1.h"
 #include "stream/stream_manager.h"
 #include "telemetry/csv.h"
 #include "render_d3d12/renderer.h"
@@ -38,9 +39,10 @@ using br::render_d3d12::FrameImage;
 namespace {
 
 struct Options {
-    bool headless = false, windowed = false, scene = false, sim = false, stream = false, version = false;
+    bool headless = false, windowed = false, scene = false, sim = false, stream = false;
+    bool walkbot = false, topdown = false, version = false;
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
-    uint32_t ticks_per_frame = 30, radius = 6, workers = 4;
+    uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1;
     uint64_t seed = 1u;
     std::string out, record, replay, hashlog, csv;
 };
@@ -71,6 +73,9 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--scene") == 0) o.scene = true;
         else if (std::strcmp(a, "--sim") == 0) o.sim = true;
         else if (std::strcmp(a, "--stream") == 0) o.stream = true;
+        else if (std::strcmp(a, "--walkbot") == 0) o.walkbot = true;
+        else if (std::strcmp(a, "--topdown") == 0) o.topdown = true;
+        else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
         else if (std::strcmp(a, "--version") == 0) o.version = true;
         else if (std::strcmp(a, "--frames") == 0) { if (!u32(o.frames)) return false; }
         else if (std::strcmp(a, "--seconds") == 0) { if (!u32(o.seconds)) return false; }
@@ -372,6 +377,140 @@ int run_stream(const Options& o) {
     return dbg == 0 ? 0 : 3;
 }
 
+// ----- M4 walk-bot v1: wander + escape-on-block, collides with maze walls -----
+struct WalkBot {
+    br::core::Pcg64 rng;
+    float target_yaw;
+    int ticks_since_decision = 0;
+    br::core::Vec3 last_pos;
+
+    WalkBot(uint64_t seed, br::core::Vec3 spawn) : rng(seed), last_pos(spawn) {
+        target_yaw = static_cast<float>(rng.next_double() * 6.2831853);
+    }
+    contracts::InputCommand step(const br::core::WorldState& s) {
+        contracts::InputCommand in{};
+        if (++ticks_since_decision >= 16) {  // ~0.13 s
+            const float dx = s.wanderer.pos.x - last_pos.x;
+            const float dz = s.wanderer.pos.z - last_pos.z;
+            const float moved = std::sqrt(dx * dx + dz * dz);
+            if (moved < 0.15f) {
+                // Blocked: sweep the heading to scan for an opening (a fixed,
+                // non-2pi-dividing step guarantees finding a doorway quickly).
+                target_yaw += 1.3f;
+            } else if (rng.next_double() < 0.25) {
+                target_yaw += static_cast<float>((rng.next_double() - 0.5) * 1.6);  // gentle drift
+            }
+            last_pos = s.wanderer.pos;
+            ticks_since_decision = 0;
+        }
+        float dyaw = target_yaw - s.wanderer.yaw;
+        while (dyaw > 3.14159265f) dyaw -= 6.28318531f;
+        while (dyaw < -3.14159265f) dyaw += 6.28318531f;
+        in.look_yaw = br::core::clampf(dyaw, -0.18f, 0.18f);
+        in.move_z = 1.0f;
+        return in;
+    }
+};
+
+int run_walkbot(const Options& o) {
+    using namespace br::core;
+    const float target_m = static_cast<float>(o.km) * 1000.0f;
+
+    WorldState s(o.seed);
+    s.wanderer.pos = Vec3{2.0f, kWandererHalfHeight + 0.02f, 2.0f};  // cell-(0,0) centre
+    WalkBot bot(o.seed ^ 0x9e3779b97f4a7c15ULL, s.wanderer.pos);
+
+    // Collision = ground floor + the 3x3 chunk walls around the wanderer,
+    // regenerated deterministically only when the wanderer's chunk changes.
+    std::vector<Aabb> collision;
+    contracts::ChunkKey cached{0, static_cast<int64_t>(1) << 40, 0};
+    auto rebuild = [&](contracts::ChunkKey center) {
+        collision.clear();
+        collision.push_back(Aabb{{-1.0e6f, -1.0f, -1.0e6f}, {1.0e6f, 0.0f, 1.0e6f}});
+        for (int64_t dx = -1; dx <= 1; ++dx) {
+            for (int64_t dz = -1; dz <= 1; ++dz) {
+                const contracts::ChunkData cd =
+                    contracts::GenerateChunk(o.seed, contracts::ChunkKey{0, center.cx + dx, center.cz + dz});
+                for (const auto& b : cd.collision) {
+                    collision.push_back(Aabb{{b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]}});
+                }
+            }
+        }
+        cached = center;
+    };
+
+    // Stuck = position variance ~ 0 over a 10 s window (motionless / sealed in).
+    // Track the window's bounding box; a wedged wanderer never moves, while one
+    // that merely thrashes (slides/turns without net progress) still ranges far.
+    uint64_t stuck_events = 0;
+    float minx = s.wanderer.pos.x, maxx = minx, minz = s.wanderer.pos.z, maxz = minz;
+    uint64_t window_tick = 0;
+    const uint64_t kMaxTicks = 800000;
+
+    while (s.odometer < target_m && s.tick < kMaxTicks) {
+        const contracts::ChunkKey here = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+        if (here != cached) rebuild(here);
+        tick(s, bot.step(s), collision);
+        const float px = s.wanderer.pos.x, pz = s.wanderer.pos.z;
+        if (px < minx) minx = px;
+        if (px > maxx) maxx = px;
+        if (pz < minz) minz = pz;
+        if (pz > maxz) maxz = pz;
+        if (s.tick - window_tick >= 1200) {  // 10 s window
+            if ((maxx - minx) < 0.5f && (maxz - minz) < 0.5f) ++stuck_events;
+            minx = maxx = px;
+            minz = maxz = pz;
+            window_tick = s.tick;
+        }
+    }
+
+    std::printf("walkbot_seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("distance_m: %.1f\n", static_cast<double>(s.odometer));
+    std::printf("ticks: %llu\n", static_cast<unsigned long long>(s.tick));
+    std::printf("stuck_events: %llu\n", static_cast<unsigned long long>(stuck_events));
+    std::printf("final_hash: %016llx\n", static_cast<unsigned long long>(world_state_hash(s)));
+    return (s.odometer >= target_m && stuck_events == 0) ? 0 : 4;
+}
+
+// ----- M4 top-down debug render of a 3x3 chunk block -> PNG -------------------
+int run_topdown(const Options& o) {
+    Renderer renderer;
+    if (!renderer.init_headless(o.width, o.height)) {
+        std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1;
+    }
+    std::vector<contracts::ChunkData> chunks;
+    chunks.reserve(9);
+    for (int64_t cz = 0; cz < 3; ++cz) {
+        for (int64_t cx = 0; cx < 3; ++cx) {
+            chunks.push_back(contracts::GenerateChunk(o.seed, contracts::ChunkKey{0, cx, cz}));
+        }
+    }
+    std::vector<contracts::ResidentChunk> resident;
+    resident.reserve(chunks.size());
+    for (const auto& cd : chunks) {
+        contracts::ResidentChunk rc;
+        rc.key = cd.key;
+        rc.vertices = cd.vertices.data();
+        rc.vertex_count = static_cast<uint32_t>(cd.vertices.size());
+        resident.push_back(rc);
+    }
+    const float c = 1.5f * contracts::kChunkSize;  // centre of the 3x3 block (48 m)
+    if (!renderer.render_topdown(resident, c, c, c)) {
+        std::fprintf(stderr, "topdown: %s\n", renderer.last_error().c_str()); return 1;
+    }
+    if (!o.out.empty()) {
+        FrameImage img;
+        if (!renderer.readback(img)) { std::fprintf(stderr, "readback: %s\n", renderer.last_error().c_str()); return 1; }
+        if (stbi_write_png(o.out.c_str(), static_cast<int>(img.width), static_cast<int>(img.height),
+                           4, img.rgba.data(), static_cast<int>(img.width) * 4) == 0) {
+            std::fprintf(stderr, "PNG write failed: %s\n", o.out.c_str()); return 1;
+        }
+    }
+    const uint32_t dbg = renderer.debug_error_count();
+    std::printf("debug_error_count: %u\n", dbg);
+    return dbg == 0 ? 0 : 3;
+}
+
 }  // namespace
 
 // Tighten the OS timer/wait granularity (default ~15.6 ms) to 1 ms for the
@@ -388,6 +527,8 @@ int main(int argc, char** argv) {
 
     if (o.version) { std::printf("%s\n", br::core::core_version()); return 0; }
     if (o.sim)     return run_sim(o);
+    if (o.walkbot) return run_walkbot(o);
+    if (o.topdown) return run_topdown(o);
     if (o.stream)  return run_stream(o);
     if (o.scene)   return run_scene(o);
     if (o.headless || o.windowed) return run_clear(o);

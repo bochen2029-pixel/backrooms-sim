@@ -376,6 +376,82 @@ function Invoke-GateM3 {
     }
 }
 
+function Get-AppHash {
+    param([string]$Text)
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line -match 'final_hash:\s*([0-9a-fA-F]+)') { return $matches[1] }
+    }
+    throw "final_hash not found in app output"
+}
+
+function Invoke-GateM4 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+
+    $bin = Get-BinDir
+    $tmp = Join-Path $RepoRoot 'runs\gate-m4'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $hashdiff = Join-Path $bin 'hashdiff.exe'
+
+    Assert-Gate 'ctest green (connectivity 10k, geometry 10k, doorways, +regression)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    Assert-Gate 'core compiles with zero graphics includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+
+    Assert-Gate 'walk-bot: 1 km, zero stuck events (5 seeds), deterministic' {
+        $h1 = $null
+        for ($seed = 1; $seed -le 5; ++$seed) {
+            $r = Invoke-AppCapture @('--walkbot', '--km', '1', '--seed', "$seed")
+            if ($r.Exit -ne 0) { throw "seed $seed failed (exit $($r.Exit): short of 1 km or stuck)" }
+            if ((Get-Metric $r.Out 'stuck_events') -ne 0) { throw "seed $seed had stuck events" }
+            if ($seed -eq 1) { $h1 = Get-AppHash $r.Out }
+        }
+        $r2 = Invoke-AppCapture @('--walkbot', '--km', '1', '--seed', '1')
+        if ((Get-AppHash $r2.Out) -ne $h1) { throw "walk-bot WorldState hash not reproducible across runs" }
+        Write-Note "walk-bot 5/5 seeds reached 1 km, 0 stuck; determinism hash $h1"
+    }
+
+    Assert-Gate 'top-down 3x3 golden matches per seed, bit-identical x3, zero debug' {
+        foreach ($seed in 1, 7) {
+            $golden = Join-Path $RepoRoot "goldens\m4\topdown_seed$($seed).png"
+            if (-not (Test-Path $golden)) { throw "missing golden seed $seed" }
+            $hashes = @()
+            for ($i = 1; $i -le 3; ++$i) {
+                $png = Join-Path $tmp "td_$($seed)_$($i).png"
+                $r = Invoke-AppCapture @('--topdown', '--out', $png, '--width', '512', '--height', '512', '--seed', "$seed")
+                if ($r.Exit -ne 0) { throw "topdown seed $seed exited $($r.Exit)" }
+                if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "topdown seed $seed had debug-layer messages" }
+                $hashes += (& $hashdiff hash $png | Select-Object -Last 1)
+            }
+            if (@($hashes | Select-Object -Unique).Count -ne 1) { throw "topdown seed $seed not bit-identical across runs" }
+            $d = (& $hashdiff diff (Join-Path $tmp "td_$($seed)_1.png") $golden | Select-Object -Last 1)
+            if ([double]$d -ne 0.0) { throw "topdown seed $seed differs from golden (diff=$d)" }
+        }
+    }
+
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -386,6 +462,7 @@ try {
         'M1'    { Invoke-GateM1 -SoakSeconds $SoakSeconds -WindowSeconds $WindowSeconds }
         'M2'    { Invoke-GateM2 }
         'M3'    { Invoke-GateM3 -StreamSoakSeconds $StreamSoakSeconds }
+        'M4'    { Invoke-GateM4 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

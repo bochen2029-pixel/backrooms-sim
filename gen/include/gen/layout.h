@@ -1,0 +1,40 @@
+#pragma once
+//
+// gen/layout.h — the Level-0 chunk layout solver (M4).
+//
+// A chunk is a G×G grid of cells. `generate_layout` builds a provably-connected
+// maze: a spanning tree over the cells (recursive backtracker) plus extra carved
+// openings for loops/rooms, then a doorway on each of the 4 chunk edges whose
+// position comes from a SHARED-edge hash so adjacent chunks agree without
+// communication (INV-2/INV-3). `validate_connectivity` flood-fills the cell grid.
+//
+#include <cstdint>
+
+#include "contracts/chunk_gen_v1.h"
+
+namespace br::gen {
+
+constexpr int kCellsPerChunk = 8;                                    // G
+constexpr float kCellSize = contracts::kChunkSize / kCellsPerChunk;  // 4 m
+
+// Wall presence on the cell-grid lines. A wall between two cells blocks passage.
+struct ChunkLayout {
+    // Vertical walls: vwall[xi][j] sits on x-line xi (0..G) for z-cell j (0..G-1).
+    bool vwall[kCellsPerChunk + 1][kCellsPerChunk];
+    // Horizontal walls: hwall[i][zj] sits on z-line zj (0..G) for x-cell i (0..G-1).
+    bool hwall[kCellsPerChunk][kCellsPerChunk + 1];
+    // Doorway cell index (0..G-1) on each chunk edge (a gap in the perimeter wall).
+    int door_left, door_right, door_bottom, door_top;
+};
+
+// Pure/total/deterministic. Doorways agree across shared edges (see edge hashes).
+ChunkLayout generate_layout(uint64_t world_seed, contracts::ChunkKey key);
+
+// Flood-fill: returns true iff every cell is reachable from cell (0,0). A correct
+// layout is connected by construction; the validator guards against regressions.
+bool validate_connectivity(const ChunkLayout& layout);
+
+// Master per-chunk RNG seed (shared by layout + chunk geometry tint).
+uint64_t chunk_seed(uint64_t world_seed, contracts::ChunkKey key);
+
+}  // namespace br::gen

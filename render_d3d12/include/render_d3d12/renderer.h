@@ -61,6 +61,11 @@ public:
                        const std::vector<contracts::ResidentChunk>& resident,
                        uint32_t upload_budget, uint32_t* out_drawn);
 
+    // Headless: orthographic top-down render of the given chunks over the world
+    // region [cx-half, cx+half] x [cz-half, cz+half] (a debug-render golden).
+    bool render_topdown(const std::vector<contracts::ResidentChunk>& chunks,
+                        float cx, float cz, float half);
+
     // Headless only: copy the rendered target back to CPU as tight RGBA.
     bool readback(FrameImage& out);
 

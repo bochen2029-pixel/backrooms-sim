@@ -13,6 +13,10 @@ errors to process exit codes for the gate scripts (ARCHITECTURE.md §7).
   per-tick WorldState hash log.
 - `--stream [--frames N|--seconds S] [--csv f] [--radius R] [--workers W]` (M3) —
   infinite chunk-streaming walk on open ground; frame-time telemetry CSV.
+- `--walkbot --km K [--seed S]` (M4) — wander-bot through the generated maze
+  (collides with walls), reports distance / stuck events / determinism hash.
+- `--topdown --out p.png [--seed S]` (M4) — orthographic top-down debug render
+  of a 3×3 chunk block.
 
 **Planned.** `config.toml` + flag/config mirroring (M12), noclip intro + photo
 mode (M12), `--no-director` (M11).

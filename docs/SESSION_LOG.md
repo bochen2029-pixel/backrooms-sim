@@ -4,6 +4,53 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 5 — M4: Level-0 Generator — Rooms, Doorways, Connectivity  ✅ gate green (`m4-green`)
+
+**Done.**
+- **gen maze:** `gen/layout.h/.cpp` — G=8 cell grid, **spanning-tree** maze
+  (recursive backtracker, provably connected) + ~25% extra carves + 4 edge
+  doorways from a **shared-edge hash** (neighbours agree: a vertical edge cx-1|cx
+  keys on cx). `validate_connectivity` (flood-fill). `chunk.cpp` rewritten:
+  `GenerateChunk` → floor + wall geometry (render verts + collision `BoxInstance`s);
+  `ValidateChunkGeometry` (no degenerate/floating/fat/stacked walls).
+  Shared `contracts/geometry_v1.h` (`BoxInstance`).
+- **collision:** app gathers the 3×3 chunk walls around the wanderer (regen on
+  chunk crossing, deterministic) + ground floor → `core::tick` (3-arg). `core`
+  stays gen-free.
+- **walk-bot v1** (`--walkbot`): seeded wander + escape-on-block sweep; stuck =
+  position bounding-box extent ~0 over 10 s (motionless), not net displacement.
+- **top-down** (`--topdown`): `render_topdown` ortho render of a 3×3 block.
+- **Gate `Invoke-GateM4`:** ctest (incl **10,000-chunk connectivity** zero-sealed
+  + **10,000-chunk geometry** validators, doorway agreement); INV-5 grep;
+  **walk-bot 1 km × 5 seeds, 0 stuck, deterministic**; **top-down golden** per
+  seed (1,7) bit-identical ×3, zero debug. M0–M3 regression green (M3 with maze
+  geometry: p99/median 1.28×, memory flat). ADR-022/023/024.
+- Goldens `goldens/m4/topdown_seed{1,7}.png`.
+
+**Verified numbers.** 10k chunks each connected + geometry-valid; walk-bot seed 1
+→ 1000 m in 38,738 ticks, hash `a1cfc90ef154da01` (reproducible).
+
+**Pending.** M5 — procedural materials + raster lighting v1: startup-generated
+textures (yellow wallpaper, carpet, ceiling tiles, emissive fluorescents),
+clustered/forward fluorescent grid lighting + seeded deterministic flicker (RNG
+in sim core); luminance-histogram gate; ≥120 FPS @1440p.
+
+**Gotchas / notes for the next session.**
+- **Catch2 test names must be ASCII** — an em-dash (—) in a TEST_CASE name made
+  `catch_discover_tests` register a name that ctest's re-invocation couldn't
+  match (Unicode arg round-trip), so the test "failed" only under ctest, not by
+  tag. Burned ~20 min; keep names ASCII.
+- Geometry is **world-coordinate**; far-chunk (>~16M m) float noise is real —
+  the geometry validator thresholds sit between 0.3 m walls and 4 m cells to
+  tolerate it. Camera-relative rendering still deferred.
+- Collision is per-chunk AABB walls gathered by the **app** (not core) — keeps
+  the DAG clean. The walk-bot regenerates the 3×3 neighbourhood synchronously
+  (no streaming dependency) for determinism.
+- M4 raised chunk vert count (~3000) → renderer chunk VB pool capacity bumped to
+  6144 verts/slot; M3 median frame rose to ~4.4 ms (still p99/median ≈ 1.3×).
+
+---
+
 ## Session 4 — M3: Infinite Chunk Streaming, Placeholder Geometry  ✅ gate green (`m3-green`)
 
 **Done.**
