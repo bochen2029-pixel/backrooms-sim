@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "contracts/world_view_v1.h"
+
 namespace br::render_d3d12 {
 
 // Tightly-packed 8-bit RGBA frame read back from the GPU (headless path).
@@ -45,6 +47,10 @@ public:
     // Record + submit one clear-color frame; present if windowed. Blocks on the
     // frame fence so the GPU is idle on return.
     bool render_clear_frame();
+
+    // Headless: render the test-room geometry from the view's camera (lit), with
+    // depth, into the offscreen target. Deterministic for a fixed view/GPU.
+    bool render_world_view(const contracts::WorldView& view);
 
     // Headless only: copy the rendered target back to CPU as tight RGBA.
     bool readback(FrameImage& out);

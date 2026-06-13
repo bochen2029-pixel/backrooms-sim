@@ -5,7 +5,9 @@ include(Catch)
 # --- Real unit suite (must always be green) ---
 add_executable(unit_tests
   unit/test_rng.cpp
-  unit/test_smoke.cpp)
+  unit/test_smoke.cpp
+  unit/test_collision.cpp
+  unit/test_sim.cpp)
 target_link_libraries(unit_tests PRIVATE
   backrooms_flags
   core gen stream telemetry audio render_d3d12 render_dxr director

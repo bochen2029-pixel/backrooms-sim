@@ -4,6 +4,55 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 3 — M2: Sim Core — Camera, Input, Collision, Replay  ✅ gate green (`m2-green`)
+
+**Done.**
+- **Contracts:** `contracts/world_view_v1.h` (`CameraPose`, `BoxInstance`,
+  `WorldView`) + `contracts/replay_v1.h` (`InputCommand`, `ReplayHeader`,
+  magic/version), shared via a header-only `contracts` INTERFACE target.
+- **`core` sim:** `math.h`/`aabb.h` (Vec3 + overlap), `world.h/.cpp` —
+  `WorldState` (wanderer + owned `Pcg64` + tick + odometer), fixed **120 Hz tick**,
+  first-person walk camera, **capsule-vs-AABB collision** (AABB proxy, per-axis
+  swept + substepped → no penetration at any speed, sliding preserves tangential
+  velocity, no floor tunneling), gravity/jump, hardcoded **test room** (single
+  source of truth for sim + render), `world_state_hash`, `wanderer_camera`.
+  `replay.h/.cpp` — record/playback of input streams (replay_v1). Zero graphics
+  includes (INV-5 grep gate).
+- **Renderer:** `render_world_view` (headless) — depth buffer, root-constant MVP,
+  runtime-compiled (D3DCompile) PSO + HLSL, draws the lit, depth-tested test room
+  from a `WorldView`. row-major LH view/proj math.
+- **app:** `--scene` (room → PNG from a fixed pose), `--sim --ticks N
+  --seed S --record/--replay f --hashlog f` (drive sim, per-tick hash log). M1
+  `--headless`/`--window` clear paths intact.
+- **Unit tests:** collision (3 gates), per-tick hash determinism, replay
+  round-trip + reproduction + bad-header rejection. (19 ctest cases, all green.)
+- **Gate `Invoke-GateM2`:** clean build (0 warnings); full ctest; INV-5 grep;
+  **cross-process replay** (record then 2 replays → bit-identical 3000-line
+  per-tick hash logs); **room golden** bit-identical ×3 + matches committed
+  golden, zero D3D12 debug-layer msgs. `gate.ps1 -Milestone M2` exits 0.
+- Golden `goldens/m2/room_640x360.png` (hash `38350c25c2ae2f7d`). ADR-016
+  (collision model), ADR-017 (contracts), ADR-018 (golden); reconciled into
+  ARCHITECTURE.md §8 + MODULE.md files. **M0 + M1 regression sweep green.**
+
+**Verified numbers.** Seed 777 / 3000 ticks → final hash `0e6105f7c33e525b`,
+74.9 m walked, identical across record + 2 replays + 2 separate processes.
+
+**Pending.** M3 — infinite chunk streaming: `GenerateChunk(seed, cx, cz)` pure
+function, load/unload ring around the wanderer, background-thread generation +
+main-thread GPU upload, placeholder numbered-grid geometry, frame-time telemetry
+CSV. (Replaces the single hardcoded room with streamed chunks.)
+
+**Gotchas / notes for the next session.**
+- `contracts::` is `br::contracts`; in non-`br::core` TUs use a namespace alias
+  (`namespace contracts = br::contracts;`) — a bare `contracts::` won't resolve.
+- Collision is an **AABB proxy** for the capsule (ADR-016) — correct for the
+  axis-aligned world; square corners, not rounded. Substep cap is 256 @ 0.05 m.
+- The room golden depends on the camera pose, geometry, shading, and projection;
+  changing any is a `goldgen` update + ADR (INV-8).
+- `--scene` is headless-only; the determinism gates run the same binary/GPU.
+
+---
+
 ## Session 2 — M1: Window, D3D12 Device, Headless Mode  ✅ gate green (`m1-green`)
 
 **Done.**

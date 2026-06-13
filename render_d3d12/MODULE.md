@@ -14,7 +14,12 @@ renderer (INV-6).
   debug-layer/DRED state; `process_private_bytes()` feeds the memory soak. No
   D3D12/DXGI/`<windows.h>` types leak through the header (INV-5 stays intact).
 
-**Links (M1):** `d3d12 dxgi dxguid Psapi` (PRIVATE — implementation detail).
+- `render_world_view` (M2) — headless: draws the test-room geometry from a
+  `contracts::WorldView` camera, depth-tested and lit (root-constant MVP + a
+  fixed light), via a runtime-compiled (D3DCompile) PSO. Single source of room
+  geometry comes from `core::test_room`.
+
+**Links:** `d3d12 dxgi dxguid d3dcompiler Psapi` (PRIVATE — implementation detail).
 
 **Planned.** Procedural materials + lighting v1 (M5), VHS post + HUD (M8),
 real geometry from streamed chunks (M3+).

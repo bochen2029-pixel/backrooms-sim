@@ -222,6 +222,78 @@ function Invoke-GateM1 {
     }
 }
 
+function Invoke-GateM2 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+
+    $bin = Get-BinDir
+    $tmp = Join-Path $RepoRoot 'runs\gate-m2'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $hashdiff = Join-Path $bin 'hashdiff.exe'
+    $golden = Join-Path $RepoRoot 'goldens\m2\room_640x360.png'
+
+    Assert-Gate 'ctest suite green (collision, determinism, replay, regression)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    Assert-Gate 'core compiles with zero graphics includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+
+    Assert-Gate 'cross-process replay: per-tick state hashes bit-identical' {
+        $rep = Join-Path $tmp 'in.replay'
+        $h1 = Join-Path $tmp 'h1.txt'
+        $h2 = Join-Path $tmp 'h2.txt'
+        $h3 = Join-Path $tmp 'h3.txt'
+        $r = Invoke-AppCapture @('--sim', '--seed', '4242', '--ticks', '3000', '--record', $rep, '--hashlog', $h1)
+        if ($r.Exit -ne 0) { throw "record run exited $($r.Exit)" }
+        $r = Invoke-AppCapture @('--sim', '--replay', $rep, '--hashlog', $h2)
+        if ($r.Exit -ne 0) { throw "replay run 1 exited $($r.Exit)" }
+        $r = Invoke-AppCapture @('--sim', '--replay', $rep, '--hashlog', $h3)
+        if ($r.Exit -ne 0) { throw "replay run 2 exited $($r.Exit)" }
+        $f1 = (Get-FileHash $h1).Hash
+        $f2 = (Get-FileHash $h2).Hash
+        $f3 = (Get-FileHash $h3).Hash
+        if ($f1 -ne $f2 -or $f2 -ne $f3) { throw "per-tick hash logs differ across runs" }
+        $lines = (Get-Content $h1 | Measure-Object -Line).Lines
+        if ($lines -lt 3000) { throw "expected >=3000 hash lines, got $lines" }
+    }
+
+    Assert-Gate 'room golden bit-identical x3, matches committed golden, zero debug msgs' {
+        if (-not (Test-Path $golden)) { throw "missing golden $golden (capture via goldgen)" }
+        $hashes = @()
+        for ($i = 1; $i -le 3; $i++) {
+            $png = Join-Path $tmp "room$i.png"
+            $r = Invoke-AppCapture @('--scene', '--out', $png, '--width', '640', '--height', '360')
+            if ($r.Exit -ne 0) { throw "scene run $i exited $($r.Exit)" }
+            if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "scene run $i had D3D12 debug-layer messages" }
+            $hashes += (& $hashdiff hash $png | Select-Object -Last 1)
+        }
+        if (@($hashes | Select-Object -Unique).Count -ne 1) { throw "room render not bit-identical: $($hashes -join ', ')" }
+        $d = (& $hashdiff diff (Join-Path $tmp 'room1.png') $golden | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "room render differs from golden (diff=$d)" }
+    }
+
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -230,6 +302,7 @@ try {
     switch ($normalized) {
         'M0'    { Invoke-GateM0 }
         'M1'    { Invoke-GateM1 -SoakSeconds $SoakSeconds -WindowSeconds $WindowSeconds }
+        'M2'    { Invoke-GateM2 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

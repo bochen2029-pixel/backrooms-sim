@@ -50,6 +50,14 @@ if(MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# contracts — boundary headers (ARCHITECTURE.md §5), included as
+# "contracts/<name>.h". Header-only INTERFACE target linked by both the producer
+# and the consumer of each boundary.
+# ---------------------------------------------------------------------------
+add_library(contracts INTERFACE)
+target_include_directories(contracts INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# ---------------------------------------------------------------------------
 # backrooms_module : declare a stub static-library module with the right flags
 # and dependency arrows. SIM => compile /fp:strict (deterministic modules).
 # Each module owns its include/<name>/<name>.h and src/<name>.cpp at M0.

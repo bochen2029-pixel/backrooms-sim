@@ -8,11 +8,14 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <d3d12sdklayers.h>
+#include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <psapi.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 
@@ -78,6 +81,16 @@ struct Renderer::Impl {
     // Windowed swapchain.
     ComPtr<IDXGISwapChain3> swapchain;
     ComPtr<ID3D12Resource> backbuffers[kBackBufferCount];
+
+    // Depth + scene pipeline (M2: draw the test room).
+    ComPtr<ID3D12DescriptorHeap> dsvHeap;
+    ComPtr<ID3D12Resource> depth;
+    ComPtr<ID3D12RootSignature> sceneRoot;
+    ComPtr<ID3D12PipelineState> scenePso;
+    ComPtr<ID3D12Resource> vb;
+    D3D12_VERTEX_BUFFER_VIEW vbView = {};
+    UINT vertexCount = 0;
+    bool sceneReady = false;
 
     HANDLE fenceEvent = nullptr;
     UINT64 fenceValue = 0;
@@ -209,6 +222,44 @@ bool create_device_core(Renderer::Impl& d, std::string& err) {
     return true;
 }
 
+// Depth-stencil target + DSV (D32_FLOAT), sized to the render dimensions.
+bool create_depth(Renderer::Impl& d, std::string& err) {
+    D3D12_DESCRIPTOR_HEAP_DESC dh = {};
+    dh.NumDescriptors = 1;
+    dh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    dh.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    if (FAILED(d.device->CreateDescriptorHeap(&dh, IID_PPV_ARGS(&d.dsvHeap)))) {
+        err = "CreateDescriptorHeap(DSV) failed";
+        return false;
+    }
+    D3D12_RESOURCE_DESC dd = {};
+    dd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    dd.Width = d.width;
+    dd.Height = d.height;
+    dd.DepthOrArraySize = 1;
+    dd.MipLevels = 1;
+    dd.Format = DXGI_FORMAT_D32_FLOAT;
+    dd.SampleDesc.Count = 1;
+    dd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    dd.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    D3D12_CLEAR_VALUE cv = {};
+    cv.Format = DXGI_FORMAT_D32_FLOAT;
+    cv.DepthStencil.Depth = 1.0f;
+    const D3D12_HEAP_PROPERTIES def = heap_props(D3D12_HEAP_TYPE_DEFAULT);
+    if (FAILED(d.device->CreateCommittedResource(
+            &def, D3D12_HEAP_FLAG_NONE, &dd, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+            &cv, IID_PPV_ARGS(&d.depth)))) {
+        err = "CreateCommittedResource(depth) failed";
+        return false;
+    }
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsv = {};
+    dsv.Format = DXGI_FORMAT_D32_FLOAT;
+    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    d.device->CreateDepthStencilView(d.depth.Get(), &dsv,
+                                     d.dsvHeap->GetCPUDescriptorHandleForHeapStart());
+    return true;
+}
+
 }  // namespace
 
 bool Renderer::init_headless(uint32_t width, uint32_t height) {
@@ -266,6 +317,7 @@ bool Renderer::init_headless(uint32_t width, uint32_t height) {
         last_error_ = "CreateCommittedResource(readback) failed";
         return false;
     }
+    if (!create_depth(d, last_error_)) return false;
     return true;
 }
 
@@ -459,6 +511,299 @@ uint64_t Renderer::process_private_bytes() {
         return static_cast<uint64_t>(pmc.PrivateUsage);
     }
     return 0;
+}
+
+// ===========================================================================
+// M2 scene rendering: lit, depth-tested test-room geometry.
+// ===========================================================================
+namespace {
+
+const char* kSceneHlsl = R"(
+cbuffer Constants : register(b0) {
+    row_major float4x4 uMVP;
+    float3 uLightDir;
+    float  uPad;
+};
+struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; };
+struct VSOut { float4 clip : SV_POSITION; float3 nrm : NORMAL; };
+VSOut VSMain(VSIn i) {
+    VSOut o;
+    o.clip = mul(float4(i.pos, 1.0), uMVP);
+    o.nrm = i.nrm;
+    return o;
+}
+float4 PSMain(VSOut i) : SV_TARGET {
+    float3 n = normalize(i.nrm);
+    float ndl = saturate(dot(n, -normalize(uLightDir)));
+    float3 base = float3(0.85, 0.80, 0.55);   // backrooms wallpaper tone
+    float3 col = base * (0.25 + 0.75 * ndl);
+    return float4(col, 1.0);
+}
+)";
+
+struct Mat4 { float m[16]; };  // row-major; clip = v * M
+
+Mat4 mat_mul(const Mat4& a, const Mat4& b) {
+    Mat4 r{};
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            float s = 0.0f;
+            for (int k = 0; k < 4; ++k) s += a.m[i * 4 + k] * b.m[k * 4 + j];
+            r.m[i * 4 + j] = s;
+        }
+    }
+    return r;
+}
+
+Mat4 view_lh(const float eye[3], float yaw, float pitch) {
+    const float cp = std::cos(pitch), sp = std::sin(pitch);
+    float z[3] = { std::sin(yaw) * cp, sp, std::cos(yaw) * cp };
+    const float zl = std::sqrt(z[0]*z[0] + z[1]*z[1] + z[2]*z[2]);
+    for (float& c : z) c /= zl;
+    // x = normalize(cross(up=(0,1,0), z)) = normalize(z.z, 0, -z.x)
+    float x[3] = { z[2], 0.0f, -z[0] };
+    const float xl = std::sqrt(x[0]*x[0] + x[2]*x[2]);
+    x[0] /= xl; x[2] /= xl;
+    // y = cross(z, x)
+    float y[3] = { z[1]*x[2] - z[2]*x[1], z[2]*x[0] - z[0]*x[2], z[0]*x[1] - z[1]*x[0] };
+    auto d3 = [](const float* a, const float* b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; };
+    Mat4 v{};
+    v.m[0]=x[0]; v.m[1]=y[0]; v.m[2]=z[0]; v.m[3]=0.0f;
+    v.m[4]=x[1]; v.m[5]=y[1]; v.m[6]=z[1]; v.m[7]=0.0f;
+    v.m[8]=x[2]; v.m[9]=y[2]; v.m[10]=z[2]; v.m[11]=0.0f;
+    v.m[12]=-d3(x,eye); v.m[13]=-d3(y,eye); v.m[14]=-d3(z,eye); v.m[15]=1.0f;
+    return v;
+}
+
+Mat4 proj_lh(float fov_y, float aspect, float n, float f) {
+    const float ys = 1.0f / std::tan(fov_y * 0.5f);
+    const float xs = ys / aspect;
+    const float q = f / (f - n);
+    Mat4 p{};
+    p.m[0]=xs; p.m[5]=ys; p.m[10]=q; p.m[11]=1.0f; p.m[14]=-n*q*1.0f; p.m[15]=0.0f;
+    return p;
+}
+
+void push_quad(std::vector<float>& v, const float a[3], const float b[3],
+               const float c[3], const float dd[3], const float nrm[3]) {
+    const float* tri[6] = { a, b, c, a, c, dd };
+    for (const float* p : tri) {
+        v.push_back(p[0]); v.push_back(p[1]); v.push_back(p[2]);
+        v.push_back(nrm[0]); v.push_back(nrm[1]); v.push_back(nrm[2]);
+    }
+}
+
+void push_box(std::vector<float>& v, const contracts::BoxInstance& box) {
+    const float x0=box.mn[0], y0=box.mn[1], z0=box.mn[2];
+    const float x1=box.mx[0], y1=box.mx[1], z1=box.mx[2];
+    const float c000[3]={x0,y0,z0}, c001[3]={x0,y0,z1}, c010[3]={x0,y1,z0}, c011[3]={x0,y1,z1};
+    const float c100[3]={x1,y0,z0}, c101[3]={x1,y0,z1}, c110[3]={x1,y1,z0}, c111[3]={x1,y1,z1};
+    const float nxn[3]={-1,0,0}, nxp[3]={1,0,0}, nyn[3]={0,-1,0}, nyp[3]={0,1,0}, nzn[3]={0,0,-1}, nzp[3]={0,0,1};
+    push_quad(v, c000, c001, c011, c010, nxn);  // -X
+    push_quad(v, c100, c110, c111, c101, nxp);  // +X
+    push_quad(v, c000, c100, c101, c001, nyn);  // -Y
+    push_quad(v, c010, c011, c111, c110, nyp);  // +Y
+    push_quad(v, c000, c010, c110, c100, nzn);  // -Z
+    push_quad(v, c001, c101, c111, c011, nzp);  // +Z
+}
+
+bool compile_shader(const char* entry, const char* target, ComPtr<ID3DBlob>& out, std::string& err) {
+    ComPtr<ID3DBlob> errBlob;
+    const HRESULT hr = D3DCompile(kSceneHlsl, std::strlen(kSceneHlsl), "scene", nullptr,
+                                  nullptr, entry, target,
+                                  D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &out, &errBlob);
+    if (FAILED(hr)) {
+        err = "shader compile failed";
+        if (errBlob) err += std::string(": ") + static_cast<const char*>(errBlob->GetBufferPointer());
+        return false;
+    }
+    return true;
+}
+
+bool ensure_scene_pipeline(Renderer::Impl& d, std::string& err) {
+    if (d.sceneReady) return true;
+
+    D3D12_ROOT_PARAMETER param = {};
+    param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    param.Constants.ShaderRegister = 0;
+    param.Constants.RegisterSpace = 0;
+    param.Constants.Num32BitValues = 20;  // 16 (mvp) + 3 (light) + 1 (pad)
+    param.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_ROOT_SIGNATURE_DESC rs = {};
+    rs.NumParameters = 1;
+    rs.pParameters = &param;
+    rs.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ComPtr<ID3DBlob> sig, sigErr;
+    if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &sigErr))) {
+        err = "SerializeRootSignature failed";
+        return false;
+    }
+    if (FAILED(d.device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                                             IID_PPV_ARGS(&d.sceneRoot)))) {
+        err = "CreateRootSignature failed";
+        return false;
+    }
+
+    ComPtr<ID3DBlob> vs, ps;
+    if (!compile_shader("VSMain", "vs_5_0", vs, err)) return false;
+    if (!compile_shader("PSMain", "ps_5_0", ps, err)) return false;
+
+    D3D12_INPUT_ELEMENT_DESC layout[2] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    };
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
+    pso.pRootSignature = d.sceneRoot.Get();
+    pso.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
+    pso.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+    pso.SampleMask = UINT_MAX;
+    pso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+    pso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
+    pso.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    pso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    pso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+    pso.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    pso.BlendState.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_NOOP;
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.DepthClipEnable = TRUE;
+    pso.DepthStencilState.DepthEnable = TRUE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    pso.DepthStencilState.StencilEnable = FALSE;
+    pso.InputLayout = { layout, 2 };
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = kFormat;
+    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    pso.SampleDesc.Count = 1;
+    if (FAILED(d.device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&d.scenePso)))) {
+        err = "CreateGraphicsPipelineState failed";
+        return false;
+    }
+    d.sceneReady = true;
+    return true;
+}
+
+bool build_vertex_buffer(Renderer::Impl& d, const contracts::WorldView& view, std::string& err) {
+    std::vector<float> verts;
+    for (const contracts::BoxInstance& b : view.boxes) push_box(verts, b);
+    if (verts.empty()) { err = "world view has no geometry"; return false; }
+
+    const size_t bytes = verts.size() * sizeof(float);
+    D3D12_RESOURCE_DESC bd = {};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width = bytes;
+    bd.Height = 1;
+    bd.DepthOrArraySize = 1;
+    bd.MipLevels = 1;
+    bd.Format = DXGI_FORMAT_UNKNOWN;
+    bd.SampleDesc.Count = 1;
+    bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    const D3D12_HEAP_PROPERTIES up = heap_props(D3D12_HEAP_TYPE_UPLOAD);
+    if (FAILED(d.device->CreateCommittedResource(
+            &up, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr, IID_PPV_ARGS(&d.vb)))) {
+        err = "CreateCommittedResource(VB) failed";
+        return false;
+    }
+    void* mapped = nullptr;
+    const D3D12_RANGE none = { 0, 0 };
+    if (FAILED(d.vb->Map(0, &none, &mapped))) { err = "VB Map failed"; return false; }
+    std::memcpy(mapped, verts.data(), bytes);
+    d.vb->Unmap(0, nullptr);
+
+    d.vbView.BufferLocation = d.vb->GetGPUVirtualAddress();
+    d.vbView.SizeInBytes = static_cast<UINT>(bytes);
+    d.vbView.StrideInBytes = 6 * sizeof(float);
+    d.vertexCount = static_cast<UINT>(verts.size() / 6);
+    return true;
+}
+
+}  // namespace
+
+bool Renderer::render_world_view(const contracts::WorldView& view) {
+    Impl& d = *impl_;
+    if (d.windowed || !d.rt) {
+        last_error_ = "render_world_view is headless-only (M2)";
+        return false;
+    }
+    if (!ensure_scene_pipeline(d, last_error_)) return false;
+    if (!build_vertex_buffer(d, view, last_error_)) return false;
+
+    // MVP from the camera; fixed light direction.
+    const auto& cam = view.camera;
+    const Mat4 mvp = mat_mul(view_lh(cam.pos, cam.yaw, cam.pitch),
+                             proj_lh(cam.fov_y, cam.aspect, 0.05f, 100.0f));
+    float constants[20];
+    std::memcpy(constants, mvp.m, sizeof(mvp.m));
+    float ld[3] = { -0.3f, -1.0f, -0.2f };
+    const float ll = std::sqrt(ld[0]*ld[0] + ld[1]*ld[1] + ld[2]*ld[2]);
+    constants[16] = ld[0]/ll; constants[17] = ld[1]/ll; constants[18] = ld[2]/ll;
+    constants[19] = 0.0f;
+
+    if (FAILED(d.alloc->Reset())) { last_error_ = "allocator reset failed"; return false; }
+    if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) {
+        last_error_ = "command list reset failed";
+        return false;
+    }
+
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = d.rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    const D3D12_CPU_DESCRIPTOR_HANDLE dsv = d.dsvHeap->GetCPUDescriptorHandleForHeapStart();
+    d.list->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+    d.list->ClearRenderTargetView(rtv, kClearFloat, 0, nullptr);
+    d.list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+    D3D12_VIEWPORT vp = { 0.0f, 0.0f, static_cast<float>(d.width), static_cast<float>(d.height), 0.0f, 1.0f };
+    D3D12_RECT sc = { 0, 0, static_cast<LONG>(d.width), static_cast<LONG>(d.height) };
+    d.list->RSSetViewports(1, &vp);
+    d.list->RSSetScissorRects(1, &sc);
+
+    d.list->SetGraphicsRootSignature(d.sceneRoot.Get());
+    d.list->SetPipelineState(d.scenePso.Get());
+    d.list->SetGraphicsRoot32BitConstants(0, 20, constants, 0);
+    d.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    d.list->IASetVertexBuffers(0, 1, &d.vbView);
+    d.list->DrawInstanced(d.vertexCount, 1, 0, 0);
+
+    // Offscreen target -> readback (same as the clear path).
+    const D3D12_RESOURCE_BARRIER toCopy = transition(
+        d.rt.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    d.list->ResourceBarrier(1, &toCopy);
+    D3D12_TEXTURE_COPY_LOCATION dst = {};
+    dst.pResource = d.readback.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = d.footprint;
+    D3D12_TEXTURE_COPY_LOCATION src = {};
+    src.pResource = d.rt.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+    d.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    const D3D12_RESOURCE_BARRIER back = transition(
+        d.rt.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    d.list->ResourceBarrier(1, &back);
+
+    if (FAILED(d.list->Close())) { last_error_ = "command list close failed"; return false; }
+    ID3D12CommandList* lists[] = { d.list.Get() };
+    d.queue->ExecuteCommandLists(1, lists);
+
+    const UINT64 v = ++d.fenceValue;
+    if (FAILED(d.queue->Signal(d.fence.Get(), v))) { last_error_ = "fence Signal failed"; return false; }
+    if (d.fence->GetCompletedValue() < v) {
+        if (FAILED(d.fence->SetEventOnCompletion(v, d.fenceEvent))) {
+            last_error_ = "SetEventOnCompletion failed";
+            return false;
+        }
+        if (WaitForSingleObject(d.fenceEvent, 5000) != WAIT_OBJECT_0) {
+            last_error_ = "fence wait timed out";
+            return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace br::render_d3d12

@@ -7,6 +7,6 @@ add_library(render_d3d12 STATIC
   src/renderer.cpp)
 target_include_directories(render_d3d12 PUBLIC include)
 target_link_libraries(render_d3d12
-  PUBLIC core stream
-  PRIVATE backrooms_flags d3d12 dxgi dxguid Psapi)
+  PUBLIC core stream contracts
+  PRIVATE backrooms_flags d3d12 dxgi dxguid d3dcompiler Psapi)
 add_library(backrooms::render_d3d12 ALIAS render_d3d12)

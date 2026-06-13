@@ -176,6 +176,9 @@ Convention: errors cross module boundaries as typed results, never exceptions; `
 | 013 | **Warnings-as-errors scoped to our code via `/external` flags** | `/WX` protects our code without third-party header noise |
 | 014 | **M1 memory soak measures process private bytes** | Release `/MT` CRT has no debug heap; private-bytes delta preserves the "flat memory" intent |
 | 015 | **M1 frame-0 golden (320×180 clear)** | First committed headless golden; bit-identical across runs (INV-8) |
+| 016 | **M2 collision: AABB-proxy capsule, per-axis swept + substepped** | Robust no-penetration/sliding/no-tunneling on axis-aligned geometry |
+| 017 | **M2 contracts world_view_v1 + replay_v1** | First boundary headers crossed; shared `contracts` INTERFACE target |
+| 018 | **M2 test-room golden (640×360, lit, depth)** | First geometry golden; deterministic across runs (INV-8) |
 
 ## 9. Non-Functional Requirements
 
