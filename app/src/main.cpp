@@ -38,6 +38,7 @@
 #include "audio/room_probe.h"
 #include "audio/wav.h"
 #include "audio/engine.h"
+#include "hud.h"
 
 namespace contracts = br::contracts;
 namespace audio = br::audio;
@@ -420,9 +421,25 @@ int run_shot(const Options& o) {
     }
     renderer.set_texture_seed(o.seed);
     // VHS post (M8): seeded by the world seed, time from the (fixed) tick so the
-    // golden is deterministic. HUD is composited in M8 p2.
+    // golden is deterministic. HUD composited when post is on.
     renderer.set_post(o.post, static_cast<uint32_t>(o.seed),
-                      static_cast<float>(o.ticks) / 120.0f, false);
+                      static_cast<float>(o.ticks) / 120.0f, o.post);
+    if (o.post) {
+        br::app::HudValues hv;
+        hv.sim_ticks = o.ticks;
+        hv.seed = o.seed;
+        hv.odometer_m = 0.0f;
+        const contracts::ChunkKey sc = contracts::chunk_key_at(0, 16.0f, 16.0f);
+        hv.chunk_x = sc.cx; hv.chunk_z = sc.cz;
+        hv.level = 0;
+        hv.fps = 60;
+        std::vector<uint8_t> hud;
+        br::app::build_hud_overlay(hud, o.width, o.height, hv);
+        if (!renderer.upload_hud_overlay(hud.data(), o.width, o.height)) {
+            std::fprintf(stderr, "hud: %s\n", renderer.last_error().c_str()); return 1;
+        }
+        std::printf("timestamp: %s\n", br::app::hud_timestamp(o.ticks).c_str());
+    }
 
     // Eye at the proven-open spawn cell; vary only orientation across poses.
     const float ex = 16.0f, ez = 16.0f;
