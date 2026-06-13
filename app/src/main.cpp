@@ -34,6 +34,7 @@
 #include "stream/stream_manager.h"
 #include "telemetry/csv.h"
 #include "render_d3d12/renderer.h"
+#include "render_dxr/dxr.h"
 #include "audio/synth.h"
 #include "audio/room_probe.h"
 #include "audio/wav.h"
@@ -51,7 +52,7 @@ struct Options {
     bool headless = false, windowed = false, scene = false, sim = false, stream = false;
     bool walkbot = false, topdown = false, version = false, shot = false;
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
-    bool biomeat = false, descend = false, post = false;
+    bool biomeat = false, descend = false, post = false, dxr_probe = false;
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
     uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0;
     uint64_t seed = 1u;
@@ -96,6 +97,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--biomeat") == 0) o.biomeat = true;
         else if (std::strcmp(a, "--descend") == 0) o.descend = true;
         else if (std::strcmp(a, "--post") == 0) o.post = true;
+        else if (std::strcmp(a, "--dxr-probe") == 0) o.dxr_probe = true;
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
         else if (std::strcmp(a, "--version") == 0) o.version = true;
         else if (std::strcmp(a, "--frames") == 0) { if (!u32(o.frames)) return false; }
@@ -879,6 +881,20 @@ int run_descend(const Options& o) {
     return (level_reached == -1 && conn && geom) ? 0 : 6;
 }
 
+// ----- M9 DXR capability probe: device tier + DXC shader compilation ----------
+int run_dxr_probe(const Options&) {
+    const br::render_dxr::DxrCaps c = br::render_dxr::probe_caps();
+    std::printf("adapter: %s\n", c.adapter.c_str());
+    std::printf("device5: %d\n", c.device5 ? 1 : 0);
+    std::printf("raytracing_tier: %d\n", c.raytracing_tier);
+    std::printf("dxc_available: %d\n", c.dxc_available ? 1 : 0);
+    std::printf("dxc_compiled: %d\n", c.dxc_compiled ? 1 : 0);
+    std::printf("detail: %s\n", c.detail.c_str());
+    const bool ready = c.device5 && c.raytracing_tier >= 10 && c.dxc_compiled;
+    std::printf("dxr_ready: %d\n", ready ? 1 : 0);
+    return ready ? 0 : 7;
+}
+
 // ----- M7 biome inspection: the biome at the --shot spawn chunk (0,0) ---------
 int run_biomeat(const Options& o) {
     const br::gen::Biome b = br::gen::biome_at(o.seed, 0, 0, 0);
@@ -908,6 +924,7 @@ int main(int argc, char** argv) {
     if (o.audiosoak)  return run_audiosoak(o);
     if (o.biomeat)    return run_biomeat(o);
     if (o.descend)    return run_descend(o);
+    if (o.dxr_probe)  return run_dxr_probe(o);
     if (o.sim)     return run_sim(o);
     if (o.walkbot) return run_walkbot(o);
     if (o.topdown) return run_topdown(o);

@@ -39,6 +39,8 @@ errors to process exit codes for the gate scripts (ARCHITECTURE.md §7).
 - `--post` (M8) — adds the VHS post stack + HUD/timestamp to `--shot` (composites
   a CPU-rasterised HUD; echoes `timestamp:` to telemetry) and to `--stream`
   (VHS-only, for the post-pass perf measure). `app/hud.*` is the 5×7 bitmap font.
+- `--dxr-probe` (M9) — print the DXR capability of the box (adapter, Device5,
+  raytracing tier, DXC availability + a trial compile); exit 0 iff DXR-ready.
 
 **Planned.** `config.toml` + flag/config mirroring (M12), noclip intro + photo
 mode (M12), `--no-director` (M11).
