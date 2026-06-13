@@ -44,7 +44,24 @@ if (Test-Path $logPath) {
         }
         Write-Output "--- newest SESSION_LOG entry (source of truth for current state) ---"
         for ($k = $start; $k -lt $end; $k++) { Write-Output $lines[$k] }
+
+        # Surface the resume cue (the 'Start at / Resume at' line) unmissably.
+        Write-Output ""
+        Write-Output "--- RESUME HIGHLIGHT ---"
+        Write-Output $lines[$start]
+        for ($k = $start; $k -lt $end; $k++) {
+            if ($lines[$k] -match '(?i)(start at|resume at|start here|remaining for|in progress)') {
+                Write-Output ("  > " + ($lines[$k] -replace '\*\*', ''))
+            }
+        }
     }
 }
+Write-Output ""
+Write-Output "--- POST-COMPACTION CHECKLIST (do this before writing code) ---"
+Write-Output "1) Build + test are the truth: run scripts/build.ps1 then ctest --test-dir build --output-on-failure; both MUST pass."
+Write-Output "2) Uncommitted work may have been lost in compaction (that is expected); the last commit is the real state. git status."
+Write-Output "3) If any prior milestone gate is red, revert to the last m<N>-green tag (Iron Rule 2) - do NOT debug forward."
+Write-Output "4) Resume the active phase from the breadcrumb above; commit GREEN increments often so the next compaction loses little."
+Write-Output "5) Recovery details: memory reference-recovery.md; project memory project-autonomous-build.md."
 Write-Output "=== END BRIEF : re-read docs/SESSION_LOG.md + PROGRESS.md before continuing ==="
 exit 0
