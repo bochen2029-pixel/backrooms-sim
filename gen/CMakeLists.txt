@@ -3,7 +3,8 @@
 add_library(gen STATIC
   src/gen.cpp
   src/chunk.cpp
-  src/layout.cpp)
+  src/layout.cpp
+  src/biome.cpp)
 target_include_directories(gen PUBLIC include)
 target_link_libraries(gen
   PUBLIC core contracts
