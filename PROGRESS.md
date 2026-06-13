@@ -14,9 +14,10 @@ Backup remote: **https://github.com/bochen2029-pixel/backrooms-sim** (private).
 | **M4** | Level-0 generator: maze, doorways, walk-bot | M4 | ✅ `m4-green` |
 | **M5** | Procedural materials + raster fluorescent lighting | M5 | ✅ `m5-green` |
 | **M6** | Procedural audio: synth, room-probe reverb, offline WAV | M6 | ✅ `m6-green` |
-| M7–M12 | biomes · VHS post · DXR · soak · Director · acceptance | — | ⬜ pending |
+| **M7** | Biomes, set-piece pillars, verticality (level −1 stairwell) | M7 | ✅ `m7-green` |
+| M8–M12 | VHS post · DXR · soak · Director · acceptance | — | ⬜ pending |
 
-**7 milestones green and pushed.** Each is verified by a machine-checkable gate
+**8 milestones green and pushed.** Each is verified by a machine-checkable gate
 (`scripts/gate.ps1 -Milestone M<N>` exits 0) and tagged; the remote is the backup.
 
 All numbers below are from real gate runs on the dev machine (RTX 4070 Ti SUPER,
@@ -108,6 +109,23 @@ audio thread never blocks the sim). Measured: 60 Hz at ~12000× the noise floor,
 64/64 footsteps aligned, 0 underruns over 60 s (and a 10-min soak), tick-time delta
 ~0.4%.
 
+### M7 — Biomes, Set Pieces, Verticality
+The world gains character. A pure, **low-frequency biome field** (`gen/biome.*`,
+coarse K=3 lattice + weighted CDF) paints five biomes in contiguous regions —
+**classic yellow, cubicle farm, pipe corridors, parking garage, poolrooms** —
+each with its own openness (carve ratio), tint, and pillar density, while every
+biome reuses the **same edge-doorway protocol** so cross-biome seams still connect
+(INV-3). Parking garages and pillar halls get free-standing **collidable columns**
+(the geometry validator learned to tell a pillar from a wall). A **stairwell set
+piece** descends to a dimmer **level −1** (levels stack in world Y; level 0 is
+unchanged), and `app --descend` walks the wanderer down it under gravity —
+deterministically. **Gate (all 4 exit criteria):** every biome passes the M4
+validators (10k connectivity + geometry each), the realized **distribution over
+102,400 chunks is within ±2 %** of the designed weights, the **stairwell descent**
+reaches level −1 with cross-level connectivity + a reproducible hash, and each
+biome has a **fixed-pose lit golden**. Two golden re-captures (tint, then pillars)
+via `goldgen` + ADRs 031–033.
+
 ---
 
 ## Architecture & invariants (the rules that keep it coherent)
@@ -124,13 +142,15 @@ audio thread never blocks the sim). Measured: 60 Hz at ~12000× the noise floor,
   (zero sealed boxes), INV-4 bounded memory (streaming ring), INV-5 core
   isolation (grep-gated), INV-7 headless verification, INV-8 golden integrity
   (only `goldgen` writes `/goldens`, always with a DECISIONS.md entry).
-- **Decisions:** ADR-001..030 in `docs/DECISIONS.md` (each summarised in
+- **Decisions:** ADR-001..033 in `docs/DECISIONS.md` (each summarised in
   ARCHITECTURE.md §8). Notable: vcpkg static triplet, `/fp:strict` core, the
   "test-the-gate" canary, the M3 hitch metric (p99 @1440p, NFR §9), the M4 maze +
   collision design, the M5 deterministic-flicker-in-`core` decision (ADR-026) and
   lit-render gate (ADR-027), the M6 deterministic-audio + no-miniaudio-yet
-  decision (ADR-028) and WAV-spectrum gate (ADR-030), far-chunk float-precision
-  deferral (camera-relative rendering still to come).
+  decision (ADR-028) and WAV-spectrum gate (ADR-030), the M7 low-frequency biome
+  field (ADR-031), pillars + validator extension (ADR-032), and stacked-level
+  verticality (ADR-033), far-chunk float-precision deferral (camera-relative
+  rendering still to come).
 
 ## Verification harness
 
@@ -149,7 +169,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gate.ps1 -Milestone 
 
 App modes built so far: `--headless` · `--window` · `--scene` · `--sim` ·
 `--stream` · `--walkbot` · `--topdown` · `--shot` · `--render-wav` · `--footsteps`
-· `--audiosoak` (see `app/MODULE.md`).
+· `--audiosoak` · `--biomeat` · `--descend` (see `app/MODULE.md`).
 
 ## Three real bugs caught (and fixed properly, not tuned around)
 
@@ -170,21 +190,21 @@ App modes built so far: `--headless` · `--window` · `--scene` · `--sim` ·
 
 ## What's next
 
-- **M7** biomes, set pieces, verticality: a low-frequency biome field over chunk
-  space (classic yellow, cubicle farm, parking garage, poolrooms, pipe corridors),
-  rare set pieces (pillar halls, flooded sections, stairwells to level −1 with
-  altered generator params), biome-blended seams.
-- **M8** VHS post + HUD · **M9** DXR path-traced mode · **M10** 8 h walk-bot soak ·
-  **M11** the Director (local LLM) · **M12** integration + 12 h acceptance.
+- **M8** VHS post-processing + HUD: a post stack (film grain, chromatic
+  aberration, slight barrel distortion, scanline/interlace flicker, timestamp
+  overlay, autofocus-hunt blur pulse, vignette), all config-toggleable; HUD with
+  odometer, world seed, chunk coords, perf overlay.
+- **M9** DXR path-traced mode · **M10** 8 h walk-bot soak · **M11** the Director
+  (local LLM) · **M12** integration + 12 h acceptance.
 
 ## How to continue (next session)
 
 1. Read `docs/ARCHITECTURE.md`, the latest `docs/SESSION_LOG.md` entry, and the
-   M7 section of `docs/MILESTONES.md`.
-2. Produce the M7 change manifest (biome field in `gen`, set-piece injection,
-   biome-aware materials/audio, seam blending, the M7 gate) before writing code.
-3. Run `gate.ps1 -Milestone M7` until exit 0, regression-sweep M0–M6, tag
-   `m7-green`, push, write the SESSION_LOG entry.
+   M8 section of `docs/MILESTONES.md`.
+2. Produce the M8 change manifest (post-process pass in `render_d3d12`, config
+   toggles, HUD, golden coverage of the post stack) before writing code.
+3. Run `gate.ps1 -Milestone M8` until exit 0, regression-sweep M0–M7, tag
+   `m8-green`, push, write the SESSION_LOG entry.
 
-_The repo is the memory. Last fully-green tag: `m6-green`. Never resume from a
+_The repo is the memory. Last fully-green tag: `m7-green`. Never resume from a
 broken state — revert to the last green tag if needed._
