@@ -4,6 +4,51 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 2 — M1: Window, D3D12 Device, Headless Mode  ✅ gate green (`m1-green`)
+
+**Done.**
+- `render_d3d12/renderer.h` + `renderer.cpp`: opaque-PIMPL `Renderer`. DXGI
+  factory, adapter selection (prefers the RTX 4070 Ti SUPER via
+  `EnumAdapterByGpuPreference`, WARP fallback), D3D12 device, **debug layer +
+  InfoQueue + DRED** (auto-breadcrumbs + page-fault), command queue/allocator/
+  list, fence sync. Headless: offscreen R8G8B8A8 RT (optimized clear value
+  matches the issued clear), copy → readback buffer with `GetCopyableFootprints`
+  row-pitch handling → tight CPU RGBA. Windowed: flip-discard swapchain, present.
+  No D3D12/DXGI/`<windows.h>` leaks through the header (INV-5 holds).
+- `app`: CLI `--headless/--window`, `--frames N | --seconds S`, `--out PNG`,
+  `--width/--height`, `--version`. Creates the Win32 window (no focus-steal),
+  writes PNG via the shared `br_stb`, reports `debug_error_count` + memory.
+- Gate `Invoke-GateM1`: clean build (zero warnings); ctest regression; **frame-0
+  PNG bit-identical across 3 runs**; matches committed golden; **zero D3D12
+  debug-layer messages** (headless + 10 s windowed run); **60 s memory soak**
+  (372,750 frames, +1.6 MB private bytes → flat, no fence timeouts). Plus the
+  standing INV-5 + inventory checks. `gate.ps1 -Milestone M1` exits 0; M0
+  regression sweep still green.
+- Golden `goldens/m1/frame0_320x180.png` (clear RGBA 46,43,33,255; hash
+  `65e8578815ec303c`) via `goldgen capture`. ADR-014 (private-bytes soak metric)
+  + ADR-015 (golden), reconciled into ARCHITECTURE.md §8.
+
+**Pending.** M2 — `/core` standalone lib: fixed 120 Hz tick, seeded RNG already
+present, first-person walk camera, capsule-vs-AABB collision + sliding, **input
+replay** (record/playback), per-tick WorldState hash. The replay system is the
+enabler for every later automated movement test.
+
+**Open questions.** None blocking. PT/DXR (M9) will reuse this device; the
+renderer is structured to add a second (DXR) path without touching the sim.
+
+**Gotchas / notes for the next session.**
+- The active PostToolUse hook rebuilds+tests after every Edit/Write; during
+  multi-file features intermediate states fail it harmlessly — push through, the
+  final state is green. (Real verification is the explicit `build.ps1`/gate runs.)
+- PowerShell **StrictMode** is on in `common.ps1`: `.Count` on a scalar throws —
+  wrap pipeline results in `@(...)` before `.Count` (bit us once in the gate).
+- D3D12 readback **must** honor the 256-byte row-pitch alignment
+  (`GetCopyableFootprints`); the renderer copies row-by-row into tight RGBA.
+- Windowed gate run opens a 10 s window (`SW_SHOWNOACTIVATE`, no focus steal).
+- Clear color is fixed/deterministic; changing it = new golden + ADR (INV-8).
+
+---
+
 ## Session 1 — M0: Scaffold + Verification Harness  ✅ gate green (`m0-green`)
 
 **Done.**

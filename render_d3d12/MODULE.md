@@ -6,11 +6,20 @@ renderer (INV-6).
 
 **Depends on:** `core` (read-only WorldView), `stream` (residency events).
 
-**Public surface (M0).** `render_d3d12/render_d3d12.h` — identity stub.
+**Public surface.**
+- `render_d3d12/render_d3d12.h` — identity stub.
+- `render_d3d12/renderer.h` (M1) — opaque PIMPL `Renderer`: headless device +
+  offscreen RT + CPU readback (`FrameImage`), or windowed swapchain. Renders one
+  deterministic clear-color frame. `debug_error_count()` surfaces the D3D12
+  debug-layer/DRED state; `process_private_bytes()` feeds the memory soak. No
+  D3D12/DXGI/`<windows.h>` types leak through the header (INV-5 stays intact).
 
-**Planned.** Device/swapchain/queue/fence + debug layer + DRED + headless PNG
-(M1), procedural materials + lighting v1 (M5), VHS post + HUD (M8).
+**Links (M1):** `d3d12 dxgi dxguid Psapi` (PRIVATE — implementation detail).
 
-**Contracts consumed:** `contracts/world_view_v1.h`, `contracts/stream_events_v1.h`.
+**Planned.** Procedural materials + lighting v1 (M5), VHS post + HUD (M8),
+real geometry from streamed chunks (M3+).
 
-**Status:** M0 stub. (D3D12 / DXGI link deps introduced M1.)
+**Contracts consumed:** `contracts/world_view_v1.h` (M2+), `contracts/stream_events_v1.h` (M3).
+
+**Status:** M1 — device, debug layer + DRED, clear-color frame (headless PNG +
+windowed swapchain). Clear color RGBA (46,43,33,255); golden `goldens/m1/`.

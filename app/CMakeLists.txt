@@ -1,7 +1,10 @@
 # app — L2 composition root. Depends on ALL modules (ARCHITECTURE.md §4).
-# Nothing depends on app.
+# Nothing depends on app. M1: drives the renderer (headless/windowed), writes
+# PNGs via the shared stb wrapper, and creates the Win32 window (user32).
 add_executable(backrooms src/main.cpp)
 target_link_libraries(backrooms PRIVATE
   backrooms_flags
-  core gen stream telemetry audio render_d3d12 render_dxr director)
+  core gen stream telemetry audio render_d3d12 render_dxr director
+  br_stb user32)
+target_compile_definitions(backrooms PRIVATE UNICODE _UNICODE)
 set_target_properties(backrooms PROPERTIES OUTPUT_NAME "backrooms")

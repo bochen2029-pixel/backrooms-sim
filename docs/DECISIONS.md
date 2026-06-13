@@ -28,3 +28,15 @@ See ARCHITECTURE.md §8 for the accepted set; expand each here as the build touc
 - **Context:** `/W4 /WX` on third-party headers (Catch2, stb) would fail the build on warnings we do not own.
 - **Decision:** Strict flags live on the `backrooms_flags` INTERFACE target (our code only). Angle-bracket/`SYSTEM` includes are demoted with `/external:anglebrackets /external:W0`; the stb implementation TU is isolated in `br_stb` and compiled `/w`. The deterministic sim core additionally gets `/fp:strict` via `backrooms_sim_flags`.
 - **Consequences:** `/WX` protects our code without third-party noise; "zero warnings-as-errors violations" is enforced by a clean build, not a grep.
+
+## ADR-014 — M1 memory-soak metric: process private bytes, not the CRT debug heap
+- **Status:** Accepted (M1).
+- **Context:** The M1 gate wording is "60 s soak: stable memory (CRT debug heap delta ≈ 0)". We ship the **release** static CRT (`/MT`, ADR-011), which has no CRT debug heap, so that exact metric is unavailable without a separate debug-CRT build.
+- **Decision:** Measure process **PrivateUsage** via `GetProcessMemoryInfo` (`PROCESS_MEMORY_COUNTERS_EX`) at soak start vs end and assert the delta `< 16 MiB` over the 60 s headless soak. "No fence timeouts" is enforced structurally: the renderer returns failure (nonzero process exit) if any fence wait times out.
+- **Consequences:** Build-config-independent leak detection that preserves the gate's intent (flat memory, zero slope). Empirically ~1.5 MB over 62k frames in 10 s — warmup-dominated, no per-frame growth. A real leak in the tight render loop would be hundreds of MB and trip the gate immediately.
+
+## ADR-015 — M1 frame-0 golden
+- **Status:** Accepted (M1).
+- **Context:** The M1 gate requires a committed headless frame-0 golden, bit-identical across runs.
+- **Decision:** `goldens/m1/frame0_320x180.png`, captured via `goldgen capture` from the headless renderer at 320×180. The frame is the deterministic clear color RGBA (46, 43, 33, 255); FNV-1a content hash `65e8578815ec303c`; verified bit-identical across 3 consecutive runs on the dev GPU (RTX 4070 Ti SUPER).
+- **Consequences:** Golden committed alongside this ADR (INV-8). Any future renderer change that alters the clear output requires a deliberate `goldgen` update plus a new ADR in the same commit.

@@ -174,6 +174,8 @@ Convention: errors cross module boundaries as typed results, never exceptions; `
 | 011 | **x64-windows-static triplet + static CRT** | Self-contained exes the gate scripts run directly; no DLL deployment |
 | 012 | **"test-the-gate" canary (DISABLED CTest test, run directly)** | Proves failure detection without making `ctest` red |
 | 013 | **Warnings-as-errors scoped to our code via `/external` flags** | `/WX` protects our code without third-party header noise |
+| 014 | **M1 memory soak measures process private bytes** | Release `/MT` CRT has no debug heap; private-bytes delta preserves the "flat memory" intent |
+| 015 | **M1 frame-0 golden (320×180 clear)** | First committed headless golden; bit-identical across runs (INV-8) |
 
 ## 9. Non-Functional Requirements
 
