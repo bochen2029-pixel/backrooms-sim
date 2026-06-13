@@ -28,11 +28,17 @@
 #include "core/world.h"
 #include "core/replay.h"
 #include "contracts/chunk_gen_v1.h"
+#include "contracts/audio_events_v1.h"
 #include "stream/stream_manager.h"
 #include "telemetry/csv.h"
 #include "render_d3d12/renderer.h"
+#include "audio/synth.h"
+#include "audio/room_probe.h"
+#include "audio/wav.h"
+#include "audio/engine.h"
 
 namespace contracts = br::contracts;
+namespace audio = br::audio;
 using br::render_d3d12::Renderer;
 using br::render_d3d12::FrameImage;
 
@@ -41,10 +47,11 @@ namespace {
 struct Options {
     bool headless = false, windowed = false, scene = false, sim = false, stream = false;
     bool walkbot = false, topdown = false, version = false, shot = false;
+    bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
     uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0;
     uint64_t seed = 1u;
-    std::string out, record, replay, hashlog, csv;
+    std::string out, record, replay, hashlog, csv, audiolog;
 };
 
 int usage() {
@@ -77,6 +84,11 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--topdown") == 0) o.topdown = true;
         else if (std::strcmp(a, "--shot") == 0) o.shot = true;
         else if (std::strcmp(a, "--pose") == 0) { if (!u32(o.pose)) return false; }
+        else if (std::strcmp(a, "--render-wav") == 0) o.render_wav = true;
+        else if (std::strcmp(a, "--footsteps") == 0) o.footsteps = true;
+        else if (std::strcmp(a, "--audiolog") == 0) { if (!str(o.audiolog)) return false; }
+        else if (std::strcmp(a, "--audiosoak") == 0) o.audiosoak = true;
+        else if (std::strcmp(a, "--audio") == 0) o.audio = true;
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
         else if (std::strcmp(a, "--version") == 0) o.version = true;
         else if (std::strcmp(a, "--frames") == 0) { if (!u32(o.frames)) return false; }
@@ -609,6 +621,190 @@ int run_topdown(const Options& o) {
     return dbg == 0 ? 0 : 3;
 }
 
+// ----- M6 deterministic maze walk shared by --render-wav and --footsteps ------
+// The walk-bot navigates the generated maze (same drive as --walkbot), gathering
+// the 3x3 chunk walls around the wanderer for both collision and the room probe.
+struct MazeWalker {
+    br::core::WorldState s;
+    WalkBot bot;
+    uint64_t seed;
+    std::vector<br::core::Aabb> collision;            // ground + walls (for tick)
+    std::vector<contracts::BoxInstance> walls;        // chunk walls only (probe)
+    contracts::ChunkKey cached{0, static_cast<int64_t>(1) << 40, 0};
+
+    explicit MazeWalker(uint64_t seed_)
+        : s(seed_),
+          bot(seed_ ^ 0x9e3779b97f4a7c15ULL,
+              br::core::Vec3{2.0f, br::core::kWandererHalfHeight + 0.02f, 2.0f}),
+          seed(seed_) {
+        s.wanderer.pos = br::core::Vec3{2.0f, br::core::kWandererHalfHeight + 0.02f, 2.0f};
+    }
+
+    void rebuild(contracts::ChunkKey center) {
+        collision.clear();
+        walls.clear();
+        collision.push_back(br::core::Aabb{{-1.0e6f, -1.0f, -1.0e6f}, {1.0e6f, 0.0f, 1.0e6f}});
+        for (int64_t dx = -1; dx <= 1; ++dx) {
+            for (int64_t dz = -1; dz <= 1; ++dz) {
+                const contracts::ChunkData cd =
+                    contracts::GenerateChunk(seed, contracts::ChunkKey{0, center.cx + dx, center.cz + dz});
+                for (const auto& b : cd.collision) {
+                    collision.push_back(br::core::Aabb{{b.mn[0], b.mn[1], b.mn[2]},
+                                                       {b.mx[0], b.mx[1], b.mx[2]}});
+                    walls.push_back(b);
+                }
+            }
+        }
+        cached = center;
+    }
+
+    void step() {
+        const contracts::ChunkKey here =
+            contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+        if (here != cached) rebuild(here);
+        br::core::tick(s, bot.step(s), collision);
+    }
+};
+
+// ----- M6 offline audio: replay the maze walk, synth the mix, write WAV -------
+int run_render_wav(const Options& o) {
+    const uint32_t sr = contracts::kAudioSampleRate;
+    const uint32_t ticks = (o.ticks > 0) ? o.ticks : 2400u;          // default 20 s
+    const uint32_t fpt = sr / 120u;                                  // 400 frames/tick (exact)
+    MazeWalker w(o.seed);
+    audio::Synth synth(o.seed, sr);
+
+    std::vector<int16_t> pcm;
+    pcm.reserve(static_cast<size_t>(ticks) * fpt * 2u);
+    std::vector<float> block(static_cast<size_t>(fpt) * 2u);
+    std::vector<uint64_t> footstep_ticks;
+
+    uint64_t prev_steps = br::core::footstep_count(w.s);
+    int reverb_throttle = 0;
+    for (uint32_t t = 0; t < ticks; ++t) {
+        w.step();
+        const contracts::AudioListener lis = br::core::audio_listener(w.s);
+        const uint64_t steps = br::core::footstep_count(w.s);
+        for (uint64_t k = prev_steps; k < steps; ++k) {
+            float inten = 0.0f;
+            if (lis.speed > 0.1f) {
+                inten = 0.3f + (lis.speed / br::core::kWalkSpeed) * 0.7f;
+                if (inten > 1.0f) inten = 1.0f;
+            }
+            synth.trigger_footstep(inten);
+            footstep_ticks.push_back(w.s.tick);
+        }
+        prev_steps = steps;
+
+        if (reverb_throttle == 0) {
+            synth.set_reverb_seconds(audio::probe_reverb_seconds(lis, w.walls));
+        }
+        if (++reverb_throttle >= 12) reverb_throttle = 0;  // re-probe ~10x/sec
+
+        synth.render(lis, block.data(), fpt);
+        for (uint32_t i = 0; i < fpt * 2u; ++i) pcm.push_back(audio::to_pcm16(block[i] * 0.85f));
+    }
+
+    if (!o.out.empty()) {
+        std::string err;
+        if (!audio::write_wav(o.out, pcm, sr, static_cast<uint16_t>(contracts::kAudioChannels), err)) {
+            std::fprintf(stderr, "wav: %s\n", err.c_str());
+            return 1;
+        }
+    }
+    if (!o.audiolog.empty()) {
+        std::FILE* f = std::fopen(o.audiolog.c_str(), "wb");
+        if (!f) { std::fprintf(stderr, "audiolog open failed: %s\n", o.audiolog.c_str()); return 1; }
+        for (uint64_t tk : footstep_ticks) std::fprintf(f, "%llu\n", static_cast<unsigned long long>(tk));
+        std::fclose(f);
+    }
+
+    double sumsq = 0.0;
+    for (int16_t v : pcm) { const double x = static_cast<double>(v) / 32768.0; sumsq += x * x; }
+    const double rms = pcm.empty() ? 0.0 : std::sqrt(sumsq / static_cast<double>(pcm.size()));
+    std::printf("ticks: %u\n", ticks);
+    std::printf("samples: %llu\n", static_cast<unsigned long long>(pcm.size()));
+    std::printf("footsteps: %llu\n", static_cast<unsigned long long>(footstep_ticks.size()));
+    std::printf("rms: %.5f\n", rms);
+    std::printf("distance_m: %.1f\n", static_cast<double>(w.s.odometer));
+    return 0;
+}
+
+// ----- M6 footstep reference: the same walk, footstep ticks only (no audio) ---
+int run_footsteps(const Options& o) {
+    const uint32_t ticks = (o.ticks > 0) ? o.ticks : 2400u;
+    MazeWalker w(o.seed);
+    std::vector<uint64_t> footstep_ticks;
+    uint64_t prev = br::core::footstep_count(w.s);
+    for (uint32_t t = 0; t < ticks; ++t) {
+        w.step();
+        const uint64_t steps = br::core::footstep_count(w.s);
+        for (uint64_t k = prev; k < steps; ++k) footstep_ticks.push_back(w.s.tick);
+        prev = steps;
+    }
+    if (!o.out.empty()) {
+        std::FILE* f = std::fopen(o.out.c_str(), "wb");
+        if (!f) { std::fprintf(stderr, "footstep log open failed: %s\n", o.out.c_str()); return 1; }
+        for (uint64_t tk : footstep_ticks) std::fprintf(f, "%llu\n", static_cast<unsigned long long>(tk));
+        std::fclose(f);
+    }
+    std::printf("ticks: %u\n", ticks);
+    std::printf("footsteps: %llu\n", static_cast<unsigned long long>(footstep_ticks.size()));
+    std::printf("distance_m: %.1f\n", static_cast<double>(w.s.odometer));
+    return 0;
+}
+
+// ----- M6 audio soak: real-time mixer thread must not block the sim, 0 underruns
+// Drives the sim flat-out on open ground (uniform tick time, no gen spikes) while
+// the audio engine runs on its own thread, fed lock-free. Run with --audio on and
+// off to compare sim throughput; underruns must be zero. --seconds sets a wall
+// floor (real soak duration); else --ticks a fixed count.
+int run_audiosoak(const Options& o) {
+    using namespace std::chrono;
+    using namespace br::core;
+    WorldState s(o.seed);
+    s.wanderer.pos = Vec3{16.0f, kWandererHalfHeight + 0.02f, 16.0f};
+    const std::vector<Aabb>& ground = open_ground();
+
+    audio::AudioEngine eng(o.seed, contracts::kAudioSampleRate);
+    if (o.audio) eng.start();
+
+    uint64_t prev_steps = footstep_count(s), footsteps = 0, nticks = 0;
+    const bool wall = (o.seconds > 0);
+    const uint64_t tick_target = (o.ticks > 0) ? o.ticks : 2000000u;
+    const auto start = steady_clock::now();
+    const auto wall_end = start + seconds(static_cast<long long>(o.seconds));
+    for (;;) {
+        if (wall) { if ((nticks & 8191u) == 0 && steady_clock::now() >= wall_end) break; }
+        else if (nticks >= tick_target) break;
+        contracts::InputCommand in{};
+        in.move_z = 1.0f;
+        in.look_yaw = 0.00008f;  // gentle loop -> stays local (no far-chunk walk)
+        tick(s, in, ground);
+        ++nticks;
+        const uint64_t steps = footstep_count(s);
+        const uint32_t newf = static_cast<uint32_t>(steps - prev_steps);
+        prev_steps = steps;
+        footsteps += newf;
+        if (o.audio) eng.post(audio_listener(s), 1.2f, newf);
+    }
+    const auto end = steady_clock::now();
+    const double total_ns = duration<double, std::nano>(end - start).count();
+
+    uint64_t underruns = 0, blocks = 0;
+    if (o.audio) { underruns = eng.underruns(); blocks = eng.blocks_rendered(); eng.stop(); }
+
+    std::printf("audio: %d\n", o.audio ? 1 : 0);
+    std::printf("ticks: %llu\n", static_cast<unsigned long long>(nticks));
+    std::printf("wall_ns: %.0f\n", total_ns);
+    std::printf("mean_tick_ns: %.2f\n", nticks ? total_ns / static_cast<double>(nticks) : 0.0);
+    std::printf("ticks_per_sec: %.0f\n", nticks ? static_cast<double>(nticks) / (total_ns / 1e9) : 0.0);
+    std::printf("footsteps: %llu\n", static_cast<unsigned long long>(footsteps));
+    std::printf("audio_blocks: %llu\n", static_cast<unsigned long long>(blocks));
+    std::printf("underruns: %llu\n", static_cast<unsigned long long>(underruns));
+    return (underruns == 0) ? 0 : 5;
+}
+
 }  // namespace
 
 // Tighten the OS timer/wait granularity (default ~15.6 ms) to 1 ms for the
@@ -624,6 +820,9 @@ int main(int argc, char** argv) {
     if (!parse(argc, argv, o)) return usage();
 
     if (o.version) { std::printf("%s\n", br::core::core_version()); return 0; }
+    if (o.render_wav) return run_render_wav(o);
+    if (o.footsteps)  return run_footsteps(o);
+    if (o.audiosoak)  return run_audiosoak(o);
     if (o.sim)     return run_sim(o);
     if (o.walkbot) return run_walkbot(o);
     if (o.topdown) return run_topdown(o);

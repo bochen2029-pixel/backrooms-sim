@@ -5,4 +5,5 @@ backrooms_module(audio DEPS core)
 # render.cpp (offline) + engine.cpp (real-time) arrive in the later M6 steps.
 target_sources(audio PRIVATE
   src/synth.cpp
-  src/room_probe.cpp)
+  src/room_probe.cpp
+  src/engine.cpp)
