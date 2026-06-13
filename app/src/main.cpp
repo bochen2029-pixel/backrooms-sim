@@ -50,7 +50,7 @@ struct Options {
     bool headless = false, windowed = false, scene = false, sim = false, stream = false;
     bool walkbot = false, topdown = false, version = false, shot = false;
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
-    bool biomeat = false, descend = false;
+    bool biomeat = false, descend = false, post = false;
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
     uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0;
     uint64_t seed = 1u;
@@ -94,6 +94,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--audio") == 0) o.audio = true;
         else if (std::strcmp(a, "--biomeat") == 0) o.biomeat = true;
         else if (std::strcmp(a, "--descend") == 0) o.descend = true;
+        else if (std::strcmp(a, "--post") == 0) o.post = true;
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
         else if (std::strcmp(a, "--version") == 0) o.version = true;
         else if (std::strcmp(a, "--frames") == 0) { if (!u32(o.frames)) return false; }
@@ -418,6 +419,10 @@ int run_shot(const Options& o) {
         std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1;
     }
     renderer.set_texture_seed(o.seed);
+    // VHS post (M8): seeded by the world seed, time from the (fixed) tick so the
+    // golden is deterministic. HUD is composited in M8 p2.
+    renderer.set_post(o.post, static_cast<uint32_t>(o.seed),
+                      static_cast<float>(o.ticks) / 120.0f, false);
 
     // Eye at the proven-open spawn cell; vary only orientation across poses.
     const float ex = 16.0f, ez = 16.0f;

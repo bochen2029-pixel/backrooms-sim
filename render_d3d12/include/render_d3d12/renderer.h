@@ -57,6 +57,17 @@ public:
     // chunk render (M5). Cheap; the upload happens lazily on the next draw.
     void set_texture_seed(uint64_t seed);
 
+    // Enable/configure the VHS post-process pass (M8): seeded film grain,
+    // chromatic aberration, barrel distortion, scanlines, vignette. `time` (sim
+    // seconds) drives grain/interlace; `hud` composites the overlay. When enabled,
+    // headless renders read back the post-processed image. Cheap; the pipeline is
+    // built lazily on the next render.
+    void set_post(bool enabled, uint32_t seed, float time, bool hud);
+
+    // Upload an RGBA HUD overlay (width*height, must match the render size) that
+    // the post pass composites on top (M8). Builds the post pipeline if needed.
+    bool upload_hud_overlay(const uint8_t* rgba, uint32_t width, uint32_t height);
+
     // Headless: draw the resident streamed chunks from the camera (depth-tested,
     // vertex-colored). Uploads up to `upload_budget` new chunk meshes per call
     // and frees meshes that are no longer resident (bounds GPU memory, smooths

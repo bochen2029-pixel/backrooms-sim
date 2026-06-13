@@ -84,6 +84,21 @@ struct LightsCB {
 };
 constexpr size_t kLightCbBytes = (sizeof(LightsCB) + 255u) & ~size_t(255u);
 
+// VHS post-process parameters (M8), passed as root 32-bit constants (b0).
+// Packed as 12 DWORDs: resolution, time, 5 effect intensities, grain seed, pads.
+struct PostParams {
+    float resX = 0.0f, resY = 0.0f;  // render resolution (pixels)
+    float time = 0.0f;               // sim time (s) — drives grain/interlace
+    float grain = 0.08f;             // film-grain intensity
+    float aberration = 0.0025f;      // chromatic-aberration radial offset
+    float distortion = 0.06f;        // barrel-distortion strength
+    float scanline = 0.18f;          // scanline darkening depth
+    float vignette = 0.35f;          // vignette strength
+    uint32_t seed = 1u;              // grain seed (deterministic)
+    uint32_t hud = 0u;               // 1 = composite the HUD overlay (M8 p2)
+    float pad0 = 0.0f, pad1 = 0.0f;
+};
+
 struct Renderer::Impl {
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
@@ -134,6 +149,18 @@ struct Renderer::Impl {
     bool texUploaded = false;
     ComPtr<ID3D12Resource> lightCb;                  // per-frame forward-light CBV
     void* lightCbMapped = nullptr;
+
+    // VHS post-process pass (M8): scene RT -> fullscreen effects -> post RT.
+    ComPtr<ID3D12Resource> postRt;                   // final composited target
+    ComPtr<ID3D12RootSignature> postRoot;
+    ComPtr<ID3D12PipelineState> postPso;
+    ComPtr<ID3D12DescriptorHeap> postSrvHeap;        // shader-visible: [0]=scene [1]=HUD
+    ComPtr<ID3D12Resource> hudTex;                   // CPU-rasterised HUD overlay (M8 p2)
+    ComPtr<ID3D12Resource> hudUpload;
+    UINT hudW = 0, hudH = 0;
+    bool postReady = false;
+    bool postEnabled = false;
+    PostParams postParams;
 
     HANDLE fenceEvent = nullptr;
     UINT64 fenceValue = 0;
@@ -1106,6 +1133,266 @@ bool ensure_lit_pipeline(Renderer::Impl& d, uint64_t seed, std::string& err) {
     return true;
 }
 
+// ----- VHS post-process pass (M8) -------------------------------------------
+const char* kPostHlsl = R"(
+cbuffer P : register(b0) {
+    float2 uRes; float uTime;
+    float uGrain; float uAberr; float uDistort; float uScan; float uVignette;
+    uint uSeed; uint uHudOn; float2 uPad;
+};
+Texture2D    gScene : register(t0);
+Texture2D    gHud   : register(t1);
+SamplerState gSamp  : register(s0);
+
+struct VOut { float4 pos:SV_POSITION; float2 uv:TEXCOORD0; };
+VOut VSMain(uint id : SV_VertexID) {
+    VOut o;
+    float2 t = float2((id << 1) & 2, id & 2);   // fullscreen triangle: (0,0)(2,0)(0,2)
+    o.uv = t;
+    o.pos = float4(t * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+    return o;
+}
+float h12(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
+    return float(x & 0x00ffffffu) / 16777216.0;
+}
+float4 PSMain(VOut i) : SV_TARGET {
+    float2 uv = i.uv;
+    float2 c = uv * 2.0 - 1.0;
+    float r2 = dot(c, c);
+    // Barrel distortion of the *scene* sample coords.
+    float2 duv = (c * (1.0 + uDistort * r2)) * 0.5 + 0.5;
+    float2 dir = duv - 0.5;
+    float3 col;
+    col.r = gScene.Sample(gSamp, duv + dir * uAberr).r;  // chromatic aberration
+    col.g = gScene.Sample(gSamp, duv).g;
+    col.b = gScene.Sample(gSamp, duv - dir * uAberr).b;
+    if (duv.x < 0.0 || duv.x > 1.0 || duv.y < 0.0 || duv.y > 1.0) col = float3(0,0,0);
+    // Screen-space CRT effects (use undistorted output coords).
+    float row = uv.y * uRes.y;
+    float scan = 1.0 - uScan * (0.5 + 0.5 * cos(row * 6.2831853));
+    float inter = 1.0 - uScan * 0.25 * step(0.5, frac(row * 0.5 + floor(uTime * 30.0) * 0.5));
+    col *= scan * inter;
+    // Seeded film grain (per pixel, stepped ~60 Hz so a fixed time -> fixed grain).
+    uint px = (uint)(uv.x * uRes.x);
+    uint py = (uint)(uv.y * uRes.y);
+    uint tt = (uint)(uTime * 60.0);
+    float g = h12(px * 73856093u ^ py * 19349663u ^ (uSeed + tt) * 83492791u);
+    col += (g - 0.5) * uGrain;
+    // Vignette.
+    col *= 1.0 - uVignette * r2 * 0.5;
+    col = saturate(col);
+    // HUD overlay (screen-space, undistorted, alpha-over) — kept crisp.
+    if (uHudOn > 0u) {
+        float4 hud = gHud.Sample(gSamp, uv);
+        col = lerp(col, hud.rgb, hud.a);
+    }
+    return float4(col, 1.0);
+}
+)";
+
+// Upload `rgba` (width*height*4) into the HUD overlay texture, leaving it in
+// PIXEL_SHADER_RESOURCE. Reused for the 1x1-ish zero placeholder and the real
+// per-frame HUD (M8 p2). Runs its own fenced command list (setup-time, rare).
+bool upload_hud(Renderer::Impl& d, const uint8_t* rgba, std::string& err) {
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
+    UINT rows = 0; UINT64 rowSize = 0, total = 0;
+    D3D12_RESOURCE_DESC td = d.hudTex->GetDesc();
+    d.device->GetCopyableFootprints(&td, 0, 1, 0, &fp, &rows, &rowSize, &total);
+    if (!d.hudUpload) {
+        D3D12_RESOURCE_DESC bd = {};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = total; bd.Height = 1;
+        bd.DepthOrArraySize = 1; bd.MipLevels = 1; bd.Format = DXGI_FORMAT_UNKNOWN;
+        bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        const D3D12_HEAP_PROPERTIES up = heap_props(D3D12_HEAP_TYPE_UPLOAD);
+        if (FAILED(d.device->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &bd,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&d.hudUpload)))) {
+            err = "hud upload buffer"; return false;
+        }
+    }
+    uint8_t* mapped = nullptr;
+    const D3D12_RANGE none = { 0, 0 };
+    if (FAILED(d.hudUpload->Map(0, &none, reinterpret_cast<void**>(&mapped)))) { err = "hud map"; return false; }
+    for (UINT y = 0; y < d.hudH; ++y)
+        std::memcpy(mapped + fp.Offset + static_cast<size_t>(y) * fp.Footprint.RowPitch,
+                    rgba + static_cast<size_t>(y) * d.hudW * 4u, static_cast<size_t>(d.hudW) * 4u);
+    d.hudUpload->Unmap(0, nullptr);
+
+    if (FAILED(d.alloc->Reset())) { err = "hud alloc reset"; return false; }
+    if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { err = "hud list reset"; return false; }
+    const D3D12_RESOURCE_BARRIER toCopy = transition(
+        d.hudTex.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    d.list->ResourceBarrier(1, &toCopy);
+    D3D12_TEXTURE_COPY_LOCATION dst = {}; dst.pResource = d.hudTex.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = 0;
+    D3D12_TEXTURE_COPY_LOCATION src = {}; src.pResource = d.hudUpload.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; src.PlacedFootprint = fp;
+    d.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    const D3D12_RESOURCE_BARRIER toSrv = transition(
+        d.hudTex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    d.list->ResourceBarrier(1, &toSrv);
+    if (FAILED(d.list->Close())) { err = "hud list close"; return false; }
+    ID3D12CommandList* lists[] = { d.list.Get() };
+    d.queue->ExecuteCommandLists(1, lists);
+    const UINT64 v = ++d.fenceValue;
+    d.queue->Signal(d.fence.Get(), v);
+    if (d.fence->GetCompletedValue() < v) {
+        d.fence->SetEventOnCompletion(v, d.fenceEvent);
+        WaitForSingleObject(d.fenceEvent, 5000);
+    }
+    return true;
+}
+
+bool ensure_post_pipeline(Renderer::Impl& d, std::string& err) {
+    if (d.postReady) return true;
+
+    // Post render target (same size/format as the scene), RTV at rtvHeap slot 1.
+    D3D12_RESOURCE_DESC rtd = {};
+    rtd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rtd.Width = d.width; rtd.Height = d.height; rtd.DepthOrArraySize = 1; rtd.MipLevels = 1;
+    rtd.Format = kFormat; rtd.SampleDesc.Count = 1; rtd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    rtd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    D3D12_CLEAR_VALUE cv = {}; cv.Format = kFormat; std::memcpy(cv.Color, kClearFloat, sizeof(kClearFloat));
+    const D3D12_HEAP_PROPERTIES defHeap = heap_props(D3D12_HEAP_TYPE_DEFAULT);
+    if (FAILED(d.device->CreateCommittedResource(&defHeap, D3D12_HEAP_FLAG_NONE, &rtd,
+            D3D12_RESOURCE_STATE_RENDER_TARGET, &cv, IID_PPV_ARGS(&d.postRt)))) {
+        err = "post RT create"; return false;
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE postRtv = d.rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    postRtv.ptr += static_cast<SIZE_T>(d.rtvDescSize);  // slot 1
+    d.device->CreateRenderTargetView(d.postRt.Get(), nullptr, postRtv);
+
+    // HUD overlay texture (full-res), created in PSR; zero-initialised (transparent).
+    d.hudW = d.width; d.hudH = d.height;
+    D3D12_RESOURCE_DESC hd = {};
+    hd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    hd.Width = d.hudW; hd.Height = d.hudH; hd.DepthOrArraySize = 1; hd.MipLevels = 1;
+    hd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; hd.SampleDesc.Count = 1; hd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    if (FAILED(d.device->CreateCommittedResource(&defHeap, D3D12_HEAP_FLAG_NONE, &hd,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&d.hudTex)))) {
+        err = "hud tex create"; return false;
+    }
+    {
+        std::vector<uint8_t> zero(static_cast<size_t>(d.hudW) * d.hudH * 4u, 0u);
+        if (!upload_hud(d, zero.data(), err)) return false;
+    }
+
+    // Shader-visible SRV heap: [0] = scene, [1] = HUD.
+    D3D12_DESCRIPTOR_HEAP_DESC sh = {};
+    sh.NumDescriptors = 2; sh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    sh.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(d.device->CreateDescriptorHeap(&sh, IID_PPV_ARGS(&d.postSrvHeap)))) { err = "post srv heap"; return false; }
+    const UINT inc = d.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.Format = kFormat; sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Texture2D.MipLevels = 1;
+    D3D12_CPU_DESCRIPTOR_HANDLE sc0 = d.postSrvHeap->GetCPUDescriptorHandleForHeapStart();
+    d.device->CreateShaderResourceView(d.rt.Get(), &sd, sc0);          // scene
+    D3D12_CPU_DESCRIPTOR_HANDLE sc1 = sc0; sc1.ptr += inc;
+    d.device->CreateShaderResourceView(d.hudTex.Get(), &sd, sc1);      // HUD
+
+    // Root signature: b0 32-bit constants (12) + SRV table (t0,t1) + static sampler.
+    D3D12_DESCRIPTOR_RANGE range = {};
+    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; range.NumDescriptors = 2;
+    range.BaseShaderRegister = 0; range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    D3D12_ROOT_PARAMETER params[2] = {};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[0].Constants.Num32BitValues = 12; params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[1].DescriptorTable.NumDescriptorRanges = 1; params[1].DescriptorTable.pDescriptorRanges = &range;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_STATIC_SAMPLER_DESC samp = {};
+    samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samp.ShaderRegister = 0; samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL; samp.MaxLOD = D3D12_FLOAT32_MAX;
+    D3D12_ROOT_SIGNATURE_DESC rs = {};
+    rs.NumParameters = 2; rs.pParameters = params; rs.NumStaticSamplers = 1; rs.pStaticSamplers = &samp;
+    ComPtr<ID3DBlob> sig, sigErr;
+    if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &sigErr))) { err = "post root serialize"; return false; }
+    if (FAILED(d.device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&d.postRoot)))) { err = "post root create"; return false; }
+
+    ComPtr<ID3DBlob> vs, ps;
+    if (!compile_shader(kPostHlsl, "VSMain", "vs_5_0", vs, err)) return false;
+    if (!compile_shader(kPostHlsl, "PSMain", "ps_5_0", ps, err)) return false;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
+    pso.pRootSignature = d.postRoot.Get();
+    pso.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
+    pso.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+    pso.SampleMask = UINT_MAX;
+    pso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+    pso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
+    pso.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    pso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    pso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+    pso.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.DepthStencilState.DepthEnable = FALSE;       // fullscreen pass, no depth
+    pso.DepthStencilState.StencilEnable = FALSE;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1; pso.RTVFormats[0] = kFormat;
+    pso.DSVFormat = DXGI_FORMAT_UNKNOWN; pso.SampleDesc.Count = 1;
+    if (FAILED(d.device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&d.postPso)))) { err = "post pso"; return false; }
+    d.postReady = true;
+    return true;
+}
+
+// Final stage of a headless render: either a straight copy of the scene RT to the
+// readback buffer (post off), or the VHS post pass scene -> postRt -> readback
+// (post on). Records into the already-open command list `d.list`.
+void finalize_to_readback(Renderer::Impl& d, bool post) {
+    ID3D12Resource* copySrc = d.rt.Get();
+    if (post && d.postReady) {
+        const D3D12_RESOURCE_BARRIER toSrv = transition(
+            d.rt.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        d.list->ResourceBarrier(1, &toSrv);
+        D3D12_CPU_DESCRIPTOR_HANDLE postRtv = d.rtvHeap->GetCPUDescriptorHandleForHeapStart();
+        postRtv.ptr += static_cast<SIZE_T>(d.rtvDescSize);
+        d.list->OMSetRenderTargets(1, &postRtv, FALSE, nullptr);
+        D3D12_VIEWPORT vp = { 0.0f, 0.0f, static_cast<float>(d.width), static_cast<float>(d.height), 0.0f, 1.0f };
+        D3D12_RECT sc = { 0, 0, static_cast<LONG>(d.width), static_cast<LONG>(d.height) };
+        d.list->RSSetViewports(1, &vp);
+        d.list->RSSetScissorRects(1, &sc);
+        ID3D12DescriptorHeap* heaps[] = { d.postSrvHeap.Get() };
+        d.list->SetDescriptorHeaps(1, heaps);
+        d.list->SetGraphicsRootSignature(d.postRoot.Get());
+        d.list->SetPipelineState(d.postPso.Get());
+        d.list->SetGraphicsRoot32BitConstants(0, 12, &d.postParams, 0);
+        d.list->SetGraphicsRootDescriptorTable(1, d.postSrvHeap->GetGPUDescriptorHandleForHeapStart());
+        d.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        d.list->DrawInstanced(3, 1, 0, 0);
+        const D3D12_RESOURCE_BARRIER postToCopy = transition(
+            d.postRt.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        d.list->ResourceBarrier(1, &postToCopy);
+        copySrc = d.postRt.Get();
+    } else {
+        const D3D12_RESOURCE_BARRIER toCopy = transition(
+            d.rt.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        d.list->ResourceBarrier(1, &toCopy);
+    }
+
+    D3D12_TEXTURE_COPY_LOCATION dst = {};
+    dst.pResource = d.readback.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = d.footprint;
+    D3D12_TEXTURE_COPY_LOCATION src = {};
+    src.pResource = copySrc; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+    d.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    if (post && d.postReady) {
+        const D3D12_RESOURCE_BARRIER postBack = transition(
+            d.postRt.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        d.list->ResourceBarrier(1, &postBack);
+        const D3D12_RESOURCE_BARRIER sceneBack = transition(
+            d.rt.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        d.list->ResourceBarrier(1, &sceneBack);
+    } else {
+        const D3D12_RESOURCE_BARRIER backToRt = transition(
+            d.rt.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        d.list->ResourceBarrier(1, &backToRt);
+    }
+}
+
 }  // namespace
 
 bool Renderer::render_world_view(const contracts::WorldView& view) {
@@ -1192,6 +1479,22 @@ void Renderer::set_texture_seed(uint64_t seed) {
     if (impl_) impl_->pendingTexSeed = seed;
 }
 
+void Renderer::set_post(bool enabled, uint32_t seed, float time, bool hud) {
+    if (!impl_) return;
+    impl_->postEnabled = enabled;
+    impl_->postParams.seed = seed;
+    impl_->postParams.time = time;
+    impl_->postParams.hud = hud ? 1u : 0u;
+}
+
+bool Renderer::upload_hud_overlay(const uint8_t* rgba, uint32_t width, uint32_t height) {
+    if (!impl_) return false;
+    Impl& d = *impl_;
+    if (!ensure_post_pipeline(d, last_error_)) return false;
+    if (width != d.hudW || height != d.hudH) { last_error_ = "hud overlay size mismatch"; return false; }
+    return upload_hud(d, rgba, last_error_);
+}
+
 bool Renderer::render_chunks(const contracts::CameraPose& camera,
                              const std::vector<contracts::ResidentChunk>& resident,
                              uint32_t upload_budget, uint64_t tick, uint32_t* out_drawn) {
@@ -1201,6 +1504,11 @@ bool Renderer::render_chunks(const contracts::CameraPose& camera,
         return false;
     }
     if (!ensure_lit_pipeline(d, d.pendingTexSeed, last_error_)) return false;
+    if (d.postEnabled) {
+        if (!ensure_post_pipeline(d, last_error_)) return false;  // submits its own setup list
+        d.postParams.resX = static_cast<float>(d.width);
+        d.postParams.resY = static_cast<float>(d.height);
+    }
 
     // Forward fluorescent lighting: gather the lights in the ceiling grid near
     // the camera, scale each by its deterministic flicker (core), into the CBV.
@@ -1309,21 +1617,7 @@ bool Renderer::render_chunks(const contracts::CameraPose& camera,
     }
     if (out_drawn) *out_drawn = drawn;
 
-    const D3D12_RESOURCE_BARRIER toCopy = transition(
-        d.rt.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    d.list->ResourceBarrier(1, &toCopy);
-    D3D12_TEXTURE_COPY_LOCATION dst = {};
-    dst.pResource = d.readback.Get();
-    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    dst.PlacedFootprint = d.footprint;
-    D3D12_TEXTURE_COPY_LOCATION src = {};
-    src.pResource = d.rt.Get();
-    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    src.SubresourceIndex = 0;
-    d.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-    const D3D12_RESOURCE_BARRIER backToRt = transition(
-        d.rt.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    d.list->ResourceBarrier(1, &backToRt);
+    finalize_to_readback(d, d.postEnabled);  // VHS post pass (M8) or a straight copy
 
     if (FAILED(d.list->Close())) { last_error_ = "command list close failed"; return false; }
     ID3D12CommandList* lists[] = { d.list.Get() };
