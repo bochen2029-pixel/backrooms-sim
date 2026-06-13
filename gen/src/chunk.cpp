@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "core/rng.h"
+#include "gen/biome.h"
 #include "gen/layout.h"
 
 namespace br::contracts {
@@ -71,12 +72,14 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
     const float H = kWallHeight;
 
     br::core::Pcg64 rng(gen::chunk_seed(world_seed, key));
+    const gen::BiomeParams bp = gen::biome_params(gen::biome_at(world_seed, key.level, key.cx, key.cz));
     const float floor_col[3] = {
-        0.58f + 0.22f * static_cast<float>(rng.next_double()),
-        0.52f + 0.20f * static_cast<float>(rng.next_double()),
-        0.26f + 0.14f * static_cast<float>(rng.next_double()),
+        (0.58f + 0.22f * static_cast<float>(rng.next_double())) * bp.floor_tint[0],
+        (0.52f + 0.20f * static_cast<float>(rng.next_double())) * bp.floor_tint[1],
+        (0.26f + 0.14f * static_cast<float>(rng.next_double())) * bp.floor_tint[2],
     };
-    const float wall_col[3] = { floor_col[0] * 0.45f, floor_col[1] * 0.45f, floor_col[2] * 0.40f };
+    const float wall_col[3] = { floor_col[0] * bp.wall_darken, floor_col[1] * bp.wall_darken,
+                                floor_col[2] * bp.wall_darken };
     const float ceil_col[3] = { 0.85f, 0.85f, 0.82f };
     const float lamp_col[3] = { 1.0f, 1.0f, 0.97f };
     const float up[3] = {0.0f, 1.0f, 0.0f};

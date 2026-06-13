@@ -5,7 +5,9 @@
 
 #include <cmath>
 
+#include "contracts/chunk_gen_v1.h"
 #include "gen/biome.h"
+#include "gen/layout.h"
 
 using namespace br::gen;
 
@@ -55,5 +57,20 @@ TEST_CASE("biome distribution over 100k chunks is within 2% of the designed weig
         const double want = static_cast<double>(biome_weight_pct(static_cast<Biome>(b))) / 100.0;
         INFO("biome " << biome_name(static_cast<Biome>(b)) << " frac=" << frac << " want=" << want);
         REQUIRE(std::fabs(frac - want) <= 0.02);
+    }
+}
+
+TEST_CASE("every biome layout is fully connected over 10000 chunks (M7 gate)", "[m7][biome]") {
+    // Each biome's carve ratio must keep the chunk connected (INV-3): carving
+    // openings atop the spanning tree never disconnects, for any ratio.
+    for (int bi = 0; bi < kBiomeCount; ++bi) {
+        const Biome b = static_cast<Biome>(bi);
+        const float carve = biome_params(b).carve_ratio;
+        for (int64_t k = 0; k < 10000; ++k) {
+            const br::contracts::ChunkKey key{0, k * 131 + 1, k * 17 - 5};
+            ChunkLayout L = generate_layout_carve(99u + static_cast<uint64_t>(bi), key, carve);
+            INFO("biome " << biome_name(b) << " chunk " << k);
+            REQUIRE(validate_connectivity(L));
+        }
     }
 }

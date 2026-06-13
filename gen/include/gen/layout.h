@@ -28,7 +28,14 @@ struct ChunkLayout {
 };
 
 // Pure/total/deterministic. Doorways agree across shared edges (see edge hashes).
+// Uses the chunk's biome to set interior openness (carve ratio).
 ChunkLayout generate_layout(uint64_t world_seed, contracts::ChunkKey key);
+
+// As above but with an explicit interior-wall carve ratio (the biome openness
+// knob). Connectivity holds for any ratio in [0,1] — carving only removes walls
+// atop the spanning tree, never disconnects. Exposed for per-biome validation.
+ChunkLayout generate_layout_carve(uint64_t world_seed, contracts::ChunkKey key,
+                                  float carve_ratio);
 
 // Flood-fill: returns true iff every cell is reachable from cell (0,0). A correct
 // layout is connected by construction; the validator guards against regressions.

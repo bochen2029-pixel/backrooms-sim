@@ -19,14 +19,22 @@ via shared edge hashes. INV-3 Connectivity — no sealed regions. Compiled
   **fluorescent-tile pattern** (`is_fluorescent_cell` / `fluorescent_light_pos`,
   shared verbatim with the renderer's lights). The ceiling is render-only — it is
   **not** added to collision, so the wanderer/walk-bot are unaffected.
-- `gen/layout.h` (M4) — `generate_layout` (G=8 spanning-tree maze + ~25% extra
-  carves + 4 edge-hash doorways that neighbours agree on) + `validate_connectivity`
-  (flood-fill, zero sealed).
+- `gen/layout.h` (M4) — `generate_layout` (G=8 spanning-tree maze + extra carves
+  + 4 edge-hash doorways that neighbours agree on) + `validate_connectivity`
+  (flood-fill, zero sealed). M7: the carve ratio is biome-driven via
+  `generate_layout_carve` (connectivity holds for any ratio).
+- `gen/biome.h` (M7) — the **biome field**: pure low-frequency
+  `biome_at(seed, level, cx, cz)` over a coarse K=3 lattice (contiguous regions,
+  designed proportions) + `BiomeParams` (carve ratio, pillar density, tint). 5
+  biomes (ClassicYellow/CubicleFarm/PipeCorridors/ParkingGarage/Poolrooms).
+  Selects internal layout + materials; never the edge-doorway protocol, so
+  cross-biome seams stay connected (INV-3).
 - `gen/gen.h` — identity stub.
 
-**Planned.** Biomes / set pieces / verticality (M7), set-piece injection.
+**Planned.** Set pieces (pillar halls, flooded) + the geometry-validator
+extension for pillars; verticality (level −1 + stairwells) — M7 phases 2b–3.
 
-**Status:** M5 — adds per-vertex uv/material + a fluorescent-patterned ceiling
-(render-only) to the Level-0 maze. 10,000-chunk connectivity (zero sealed) +
-geometry validators still green; adjacent-chunk seam doorways agree; regen
-bit-identical (`ChunkContentHash` now covers uv + material).
+**Status:** M7 (in progress) — biome field wired into generation (per-biome carve
+ratio + tint); distribution within ±2 % over 102,400 chunks; per-biome 10k-chunk
+connectivity green; cross-biome seams connect; M4/M5 goldens re-captured (ADR-031).
+Earlier (M5): per-vertex uv/material + fluorescent ceiling. Regen bit-identical.

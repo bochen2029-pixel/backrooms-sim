@@ -1,6 +1,7 @@
 #include "gen/layout.h"
 
 #include "core/rng.h"
+#include "gen/biome.h"
 
 namespace br::gen {
 
@@ -32,6 +33,12 @@ uint64_t chunk_seed(uint64_t world_seed, contracts::ChunkKey key) {
 }
 
 ChunkLayout generate_layout(uint64_t world_seed, contracts::ChunkKey key) {
+    const Biome b = biome_at(world_seed, key.level, key.cx, key.cz);
+    return generate_layout_carve(world_seed, key, biome_params(b).carve_ratio);
+}
+
+ChunkLayout generate_layout_carve(uint64_t world_seed, contracts::ChunkKey key,
+                                  float carve_ratio) {
     ChunkLayout L{};
     for (int xi = 0; xi <= G; ++xi)
         for (int j = 0; j < G; ++j) L.vwall[xi][j] = true;
@@ -65,13 +72,16 @@ ChunkLayout generate_layout(uint64_t world_seed, contracts::ChunkKey key) {
         stackX[sp] = a; stackZ[sp] = b; ++sp;
     }
 
-    // Extra openings (loops / room-like openness) on interior walls.
+    // Extra openings (loops / room-like openness) on interior walls. The biome's
+    // carve ratio sets how open the space feels (tight pipes vs open garage);
+    // removing walls atop the spanning tree never breaks connectivity.
+    const double carve = static_cast<double>(carve_ratio);
     for (int xi = 1; xi < G; ++xi)
         for (int j = 0; j < G; ++j)
-            if (rng.next_double() < 0.25) L.vwall[xi][j] = false;
+            if (rng.next_double() < carve) L.vwall[xi][j] = false;
     for (int i = 0; i < G; ++i)
         for (int zj = 1; zj < G; ++zj)
-            if (rng.next_double() < 0.25) L.hwall[i][zj] = false;
+            if (rng.next_double() < carve) L.hwall[i][zj] = false;
 
     // Edge doorways from shared-edge hashes (adjacent chunks agree).
     L.door_left   = door_index(world_seed, key.cx,     key.cz,     kTagV);
