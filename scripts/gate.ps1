@@ -681,6 +681,106 @@ function Invoke-GateM6 {
     }
 }
 
+function Invoke-GateM7 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+
+    $bin = Get-BinDir
+    $tmp = Join-Path $RepoRoot 'runs\gate-m7'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $hashdiff = Join-Path $bin 'hashdiff.exe'
+
+    # ctest covers exit gate #1 (per-biome connectivity 10k + geometry incl
+    # pillars), #2 (distribution 100k within +/-2 %), the cross-level part of #3
+    # (level -1 connectivity + geometry), plus full M0-M6 regression.
+    Assert-Gate 'ctest green (biome distribution + per-biome validators + level -1 + regression)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+
+    # Exit gate #3: a scripted replay descends a stairwell to level -1;
+    # connectivity + determinism hold across levels.
+    Assert-Gate 'stairwell descent to level -1: deterministic, cross-level connected (gate #3)' {
+        $r1 = Invoke-AppCapture @('--descend', '--seed', '1')
+        if ($r1.Exit -ne 0) { throw "descent exited $($r1.Exit)" }
+        if ((Get-Metric $r1.Out 'level_reached') -ne -1) { throw "did not reach level -1" }
+        if ((Get-Metric $r1.Out 'sublevel_connected') -ne 1) { throw "level -1 chunk not connected" }
+        if ((Get-Metric $r1.Out 'sublevel_geom_valid') -ne 1) { throw "level -1 chunk geometry invalid" }
+        $h1 = Get-AppHash $r1.Out
+        $r2 = Invoke-AppCapture @('--descend', '--seed', '1')
+        if ((Get-AppHash $r2.Out) -ne $h1) { throw "descent not deterministic across runs" }
+        foreach ($s in 7, 42) {
+            $r = Invoke-AppCapture @('--descend', '--seed', "$s")
+            if ($r.Exit -ne 0 -or (Get-Metric $r.Out 'level_reached') -ne -1) { throw "seed $s descent failed" }
+        }
+        Write-Note "descent: level -1 reached, sublevel connected, hash $h1 reproducible"
+    }
+
+    # Exit gate #4: a fixed-pose lit golden per biome.
+    Assert-Gate 'per-biome lit goldens bit-match, bit-identical x2, debug-clean (gate #4)' {
+        $map = [ordered]@{ classic_yellow = 1; cubicle_farm = 4; pipe_corridors = 2; parking_garage = 11; poolrooms = 25 }
+        foreach ($name in $map.Keys) {
+            $seed = $map[$name]
+            $golden = Join-Path $RepoRoot "goldens\m7\biome_$($name).png"
+            if (-not (Test-Path $golden)) { throw "missing biome golden $name" }
+            # Confirm this seed's spawn really is that biome.
+            $bi = Invoke-AppCapture @('--biomeat', '--seed', "$seed")
+            if ($bi.Out -notmatch "biome:\s*$name") { throw "seed $seed spawn biome is not $name" }
+            $a = Join-Path $tmp "biome_$($name)_a.png"
+            $b = Join-Path $tmp "biome_$($name)_b.png"
+            $ra = Invoke-AppCapture @('--shot', '--seed', "$seed", '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $a)
+            if ($ra.Exit -ne 0) { throw "biome $name shot exited $($ra.Exit)" }
+            if ((Get-Metric $ra.Out 'debug_error_count') -ne 0) { throw "biome $name shot had debug-layer messages" }
+            $rb = Invoke-AppCapture @('--shot', '--seed', "$seed", '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $b)
+            if ($rb.Exit -ne 0) { throw "biome $name shot (run2) exited $($rb.Exit)" }
+            if ((& $hashdiff hash $a | Select-Object -Last 1) -ne (& $hashdiff hash $b | Select-Object -Last 1)) {
+                throw "biome $name shot not bit-identical across runs"
+            }
+            $d = (& $hashdiff diff $a $golden | Select-Object -Last 1)
+            if ([double]$d -ne 0.0) { throw "biome $name golden regressed (diff=$d)" }
+        }
+        Write-Note "5 per-biome lit goldens bit-identical x2 + golden-matched + debug-clean"
+    }
+
+    # Regression: the M4 top-down + M5 lit-shot render goldens (re-captured for the
+    # biome world) must still bit-match.
+    Assert-Gate 'regression: M4 top-down + M5 lit shot goldens still bit-match' {
+        $td = Join-Path $tmp 'm4_td.png'
+        $r = Invoke-AppCapture @('--topdown', '--seed', '1', '--width', '512', '--height', '512', '--out', $td)
+        if ($r.Exit -ne 0) { throw "M4 top-down exited $($r.Exit)" }
+        $d = (& $hashdiff diff $td (Join-Path $RepoRoot 'goldens\m4\topdown_seed1.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M4 top-down golden regressed (diff=$d)" }
+        $shot = Join-Path $tmp 'm5_shot.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "M5 shot had debug-layer messages" }
+        $d = (& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M5 lit shot golden regressed (diff=$d)" }
+    }
+
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -694,6 +794,7 @@ try {
         'M4'    { Invoke-GateM4 }
         'M5'    { Invoke-GateM5 }
         'M6'    { Invoke-GateM6 -AudioSoakSeconds $AudioSoakSeconds }
+        'M7'    { Invoke-GateM7 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

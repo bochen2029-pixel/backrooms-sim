@@ -4,9 +4,12 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
-## Session 8 — M7: Biomes, Set Pieces, Verticality  🟡 IN PROGRESS (phases 1–3 done, only the gate remains)
+## Session 8 — M7: Biomes, Set Pieces, Verticality  ✅ gate green (`m7-green`)
 
-**Last green tag: `m6-green`. Phases 1 + 2a + 2b + 3 committed (all gates still pass).**
+**Status: `gate.ps1 -Milestone M7` exits 0.** The world now has *character*: five
+biomes in contiguous regions (classic yellow, cubicle farm, pipe corridors,
+parking garage with columns, poolrooms), pillar set pieces, and a stairwell that
+descends to a dimmer **level −1**. All 4 exit gates pass; ADRs 031–033.
 
 **Done (phase 1).** The **biome field** — `gen/biome.{h,cpp}`: a pure,
 low-frequency `biome_at(seed, level, cx, cz)` over a coarse **K=3** chunk lattice
@@ -44,15 +47,26 @@ walks the wanderer down via gravity/collision — measured **4.019 m drop (one
 level)** to level −1, hash-reproducible, landing chunk connected + valid (ADR-033).
 `test_biome`: 4,000 level −1 chunks connected + geometry-valid (exit gate #3).
 
-**Remaining for M7 (start here — last step).**
-- **Phase 4 — gate.** `scripts/gate.ps1` `Invoke-GateM7`: clean build + no-warn +
-  ctest (all M7 biome/geometry/connectivity/level −1 + regression) + INV-5 +
-  **(#2)** distribution 100k ±2 % (ctest) + **(#1)** per-biome 10k connectivity +
-  geometry (ctest) + **(#3)** `--descend` deterministic ×2 + level −1 reached +
-  sublevel connected + **(#4)** per-biome goldens `goldens/m7/biome_*.png`
-  bit-match (+ M4/M5 render-golden regression) + inventory. Then add the dispatch
-  case, run green, ADRs already written (031–033), update PROGRESS + memory, tag
-  `m7-green`, push.
+**Done (phase 4 — gate).** `Invoke-GateM7`: clean build + no-warn + ctest (biome
+distribution ±2 %, per-biome 10k connectivity, per-biome geometry incl pillars,
+level −1 cross-level + full M0–M6 regression) + INV-5 + **(#3)** `--descend`
+deterministic ×2 / level −1 reached / sublevel connected + **(#4)** 5 per-biome
+goldens bit-identical ×2 + golden-matched + debug-clean + M4/M5 render-golden
+regression + inventory. **PASSED.**
+
+**Pending / next.** M8 — VHS post-processing + HUD (film grain, chromatic
+aberration, scanlines, timestamp overlay, vignette; HUD odometer/seed/coords).
+
+**Gotchas.**
+- Biomes must never touch the edge-doorway protocol (`door_index`) — only internal
+  layout/decoration — or cross-biome seams seal (INV-3).
+- Generation changes ripple into M4/M5 goldens → re-capture via `goldgen` + ADR in
+  the SAME commit (done twice in M7: tint, then pillars).
+- Far-chunk float precision (ADR-022) false-fails the geometry validator past
+  ~1M m; gen geometry tests must use precision-safe coords (connectivity tests can
+  range freely — cell topology is coord-independent).
+- Level Y mapping is `level*4 m`; level 0 = Y 0 (so level-0 output is unchanged).
+  Capsule collision descends stairs via gravity (step-down only).
 - **Phase 3 — verticality.** Level −1 generation (`ChunkKey.level=-1`, Y-offset,
   altered params) + a **stairwell set piece** (descending step boxes) placed
   deterministically/rare, connecting level 0↔−1. A **scripted-descent replay**
