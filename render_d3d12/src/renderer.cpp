@@ -4,6 +4,7 @@
 // descriptors are filled by hand.
 #include "render_d3d12/renderer.h"
 #include "render_d3d12/texgen.h"
+#include "core/lighting.h"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -75,6 +76,14 @@ struct ChunkSlot {
 };
 constexpr size_t kChunkSlotCapacityBytes = 6144 * 48;  // ~3600 maze verts/chunk @ 48B stride + headroom
 
+// Forward-lighting constant buffer (matches register(b1) in the lit shader).
+constexpr int kMaxLights = 64;
+struct LightsCB {
+    float ambientCount[4];           // rgb ambient, w = count
+    float lights[kMaxLights][4];     // xyz world pos, w intensity
+};
+constexpr size_t kLightCbBytes = (sizeof(LightsCB) + 255u) & ~size_t(255u);
+
 struct Renderer::Impl {
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
@@ -123,6 +132,8 @@ struct Renderer::Impl {
     uint64_t texSeed = 0;
     uint64_t pendingTexSeed = 0;                     // seed the app wants textured
     bool texUploaded = false;
+    ComPtr<ID3D12Resource> lightCb;                  // per-frame forward-light CBV
+    void* lightCbMapped = nullptr;
 
     HANDLE fenceEvent = nullptr;
     UINT64 fenceValue = 0;
@@ -898,28 +909,45 @@ bool upload_chunk_mesh(Renderer::Impl& d, const contracts::ResidentChunk& rc, st
 const char* kLitHlsl = R"(
 cbuffer Constants : register(b0) {
     row_major float4x4 uMVP;
-    float3 uLightDir;
-    float  uPad;
+    float4 uPad0;
+};
+cbuffer Lights : register(b1) {
+    float4 uAmbientCount;   // rgb = flat ambient, w = active light count
+    float4 uLights[64];     // xyz = world pos, w = intensity (flicker-scaled)
 };
 Texture2DArray gTex : register(t0);
 SamplerState   gSamp : register(s0);
 struct VSIn  { float3 pos:POSITION; float3 nrm:NORMAL; float3 col:COLOR; float2 uv:TEXCOORD0; float mat:TEXCOORD1; };
-struct VSOut { float4 clip:SV_POSITION; float3 wnrm:NORMAL; float3 col:COLOR; float2 uv:TEXCOORD0; float mat:TEXCOORD1; };
+struct VSOut { float4 clip:SV_POSITION; float3 wpos:TEXCOORD2; float3 wnrm:NORMAL; float3 col:COLOR; float2 uv:TEXCOORD0; float mat:TEXCOORD1; };
 VSOut VSMain(VSIn i) {
     VSOut o;
     o.clip = mul(float4(i.pos, 1.0), uMVP);
+    o.wpos = i.pos;                 // chunk geometry is world-space
     o.wnrm = i.nrm; o.col = i.col; o.uv = i.uv; o.mat = i.mat;
     return o;
 }
 float4 PSMain(VSOut i) : SV_TARGET {
     float3 tex = gTex.Sample(gSamp, float3(i.uv, i.mat)).rgb;
     float m = max(i.col.r, max(i.col.g, i.col.b));
-    float3 tint = (m > 0.001) ? (i.col / m) : float3(1,1,1);     // per-chunk hue (no darkening)
+    float3 tint = (m > 0.001) ? (i.col / m) : float3(1,1,1);
     float3 albedo = tex * lerp(float3(1,1,1), tint, 0.5);
-    float ndl = saturate(dot(normalize(i.wnrm), -normalize(uLightDir)));
-    bool emissive = (i.mat >= 2.5 && i.mat < 3.5);               // fluorescent panels self-lit
-    float lighting = emissive ? 1.0 : (0.30 + 0.70 * ndl);
-    return float4(albedo * lighting, 1.0);
+    if (i.mat >= 2.5 && i.mat < 3.5) return float4(albedo, 1.0);   // fluorescent: emissive
+
+    float3 N = normalize(i.wnrm);
+    float sum = 0.0;
+    int count = (int)uAmbientCount.w;
+    [loop] for (int k = 0; k < count; ++k) {
+        float3 d = uLights[k].xyz - i.wpos;
+        float dist = length(d);
+        float ndl = saturate(dot(N, d / max(dist, 0.001)));
+        float atten = uLights[k].w / (1.0 + 0.09 * dist + 0.05 * dist * dist);
+        sum += ndl * atten;
+    }
+    // Highlight knee: keep the wallpaper's hue under stacked lights instead of
+    // clipping to pure white (compress everything above unity exposure).
+    float lit = uAmbientCount.r + sum;
+    if (lit > 1.0) lit = 1.0 + (lit - 1.0) * 0.18;
+    return float4(albedo * lit, 1.0);
 }
 )";
 
@@ -1030,7 +1058,7 @@ bool ensure_lit_pipeline(Renderer::Impl& d, uint64_t seed, std::string& err) {
     range.NumDescriptors = 1;
     range.BaseShaderRegister = 0;
     range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-    D3D12_ROOT_PARAMETER params[2] = {};
+    D3D12_ROOT_PARAMETER params[3] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[0].Constants.Num32BitValues = 20;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -1038,6 +1066,9 @@ bool ensure_lit_pipeline(Renderer::Impl& d, uint64_t seed, std::string& err) {
     params[1].DescriptorTable.NumDescriptorRanges = 1;
     params[1].DescriptorTable.pDescriptorRanges = &range;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    params[2].Descriptor.ShaderRegister = 1;  // b1 (lights)
+    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_STATIC_SAMPLER_DESC samp = {};
     samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -1045,7 +1076,7 @@ bool ensure_lit_pipeline(Renderer::Impl& d, uint64_t seed, std::string& err) {
     samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     samp.MaxLOD = D3D12_FLOAT32_MAX;
     D3D12_ROOT_SIGNATURE_DESC rs = {};
-    rs.NumParameters = 2;
+    rs.NumParameters = 3;
     rs.pParameters = params;
     rs.NumStaticSamplers = 1;
     rs.pStaticSamplers = &samp;
@@ -1163,13 +1194,55 @@ void Renderer::set_texture_seed(uint64_t seed) {
 
 bool Renderer::render_chunks(const contracts::CameraPose& camera,
                              const std::vector<contracts::ResidentChunk>& resident,
-                             uint32_t upload_budget, uint32_t* out_drawn) {
+                             uint32_t upload_budget, uint64_t tick, uint32_t* out_drawn) {
     Impl& d = *impl_;
     if (d.windowed || !d.rt) {
         last_error_ = "render_chunks is headless-only (M3)";
         return false;
     }
     if (!ensure_lit_pipeline(d, d.pendingTexSeed, last_error_)) return false;
+
+    // Forward fluorescent lighting: gather the lights in the ceiling grid near
+    // the camera, scale each by its deterministic flicker (core), into the CBV.
+    if (!d.lightCb) {
+        D3D12_RESOURCE_DESC bd = {};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = kLightCbBytes; bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
+        bd.Format = DXGI_FORMAT_UNKNOWN; bd.SampleDesc.Count = 1;
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        const D3D12_HEAP_PROPERTIES up = heap_props(D3D12_HEAP_TYPE_UPLOAD);
+        if (FAILED(d.device->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &bd,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&d.lightCb)))) {
+            last_error_ = "light CBV create failed"; return false;
+        }
+        const D3D12_RANGE none = { 0, 0 };
+        if (FAILED(d.lightCb->Map(0, &none, &d.lightCbMapped))) { last_error_ = "light CBV map failed"; return false; }
+    }
+    {
+        LightsCB lc = {};
+        lc.ambientCount[0] = lc.ambientCount[1] = lc.ambientCount[2] = 0.22f;  // flat ambient
+        int n = 0;
+        const float cs = contracts::kCellSize;
+        const int64_t gi0 = static_cast<int64_t>(std::floor(camera.pos[0] / cs));
+        const int64_t gj0 = static_cast<int64_t>(std::floor(camera.pos[2] / cs));
+        const int R = 10;
+        for (int64_t dgi = -R; dgi <= R && n < kMaxLights; ++dgi) {
+            for (int64_t dgj = -R; dgj <= R && n < kMaxLights; ++dgj) {
+                const int64_t gi = gi0 + dgi, gj = gj0 + dgj;
+                if (!contracts::is_fluorescent_cell(gi, gj)) continue;
+                float p[3];
+                contracts::fluorescent_light_pos(gi, gj, p);
+                const uint64_t lid = static_cast<uint64_t>(gi) * 0x9e3779b97f4a7c15ULL ^
+                                     static_cast<uint64_t>(gj) * 0xc2b2ae3d27d4eb4fULL;
+                const float fl = br::core::light_flicker(d.pendingTexSeed, lid, tick);
+                lc.lights[n][0] = p[0]; lc.lights[n][1] = p[1]; lc.lights[n][2] = p[2];
+                lc.lights[n][3] = 1.0f * fl;
+                ++n;
+            }
+        }
+        lc.ambientCount[3] = static_cast<float>(n);
+        std::memcpy(d.lightCbMapped, &lc, sizeof(lc));
+    }
 
     // Return slots whose chunk is no longer resident; upload new ones (budgeted).
     std::set<contracts::ChunkKey> live;
@@ -1222,6 +1295,7 @@ bool Renderer::render_chunks(const contracts::CameraPose& camera,
     d.list->SetPipelineState(d.litPso.Get());
     d.list->SetGraphicsRoot32BitConstants(0, 20, constants, 0);
     d.list->SetGraphicsRootDescriptorTable(1, d.srvHeap->GetGPUDescriptorHandleForHeapStart());
+    d.list->SetGraphicsRootConstantBufferView(2, d.lightCb->GetGPUVirtualAddress());
     d.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     uint32_t drawn = 0;

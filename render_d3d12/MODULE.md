@@ -18,18 +18,36 @@ renderer (INV-6).
   `contracts::WorldView` camera, depth-tested and lit (root-constant MVP + a
   fixed light), via a runtime-compiled (D3DCompile) PSO. Single source of room
   geometry comes from `core::test_room`.
-- `render_chunks` (M3) — headless: draws resident streamed chunks (pos/nrm/color
-  pipeline) with a persistently-mapped vertex-buffer pool (allocation-free
-  stream-in) and a per-frame upload budget. Frees evicted chunk slots.
+- `render_chunks` (M3, lit in M5) — headless: draws resident streamed chunks via
+  the **lit pipeline** (pos/nrm/color/uv/material; 48-byte stride) with a
+  persistently-mapped vertex-buffer pool (allocation-free stream-in) and a
+  per-frame upload budget; frees evicted chunk slots. Samples a
+  **Texture2DArray** (5 material slices) through a shader-visible SRV heap +
+  static sampler, applies a per-chunk hue tint, and accumulates **forward
+  fluorescent lighting**: the ceiling-grid lights near the camera (CBV b1), each
+  scaled by `core::light_flicker(seed, light_id, tick)` so replays reproduce the
+  lighting exactly (INV-2). A highlight knee keeps the wallpaper's hue under
+  stacked lights instead of clipping to white (ADR-026). Takes a `tick` for the
+  flicker phase.
 - `render_topdown` (M4) — headless: orthographic top-down render of a chunk set
-  (debug golden of the maze layout).
+  (debug golden of the maze layout); discards ceiling/fluorescent material via a
+  root-constant toggle so the M4 layout goldens stay stable under M5.
+- `set_texture_seed` (M5) — selects the seed for the procedural material
+  textures; the Texture2DArray upload happens lazily on the next lit draw.
+- `render_d3d12/texgen.h` (M5) — D3D12-free procedural material textures:
+  `generate_texture(kind, seed, rgba)` for `TexKind`
+  {Wallpaper, Carpet, CeilingTile, Fluorescent, Baseboard} + `texture_hash`.
+  Deterministic per `(kind, seed)`; unit-tested and usable off-GPU.
 
 **Links:** `d3d12 dxgi dxguid d3dcompiler Psapi` (PRIVATE — implementation detail).
 
-**Planned.** Procedural materials + lighting v1 (M5), VHS post + HUD (M8),
-real geometry from streamed chunks (M3+).
+**Planned.** VHS post + HUD (M8), path-traced parity via `render_dxr` (M6+).
 
-**Contracts consumed:** `contracts/world_view_v1.h` (M2+), `contracts/stream_events_v1.h` (M3).
+**Contracts consumed:** `contracts/world_view_v1.h` (M2+),
+`contracts/stream_events_v1.h` (M3), `contracts/chunk_gen_v1.h` (M5, material ids
++ fluorescent-grid helpers shared with `gen`). Lighting math: `core/lighting.h`.
 
-**Status:** M1 — device, debug layer + DRED, clear-color frame (headless PNG +
-windowed swapchain). Clear color RGBA (46,43,33,255); golden `goldens/m1/`.
+**Status:** M5 — procedural material textures + textured/lit chunk render with
+forward fluorescent lighting and deterministic flicker. Fixed-pose lit goldens
+`goldens/m5/shot_seed{1,7,42}_pose{0..4}.png` (640x360). Earlier: M1 clear-color
+golden `goldens/m1/`, M2 room `goldens/m2/`, M4 top-down `goldens/m4/`.

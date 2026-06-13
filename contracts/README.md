@@ -11,12 +11,15 @@ every change to one reconciles ARCHITECTURE.md §5 in the same commit
 | `geometry_v1.h` | shared primitive `BoxInstance` | **present (M4)** |
 | `world_view_v1.h` | core → renderers (read-only snapshot) | **present (M2)** |
 | `replay_v1.h` | input + Event Log serialization | **present (M2)** |
-| `chunk_gen_v1.h` | gen → stream/render | **present (M3)** |
+| `chunk_gen_v1.h` | gen → stream/render | **present (M3; +uv/material + fluorescent grid M5)** |
 | `stream_events_v1.h` | stream → renderers | **present (M3)** |
 | `audio_events_v1.h` | core → audio | M6 |
 | `telemetry_v1.h` | all → telemetry | **present (M3)** |
 | `director_v1/` | core ⇄ director (JSON Schemas) | M11 |
 
 Headers are consumed via the `contracts` INTERFACE target as
-`#include "contracts/<name>.h"`. `world_view_v1` grows additively (resident
-chunks + lights) in M3/M5; `replay_v1` gains the Event Log layer later.
+`#include "contracts/<name>.h"`. `chunk_gen_v1` grew additively in M5 — each
+`ChunkVertex` carries `uv` + `material` (kMat* ids), and the fluorescent ceiling
+grid is shared via `is_fluorescent_cell` / `fluorescent_light_pos` so `gen`'s
+tiles and the renderer's forward lights agree without a separate lights channel.
+`replay_v1` gains the Event Log layer later.

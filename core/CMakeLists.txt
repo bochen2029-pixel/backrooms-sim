@@ -4,7 +4,8 @@
 add_library(core STATIC
   src/version.cpp
   src/world.cpp
-  src/replay.cpp)
+  src/replay.cpp
+  src/lighting.cpp)
 
 target_include_directories(core PUBLIC include)
 target_link_libraries(core

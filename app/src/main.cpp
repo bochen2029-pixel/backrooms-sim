@@ -40,9 +40,9 @@ namespace {
 
 struct Options {
     bool headless = false, windowed = false, scene = false, sim = false, stream = false;
-    bool walkbot = false, topdown = false, version = false;
+    bool walkbot = false, topdown = false, version = false, shot = false;
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
-    uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1;
+    uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0;
     uint64_t seed = 1u;
     std::string out, record, replay, hashlog, csv;
 };
@@ -75,6 +75,8 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--stream") == 0) o.stream = true;
         else if (std::strcmp(a, "--walkbot") == 0) o.walkbot = true;
         else if (std::strcmp(a, "--topdown") == 0) o.topdown = true;
+        else if (std::strcmp(a, "--shot") == 0) o.shot = true;
+        else if (std::strcmp(a, "--pose") == 0) { if (!u32(o.pose)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
         else if (std::strcmp(a, "--version") == 0) o.version = true;
         else if (std::strcmp(a, "--frames") == 0) { if (!u32(o.frames)) return false; }
@@ -314,7 +316,7 @@ int run_stream(const Options& o) {
         uint32_t drawn = 0;
         const size_t target = sm.resident_count();
         for (int w = 0; w < 400 && static_cast<size_t>(drawn) < target; ++w) {
-            if (!renderer.render_chunks(cam, sm.resident(), 32u, &drawn)) {
+            if (!renderer.render_chunks(cam, sm.resident(), 32u, s.tick, &drawn)) {
                 std::fprintf(stderr, "warmup: %s\n", renderer.last_error().c_str());
                 return 1;
             }
@@ -336,7 +338,7 @@ int run_stream(const Options& o) {
         sm.update(center);
         const auto cam = br::core::wanderer_camera(s, aspect);
         uint32_t drawn = 0;
-        if (!renderer.render_chunks(cam, sm.resident(), 16u, &drawn)) {
+        if (!renderer.render_chunks(cam, sm.resident(), 16u, s.tick, &drawn)) {
             std::fprintf(stderr, "render_chunks: %s\n", renderer.last_error().c_str());
             return false;
         }
@@ -374,6 +376,101 @@ int run_stream(const Options& o) {
     std::printf("mem_end_bytes: %llu\n", static_cast<unsigned long long>(mem_end));
     std::printf("mem_delta_bytes: %lld\n",
                 static_cast<long long>(static_cast<int64_t>(mem_end) - static_cast<int64_t>(mem_start)));
+    std::printf("debug_error_count: %u\n", dbg);
+    return dbg == 0 ? 0 : 3;
+}
+
+// ----- M5 fixed-pose textured+lit shot -> PNG (deterministic golden) ----------
+// Renders the streamed, lit chunks from one of a small set of canonical camera
+// poses at a fixed flicker tick. Output is bit-exact per (seed, pose, tick, GPU)
+// so goldgen/hashdiff can gate it; also prints a luminance histogram so the gate
+// can assert the frame is neither all-black nor blown-out.
+int run_shot(const Options& o) {
+    struct Pose { float yaw, pitch; };
+    static const Pose kPoses[5] = {
+        { 0.0f,        0.0f   },  // forward (+Z)
+        { 1.5707963f,  0.0f   },  // right (+X)
+        { 3.1415927f,  0.0f   },  // back (-Z)
+        { 0.7853982f,  0.42f  },  // diagonal, look up at ceiling + fluorescents
+        { 4.0f,       -0.38f  },  // look down at carpet + baseboard
+    };
+    const Pose pz = kPoses[o.pose % 5u];
+
+    Renderer renderer;
+    if (!renderer.init_headless(o.width, o.height)) {
+        std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1;
+    }
+    renderer.set_texture_seed(o.seed);
+
+    // Eye at the proven-open spawn cell; vary only orientation across poses.
+    const float ex = 16.0f, ez = 16.0f;
+    const float ey = br::core::kWandererHalfHeight + 0.02f + br::core::kEyeHeight;
+    contracts::CameraPose cam{};
+    cam.pos[0] = ex; cam.pos[1] = ey; cam.pos[2] = ez;
+    cam.yaw = pz.yaw; cam.pitch = pz.pitch;
+    cam.fov_y = 1.2217305f;  // ~70 deg, matches the wanderer camera
+    cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    const auto center = contracts::chunk_key_at(0, ex, ez);
+    sm.update(center);
+    sm.wait_idle();
+    sm.update(center);
+
+    // Warm up: upload the full resident ring (no budget cap) so the captured
+    // frame is complete, then capture once at the fixed flicker tick.
+    uint32_t drawn = 0;
+    const size_t target = sm.resident_count();
+    for (int w = 0; w < 400 && static_cast<size_t>(drawn) < target; ++w) {
+        if (!renderer.render_chunks(cam, sm.resident(), 64u, o.ticks, &drawn)) {
+            std::fprintf(stderr, "shot warmup: %s\n", renderer.last_error().c_str()); return 1;
+        }
+    }
+    if (!renderer.render_chunks(cam, sm.resident(), 64u, o.ticks, &drawn)) {
+        std::fprintf(stderr, "shot: %s\n", renderer.last_error().c_str()); return 1;
+    }
+
+    FrameImage img;
+    if (!renderer.readback(img)) { std::fprintf(stderr, "readback: %s\n", renderer.last_error().c_str()); return 1; }
+    if (!o.out.empty()) {
+        if (stbi_write_png(o.out.c_str(), static_cast<int>(img.width), static_cast<int>(img.height),
+                           4, img.rgba.data(), static_cast<int>(img.width) * 4) == 0) {
+            std::fprintf(stderr, "PNG write failed: %s\n", o.out.c_str()); return 1;
+        }
+    }
+
+    // Luminance histogram (256 bins over Rec.709 luma) -> mean + percentiles.
+    uint64_t hist[256] = {};
+    const size_t px = static_cast<size_t>(img.width) * img.height;
+    for (size_t p = 0; p < px; ++p) {
+        const uint8_t* c = &img.rgba[p * 4];
+        const float y = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
+        int b = static_cast<int>(y); if (b < 0) b = 0; if (b > 255) b = 255;
+        ++hist[b];
+    }
+    uint64_t acc = 0; double sum = 0.0;
+    int p01 = 0, p50 = 0, p99 = 0;
+    bool g01 = false, g50 = false, g99 = false;
+    for (int b = 0; b < 256; ++b) {
+        sum += static_cast<double>(b) * static_cast<double>(hist[b]);
+        acc += hist[b];
+        const double frac = static_cast<double>(acc) / static_cast<double>(px);
+        if (!g01 && frac >= 0.01) { p01 = b; g01 = true; }
+        if (!g50 && frac >= 0.50) { p50 = b; g50 = true; }
+        if (!g99 && frac >= 0.99) { p99 = b; g99 = true; }
+    }
+    const double mean = sum / static_cast<double>(px);
+    const double frac_black = static_cast<double>(hist[0] + hist[1] + hist[2]) / static_cast<double>(px);
+    const double frac_white = static_cast<double>(hist[253] + hist[254] + hist[255]) / static_cast<double>(px);
+
+    const uint32_t dbg = renderer.debug_error_count();
+    std::printf("pose: %u\n", o.pose % 5u);
+    std::printf("luma_mean: %.3f\n", mean);
+    std::printf("luma_p01: %d\n", p01);
+    std::printf("luma_p50: %d\n", p50);
+    std::printf("luma_p99: %d\n", p99);
+    std::printf("frac_black: %.4f\n", frac_black);
+    std::printf("frac_white: %.4f\n", frac_white);
     std::printf("debug_error_count: %u\n", dbg);
     return dbg == 0 ? 0 : 3;
 }
@@ -530,6 +627,7 @@ int main(int argc, char** argv) {
     if (o.sim)     return run_sim(o);
     if (o.walkbot) return run_walkbot(o);
     if (o.topdown) return run_topdown(o);
+    if (o.shot)    return run_shot(o);
     if (o.stream)  return run_stream(o);
     if (o.scene)   return run_scene(o);
     if (o.headless || o.windowed) return run_clear(o);

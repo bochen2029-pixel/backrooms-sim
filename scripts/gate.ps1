@@ -149,6 +149,17 @@ function Get-Metric {
     throw "metric '$Key' not found in app output"
 }
 
+# Parse "key: <float>" out of captured app output. Throws if absent.
+function Get-MetricFloat {
+    param([string]$Text, [string]$Key)
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line -match ("^\s*" + [regex]::Escape($Key) + "\s*:\s*(-?\d+(?:\.\d+)?)\s*$")) {
+            return [double]$matches[1]
+        }
+    }
+    throw "float metric '$Key' not found in app output"
+}
+
 function Invoke-GateM1 {
     param([int]$SoakSeconds, [int]$WindowSeconds)
 
@@ -452,6 +463,119 @@ function Invoke-GateM4 {
     }
 }
 
+function Invoke-GateM5 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+
+    $bin = Get-BinDir
+    $tmp = Join-Path $RepoRoot 'runs\gate-m5'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $hashdiff = Join-Path $bin 'hashdiff.exe'
+
+    Assert-Gate 'ctest green (texture-determinism + flicker + full regression)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    Assert-Gate 'core compiles with zero graphics includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+
+    # 5 canonical poses x 3 seeds: each lit shot is bit-identical across two
+    # fresh processes (texture + flicker + stream determinism), matches its
+    # committed golden, is debug-clean, and lands in the luminance band (neither
+    # all-black nor blown-out).
+    Assert-Gate 'lit shots: 5 poses x 3 seeds bit-identical, match goldens, in luminance band, zero debug' {
+        foreach ($seed in 1, 7, 42) {
+            for ($pose = 0; $pose -le 4; ++$pose) {
+                $golden = Join-Path $RepoRoot "goldens\m5\shot_seed$($seed)_pose$($pose).png"
+                if (-not (Test-Path $golden)) { throw "missing golden seed $seed pose $pose" }
+                $a = Join-Path $tmp "shot_$($seed)_$($pose)_a.png"
+                $b = Join-Path $tmp "shot_$($seed)_$($pose)_b.png"
+                $ra = Invoke-AppCapture @('--shot', '--seed', "$seed", '--pose', "$pose", '--ticks', '0', '--width', '640', '--height', '360', '--out', $a)
+                if ($ra.Exit -ne 0) { throw "shot seed $seed pose $pose exited $($ra.Exit)" }
+                if ((Get-Metric $ra.Out 'debug_error_count') -ne 0) { throw "shot seed $seed pose $pose had debug-layer messages" }
+                $rb = Invoke-AppCapture @('--shot', '--seed', "$seed", '--pose', "$pose", '--ticks', '0', '--width', '640', '--height', '360', '--out', $b)
+                if ($rb.Exit -ne 0) { throw "shot seed $seed pose $pose (run2) exited $($rb.Exit)" }
+                $hA = (& $hashdiff hash $a | Select-Object -Last 1)
+                $hB = (& $hashdiff hash $b | Select-Object -Last 1)
+                if ($hA -ne $hB) { throw "shot seed $seed pose $pose not bit-identical across runs ($hA vs $hB)" }
+                $d = (& $hashdiff diff $a $golden | Select-Object -Last 1)
+                if ([double]$d -ne 0.0) { throw "shot seed $seed pose $pose differs from golden (diff=$d)" }
+                $mean = Get-MetricFloat $ra.Out 'luma_mean'
+                $fb = Get-MetricFloat $ra.Out 'frac_black'
+                $fw = Get-MetricFloat $ra.Out 'frac_white'
+                if ($mean -lt 50.0 -or $mean -gt 220.0) { throw "seed $seed pose $pose luma_mean $mean outside [50,220]" }
+                if ($fb -gt 0.35) { throw "seed $seed pose $pose frac_black $fb > 0.35 (too dark)" }
+                if ($fw -gt 0.20) { throw "seed $seed pose $pose frac_white $fw > 0.20 (blown out)" }
+            }
+        }
+        Write-Note "15 lit shots: bit-identical x2, golden-matched, luminance in band, debug-clean"
+    }
+
+    # Lit pipeline still hits the frame-time budget: median >= 120 FPS at 1440p
+    # (best of 2 to absorb OS scheduler jitter, per M3/ADR-021).
+    Assert-Gate 'lit walk @1440p: median frame >= 120 FPS (best of 2), zero debug' {
+        $best = 0.0
+        for ($attempt = 1; $attempt -le 2; ++$attempt) {
+            $csv = Join-Path $tmp "fps$attempt.csv"
+            $r = Invoke-AppCapture @('--stream', '--frames', '2000', '--width', '2560', '--height', '1440', '--csv', $csv, '--seed', '7')
+            if ($r.Exit -ne 0) { throw "lit walk exited $($r.Exit)" }
+            if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "lit walk had D3D12 debug-layer messages" }
+            $h = Get-HitchStats $csv
+            $fps = 1000.0 / $h.Median
+            Write-Note ("attempt ${attempt}: frames={0} median={1:N3}ms ({2:N1} FPS) p99={3:N3}ms" -f `
+                $h.FrameCount, $h.Median, $fps, $h.P99)
+            if ($fps -gt $best) { $best = $fps }
+            if ($best -ge 120.0) { break }
+        }
+        if ($best -lt 120.0) { throw "median only $([math]::Round($best,1)) FPS at 1440p (< 120, NFR violated)" }
+    }
+
+    # Regression: M5's renderer changes must not move the earlier render goldens.
+    Assert-Gate 'regression: M1 frame-0, M2 room, M4 top-down goldens still bit-match' {
+        $f0 = Join-Path $tmp 'm1_frame0.png'
+        $r = Invoke-AppCapture @('--headless', '--out', $f0, '--width', '320', '--height', '180')
+        if ($r.Exit -ne 0) { throw "M1 frame-0 render exited $($r.Exit)" }
+        $d = (& $hashdiff diff $f0 (Join-Path $RepoRoot 'goldens\m1\frame0_320x180.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M1 frame-0 golden regressed (diff=$d)" }
+
+        $room = Join-Path $tmp 'm2_room.png'
+        $r = Invoke-AppCapture @('--scene', '--out', $room, '--width', '640', '--height', '360')
+        if ($r.Exit -ne 0) { throw "M2 room render exited $($r.Exit)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "M2 room render had debug-layer messages" }
+        $d = (& $hashdiff diff $room (Join-Path $RepoRoot 'goldens\m2\room_640x360.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M2 room golden regressed (diff=$d)" }
+
+        foreach ($seed in 1, 7) {
+            $td = Join-Path $tmp "m4_td_$seed.png"
+            $r = Invoke-AppCapture @('--topdown', '--out', $td, '--width', '512', '--height', '512', '--seed', "$seed")
+            if ($r.Exit -ne 0) { throw "M4 top-down seed $seed exited $($r.Exit)" }
+            if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "M4 top-down seed $seed had debug-layer messages" }
+            $d = (& $hashdiff diff $td (Join-Path $RepoRoot "goldens\m4\topdown_seed$($seed).png") | Select-Object -Last 1)
+            if ([double]$d -ne 0.0) { throw "M4 top-down seed $seed golden regressed (diff=$d)" }
+        }
+    }
+
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -463,6 +587,7 @@ try {
         'M2'    { Invoke-GateM2 }
         'M3'    { Invoke-GateM3 -StreamSoakSeconds $StreamSoakSeconds }
         'M4'    { Invoke-GateM4 }
+        'M5'    { Invoke-GateM5 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

@@ -57,10 +57,20 @@ struct ChunkVertex {
     float material;   // kMat* (selects texture-array slice; M5)
 };
 
+constexpr float kCellSize = kChunkSize / 8.0f;  // 4 m (matches gen layout)
+constexpr float kCeilingHeight = 3.0f;
+
 // Fluorescent ceiling cells form a regular grid (the backrooms light grid):
 // every other global cell in both axes. gen tiles + renderer lights agree here.
 inline bool is_fluorescent_cell(int64_t gi, int64_t gj) {
     return ((gi & 1) == 0) && ((gj & 1) == 0);
+}
+
+// World-space position of the fluorescent light at fluorescent cell (gi, gj).
+inline void fluorescent_light_pos(int64_t gi, int64_t gj, float out[3]) {
+    out[0] = (static_cast<float>(gi) + 0.5f) * kCellSize;
+    out[1] = kCeilingHeight;
+    out[2] = (static_cast<float>(gj) + 0.5f) * kCellSize;
 }
 
 struct ChunkData {

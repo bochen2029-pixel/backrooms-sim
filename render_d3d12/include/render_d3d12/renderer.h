@@ -63,7 +63,7 @@ public:
     // hitches). Returns the number of chunks actually drawn via out_drawn.
     bool render_chunks(const contracts::CameraPose& camera,
                        const std::vector<contracts::ResidentChunk>& resident,
-                       uint32_t upload_budget, uint32_t* out_drawn);
+                       uint32_t upload_budget, uint64_t tick, uint32_t* out_drawn);
 
     // Headless: orthographic top-down render of the given chunks over the world
     // region [cx-half, cx+half] x [cz-half, cz+half] (a debug-render golden).

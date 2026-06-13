@@ -13,7 +13,12 @@ via shared edge hashes. INV-3 Connectivity — no sealed regions. Compiled
 **Public surface.**
 - `contracts/chunk_gen_v1.h` — `GenerateChunk` (pure/total, INV-2) +
   `ChunkContentHash` + `ValidateChunkGeometry`. M4 geometry is a real **Level-0
-  maze**: world-coord floor + walls (render verts + collision AABBs).
+  maze**: world-coord floor + walls (render verts + collision AABBs). M5 extends
+  each vertex with `uv` + `material` (kMat*), assigns materials (floor=Carpet,
+  walls=Wallpaper), and emits a **ceiling** grid carrying a regular
+  **fluorescent-tile pattern** (`is_fluorescent_cell` / `fluorescent_light_pos`,
+  shared verbatim with the renderer's lights). The ceiling is render-only — it is
+  **not** added to collision, so the wanderer/walk-bot are unaffected.
 - `gen/layout.h` (M4) — `generate_layout` (G=8 spanning-tree maze + ~25% extra
   carves + 4 edge-hash doorways that neighbours agree on) + `validate_connectivity`
   (flood-fill, zero sealed).
@@ -21,5 +26,7 @@ via shared edge hashes. INV-3 Connectivity — no sealed regions. Compiled
 
 **Planned.** Biomes / set pieces / verticality (M7), set-piece injection.
 
-**Status:** M4 — Level-0 maze. 10,000-chunk connectivity (zero sealed) + geometry
-validators; adjacent-chunk seam doorways agree; regen bit-identical.
+**Status:** M5 — adds per-vertex uv/material + a fluorescent-patterned ceiling
+(render-only) to the Level-0 maze. 10,000-chunk connectivity (zero sealed) +
+geometry validators still green; adjacent-chunk seam doorways agree; regen
+bit-identical (`ChunkContentHash` now covers uv + material).

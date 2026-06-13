@@ -4,41 +4,49 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
-## Session 6 — M5: Procedural Materials + Raster Lighting  🟡 IN PROGRESS (phase 1)
+## Session 6 — M5: Procedural Materials + Raster Lighting v1  ✅ gate green (`m5-green`)
 
-**Done (committed, additive; M0-M4 stay green, M3 re-verified with textures).**
+**Status: `gate.ps1 -Milestone M5` exits 0.** Backrooms now *looks* like the
+backrooms: yellow wallpaper, damp carpet, dark ceiling tiles, glowing fluorescent
+panels, even hazy fluorescent lighting. ADRs 025–027.
+
+**Done.**
 - **Procedural textures** — `render_d3d12/texgen.*` (D3D12-free, unit-tested):
-  `generate_texture` for Wallpaper/Carpet/CeilingTile/Fluorescent/Baseboard
-  (deterministic per (kind,seed)) + `texture_hash`. **Texture-determinism gate
-  satisfied.**
-- **Chunk geometry** — `ChunkVertex` extended with uv + material;
-  `GenerateChunk` assigns materials (floor=Carpet, walls=Wallpaper) and adds a
-  **ceiling** grid with a regular **fluorescent-tile pattern** (`is_fluorescent_cell`,
-  shared by gen + renderer). Ceiling NOT in collision (walk-bot unaffected).
-- **GPU textures + lit render** — `render_chunks` now uses a **lit pipeline**:
-  a **Texture2DArray** (5 slices) uploaded via upload-heap + `CopyTextureRegion`,
-  a shader-visible **SRV heap** + **static sampler** + root descriptor table; the
-  lit shader samples by (material, uv), applies a per-chunk hue tint + lambert,
-  fluorescent panels emissive. Debug-clean; M3 hitch p99/median 1.14x.
-- **Top-down preserved** — `render_topdown` discards ceiling/fluorescent (a root
-  constant toggle); wall colour reverted to the M4 value, so both M4 top-down
-  goldens still match exactly (no re-capture).
-- Progress report at `PROGRESS.md`.
+  5 materials (Wallpaper/Carpet/CeilingTile/Fluorescent/Baseboard), deterministic
+  per (kind,seed), + `texture_hash`.
+- **Chunk geometry** — `ChunkVertex` gains uv + material (48B stride);
+  `GenerateChunk` assigns materials (floor=Carpet, walls=Wallpaper) and emits a
+  **ceiling** grid with the **fluorescent-tile pattern** (`is_fluorescent_cell` /
+  `fluorescent_light_pos`, shared verbatim by gen + renderer). Ceiling render-only
+  (not collidable). `ChunkContentHash` covers uv+material; M3 regen/seam re-green.
+- **GPU textured + lit render** — `render_chunks(.., tick, ..)` uses a **lit
+  pipeline**: Texture2DArray (5 slices, fenced upload + `CopyTextureRegion`),
+  shader-visible SRV heap + static sampler + root descriptor table; samples by
+  (material, uv) with a per-chunk hue tint.
+- **Forward fluorescent lighting** — renderer gathers ceiling-grid lights within
+  R=10 cells of the camera into a CBV (b1, ≤64), each scaled by
+  **`core::light_flicker(seed, light_id, tick)`** (pure, `/fp:strict`, ~1/8 lights
+  flicker — lives in `core` so replays reproduce lighting). Shader: ambient 0.22 +
+  Σ Lambert×atten, then a **highlight knee** (compress >1.0 by 0.18×) so stacked
+  lights keep the wallpaper hue instead of clipping to white. Intensity 1.0.
+- **`--shot` mode** — deterministic fixed-pose lit render (5 canonical poses) at a
+  fixed flicker tick; prints a luminance histogram. Bit-exact per (seed,pose,tick).
+- **Gate `Invoke-GateM5`** — ctest (texgen determinism + full regression) · INV-5 ·
+  **5 poses × 3 seeds (1,7,42) goldens** `goldens/m5/` (640×360, goldgen-captured):
+  bit-identical ×2, golden-matched, **luminance band** (mean∈[50,220],
+  frac_black≤0.35, frac_white≤0.20), debug-clean · **≥120 FPS @1440p** best-of-2
+  (measured **~179 FPS**) · **regression**: M1/M2/M4 render goldens still bit-match.
 
-**Remaining for M5 (start here).**
-1. **Forward fluorescent lighting** — gather near-camera fluorescent-grid lights
-   into a CBV (b1); lit shader sums diffuse x falloff + flat ambient. Add
-   `core::light_flicker(seed, light_id, tick)` (deterministic, replayable);
-   renderer scales each light by it.
-2. Gate `Invoke-GateM5`: texture hash (done) · **5 poses x 3 seeds goldens**
-   (fixed-pose textured+lit renders; add an app `--shot` mode) · **luminance
-   histogram** band (mean/percentile; catch all-black/blown-out) · **>=120 FPS
-   @1440p** + zero debug. Then regression M0-M4, tag `m5-green`.
+**Pending / next.** M6 — Procedural Audio (room-probe reverb, fluorescent buzz).
 
-**Gotchas.** Keep flicker in `core` so replays reproduce lighting. The lit
-pipeline binds the SRV heap via `SetDescriptorHeaps` + a root descriptor table;
-the texture upload is a one-time fenced copy. `kChunkSlotCapacityBytes` is now
-6144 verts x 48B stride.
+**Gotchas.**
+- Flicker MUST stay in `core` (replay reproducibility). Renderer only *reads* it.
+- The lit shot is bit-identical across runs despite multithreaded streaming —
+  co-planar same-material geometry is draw-order-invariant (verified ×3).
+- Light intensity 1.0 + knee 0.18 + ambient 0.22 are the tuned look; raising
+  intensity blows walls to pure white (lost the yellow). See ADR-026.
+- `--shot` poses sit at the proven-open spawn cell (16,16) and vary only
+  orientation, so no pose embeds the camera in a wall on any seed.
 
 ---
 
