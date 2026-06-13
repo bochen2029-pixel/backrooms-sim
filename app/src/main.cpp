@@ -288,6 +288,7 @@ int run_stream(const Options& o) {
     if (!renderer.init_headless(o.width, o.height)) {
         std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1;
     }
+    renderer.set_texture_seed(o.seed);
     br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
     br::telemetry::FrameCsv csv;
     if (!o.csv.empty() && !csv.open(o.csv)) {

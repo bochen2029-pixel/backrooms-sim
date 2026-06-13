@@ -1,5 +1,6 @@
-// gen/chunk.cpp — Level-0 chunk geometry (M4): builds floor + maze walls from
-// the connected layout (gen/layout.h) into render vertices + collision AABBs.
+// gen/chunk.cpp — Level-0 chunk geometry: floor + maze walls + ceiling (with a
+// regular fluorescent-tile grid) from the connected layout (gen/layout.h), into
+// render vertices (pos/nrm/color/uv/material) + collision AABBs.
 #include "contracts/chunk_gen_v1.h"
 
 #include <cstring>
@@ -11,41 +12,45 @@ namespace br::contracts {
 
 namespace {
 constexpr float kWallThick = 0.3f;   // wall thickness (m)
-constexpr float kWallHeight = 3.0f;  // wall + room height (m)
+constexpr float kWallHeight = 3.0f;  // wall + ceiling height (m)
 
 void push_vertex(std::vector<ChunkVertex>& v, float x, float y, float z,
-                 const float n[3], const float col[3]) {
+                 const float n[3], const float col[3], float u, float w, float mat) {
     ChunkVertex cv;
     cv.pos[0] = x; cv.pos[1] = y; cv.pos[2] = z;
     cv.nrm[0] = n[0]; cv.nrm[1] = n[1]; cv.nrm[2] = n[2];
     cv.color[0] = col[0]; cv.color[1] = col[1]; cv.color[2] = col[2];
+    cv.uv[0] = u; cv.uv[1] = w;
+    cv.material = mat;
     v.push_back(cv);
 }
 
+// Quad a->b->c->d with per-quad UV (0,0),(1,0),(1,1),(0,1).
 void push_quad(std::vector<ChunkVertex>& v, const float a[3], const float b[3],
-               const float c[3], const float d[3], const float n[3], const float col[3]) {
-    push_vertex(v, a[0], a[1], a[2], n, col);
-    push_vertex(v, b[0], b[1], b[2], n, col);
-    push_vertex(v, c[0], c[1], c[2], n, col);
-    push_vertex(v, a[0], a[1], a[2], n, col);
-    push_vertex(v, c[0], c[1], c[2], n, col);
-    push_vertex(v, d[0], d[1], d[2], n, col);
+               const float c[3], const float d[3], const float n[3],
+               const float col[3], float mat) {
+    push_vertex(v, a[0], a[1], a[2], n, col, 0.0f, 0.0f, mat);
+    push_vertex(v, b[0], b[1], b[2], n, col, 1.0f, 0.0f, mat);
+    push_vertex(v, c[0], c[1], c[2], n, col, 1.0f, 1.0f, mat);
+    push_vertex(v, a[0], a[1], a[2], n, col, 0.0f, 0.0f, mat);
+    push_vertex(v, c[0], c[1], c[2], n, col, 1.0f, 1.0f, mat);
+    push_vertex(v, d[0], d[1], d[2], n, col, 0.0f, 1.0f, mat);
 }
 
 void push_box(std::vector<ChunkVertex>& v, float x0, float y0, float z0,
-              float x1, float y1, float z1, const float col[3]) {
+              float x1, float y1, float z1, const float col[3], float mat) {
     const float c000[3]={x0,y0,z0}, c001[3]={x0,y0,z1}, c010[3]={x0,y1,z0}, c011[3]={x0,y1,z1};
     const float c100[3]={x1,y0,z0}, c101[3]={x1,y0,z1}, c110[3]={x1,y1,z0}, c111[3]={x1,y1,z1};
     const float nxn[3]={-1,0,0}, nxp[3]={1,0,0}, nyp[3]={0,1,0}, nzn[3]={0,0,-1}, nzp[3]={0,0,1};
-    push_quad(v, c000, c001, c011, c010, nxn, col);
-    push_quad(v, c100, c110, c111, c101, nxp, col);
-    push_quad(v, c010, c011, c111, c110, nyp, col);  // top (visible from above)
-    push_quad(v, c000, c010, c110, c100, nzn, col);
-    push_quad(v, c001, c101, c111, c011, nzp, col);
+    push_quad(v, c000, c001, c011, c010, nxn, col, mat);
+    push_quad(v, c100, c110, c111, c101, nxp, col, mat);
+    push_quad(v, c010, c011, c111, c110, nyp, col, mat);  // top
+    push_quad(v, c000, c010, c110, c100, nzn, col, mat);
+    push_quad(v, c001, c101, c111, c011, nzp, col, mat);
 }
 
 void add_wall(ChunkData& c, float x0, float z0, float x1, float z1, const float col[3]) {
-    push_box(c.vertices, x0, 0.0f, z0, x1, kWallHeight, z1, col);
+    push_box(c.vertices, x0, 0.0f, z0, x1, kWallHeight, z1, col, kMatWallpaper);
     BoxInstance bi;
     bi.mn[0] = x0; bi.mn[1] = 0.0f; bi.mn[2] = z0;
     bi.mx[0] = x1; bi.mx[1] = kWallHeight; bi.mx[2] = z1;
@@ -63,8 +68,8 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
     const float cs = gen::kCellSize;
     const float t = kWallThick * 0.5f;
     const int G = gen::kCellsPerChunk;
+    const float H = kWallHeight;
 
-    // Per-chunk floor tint (muted backrooms palette); walls a darker shade.
     br::core::Pcg64 rng(gen::chunk_seed(world_seed, key));
     const float floor_col[3] = {
         0.58f + 0.22f * static_cast<float>(rng.next_double()),
@@ -72,21 +77,31 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
         0.26f + 0.14f * static_cast<float>(rng.next_double()),
     };
     const float wall_col[3] = { floor_col[0] * 0.45f, floor_col[1] * 0.45f, floor_col[2] * 0.40f };
+    const float ceil_col[3] = { 0.85f, 0.85f, 0.82f };
+    const float lamp_col[3] = { 1.0f, 1.0f, 0.97f };
     const float up[3] = {0.0f, 1.0f, 0.0f};
+    const float down[3] = {0.0f, -1.0f, 0.0f};
 
-    // Floor grid (world coords; boundary verts align with neighbours -> no seam).
+    // Floor + ceiling grids (per cell). Ceiling faces down; some tiles fluorescent.
     for (int i = 0; i < G; ++i) {
         for (int j = 0; j < G; ++j) {
             const float x0 = ox + static_cast<float>(i) * cs;
             const float x1 = ox + static_cast<float>(i + 1) * cs;
             const float z0 = oz + static_cast<float>(j) * cs;
             const float z1 = oz + static_cast<float>(j + 1) * cs;
-            const float a[3]={x0,0.0f,z0}, b[3]={x1,0.0f,z0}, d[3]={x1,0.0f,z1}, e[3]={x0,0.0f,z1};
-            push_quad(c.vertices, a, b, d, e, up, floor_col);
+            const float f0[3]={x0,0.0f,z0}, f1[3]={x1,0.0f,z0}, f2[3]={x1,0.0f,z1}, f3[3]={x0,0.0f,z1};
+            push_quad(c.vertices, f0, f1, f2, f3, up, floor_col, kMatCarpet);
+
+            const int64_t gi = key.cx * G + i;
+            const int64_t gj = key.cz * G + j;
+            const bool lamp = is_fluorescent_cell(gi, gj);
+            const float ck0[3]={x0,H,z0}, ck1[3]={x1,H,z0}, ck2[3]={x1,H,z1}, ck3[3]={x0,H,z1};
+            push_quad(c.vertices, ck0, ck3, ck2, ck1, down,
+                      lamp ? lamp_col : ceil_col, lamp ? kMatFluorescent : kMatCeiling);
         }
     }
 
-    // Vertical walls (on x-lines xi, spanning z-cell j).
+    // Vertical walls (x-lines).
     for (int xi = 0; xi <= G; ++xi) {
         for (int j = 0; j < G; ++j) {
             if (!L.vwall[xi][j]) continue;
@@ -96,7 +111,7 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
             add_wall(c, xc - t, z0, xc + t, z1, wall_col);
         }
     }
-    // Horizontal walls (on z-lines zj, spanning x-cell i).
+    // Horizontal walls (z-lines).
     for (int i = 0; i < G; ++i) {
         for (int zj = 0; zj <= G; ++zj) {
             if (!L.hwall[i][zj]) continue;
@@ -125,29 +140,22 @@ uint64_t ChunkContentHash(const ChunkData& c) {
         mix(v.pos, sizeof(v.pos));
         mix(v.nrm, sizeof(v.nrm));
         mix(v.color, sizeof(v.color));
+        mix(v.uv, sizeof(v.uv));
+        mix(&v.material, sizeof(v.material));
     }
     return h;
 }
 
 bool ValidateChunkGeometry(const ChunkData& c) {
-    // Thresholds sit well between the wall thickness (~0.3 m) and the cell size
-    // (4 m), so they tolerate the float-precision noise that grows with world
-    // distance (far-chunk precision is deferred to camera-relative rendering)
-    // while still rejecting genuine fat/stacked-wall bugs.
     const float eps = 0.01f;
     const float thin = gen::kCellSize * 0.5f;  // 2.0 m separator
     for (const BoxInstance& b : c.collision) {
-        // Non-degenerate (positive extent on every axis).
         if (b.mx[0] - b.mn[0] <= eps || b.mx[1] - b.mn[1] <= eps || b.mx[2] - b.mn[2] <= eps) return false;
-        // Floor-anchored (no floating walls).
         if (b.mn[1] < -eps || b.mn[1] > eps) return false;
-        // A wall is thin in exactly one horizontal axis (not a fat block).
         const bool thinX = (b.mx[0] - b.mn[0]) <= thin;
         const bool thinZ = (b.mx[2] - b.mn[2]) <= thin;
         if (thinX == thinZ) return false;
     }
-    // No two walls overlap volumetrically beyond a shared corner (a corner is
-    // thickness-scale; a duplicate/stacked wall extends a full cell).
     for (size_t i = 0; i < c.collision.size(); ++i) {
         for (size_t j = i + 1; j < c.collision.size(); ++j) {
             const BoxInstance& a = c.collision[i];

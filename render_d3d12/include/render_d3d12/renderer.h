@@ -53,6 +53,10 @@ public:
     // depth, into the offscreen target. Deterministic for a fixed view/GPU.
     bool render_world_view(const contracts::WorldView& view);
 
+    // Select the seed whose procedural material textures are used by the lit
+    // chunk render (M5). Cheap; the upload happens lazily on the next draw.
+    void set_texture_seed(uint64_t seed);
+
     // Headless: draw the resident streamed chunks from the camera (depth-tested,
     // vertex-colored). Uploads up to `upload_budget` new chunk meshes per call
     // and frees meshes that are no longer resident (bounds GPU memory, smooths

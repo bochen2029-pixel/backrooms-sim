@@ -3,6 +3,7 @@
 // swapchain present. No CD3DX12 helpers (avoids a new dependency); resource
 // descriptors are filled by hand.
 #include "render_d3d12/renderer.h"
+#include "render_d3d12/texgen.h"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -72,7 +73,7 @@ struct ChunkSlot {
     D3D12_VERTEX_BUFFER_VIEW view = {};
     UINT vertex_count = 0;
 };
-constexpr size_t kChunkSlotCapacityBytes = 6144 * 36;  // up to ~3200 maze verts/chunk + headroom
+constexpr size_t kChunkSlotCapacityBytes = 6144 * 48;  // ~3600 maze verts/chunk @ 48B stride + headroom
 
 struct Renderer::Impl {
     ComPtr<ID3D12Device> device;
@@ -112,6 +113,16 @@ struct Renderer::Impl {
     std::vector<ChunkSlot> chunkPool;
     std::vector<uint32_t> chunkFree;                 // free pool slot indices
     std::map<contracts::ChunkKey, uint32_t> chunkSlotOf;
+
+    // Textured + lit pipeline (M5): material texture-array + sampler.
+    ComPtr<ID3D12RootSignature> litRoot;
+    ComPtr<ID3D12PipelineState> litPso;
+    bool litReady = false;
+    ComPtr<ID3D12Resource> texArray;                 // Texture2DArray of materials
+    ComPtr<ID3D12DescriptorHeap> srvHeap;            // shader-visible (1 SRV)
+    uint64_t texSeed = 0;
+    uint64_t pendingTexSeed = 0;                     // seed the app wants textured
+    bool texUploaded = false;
 
     HANDLE fenceEvent = nullptr;
     UINT64 fenceValue = 0;
@@ -750,18 +761,20 @@ const char* kChunkHlsl = R"(
 cbuffer Constants : register(b0) {
     row_major float4x4 uMVP;
     float3 uLightDir;
-    float  uPad;
+    float  uTopDownDiscard;   // >0.5: hide ceiling/fluorescent (top-down debug)
 };
-struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; float3 col : COLOR; };
-struct VSOut { float4 clip : SV_POSITION; float3 nrm : NORMAL; float3 col : COLOR; };
+struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; float3 col : COLOR; float2 uv : TEXCOORD0; float mat : TEXCOORD1; };
+struct VSOut { float4 clip : SV_POSITION; float3 nrm : NORMAL; float3 col : COLOR; float mat : TEXCOORD1; };
 VSOut VSMain(VSIn i) {
     VSOut o;
     o.clip = mul(float4(i.pos, 1.0), uMVP);
     o.nrm = i.nrm;
     o.col = i.col;
+    o.mat = i.mat;
     return o;
 }
 float4 PSMain(VSOut i) : SV_TARGET {
+    if (uTopDownDiscard > 0.5 && i.mat >= 1.5) discard;
     float ndl = saturate(dot(normalize(i.nrm), -normalize(uLightDir)));
     return float4(i.col * (0.30 + 0.70 * ndl), 1.0);
 }
@@ -816,16 +829,18 @@ bool ensure_chunk_pipeline(Renderer::Impl& d, std::string& err) {
     if (!compile_shader(kChunkHlsl, "VSMain", "vs_5_0", vs, err)) return false;
     if (!compile_shader(kChunkHlsl, "PSMain", "ps_5_0", ps, err)) return false;
 
-    D3D12_INPUT_ELEMENT_DESC layout[3] = {
+    D3D12_INPUT_ELEMENT_DESC layout[5] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"COLOR",    0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 36, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 1, DXGI_FORMAT_R32_FLOAT,       0, 44, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     };
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
     pso.pRootSignature = d.chunkRoot.Get();
     pso.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
     pso.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
-    pso.InputLayout = { layout, 3 };
+    pso.InputLayout = { layout, 5 };
     fill_opaque_pso_states(pso);
     if (FAILED(d.device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&d.chunkPso)))) {
         err = "chunk CreateGraphicsPipelineState failed";
@@ -877,6 +892,186 @@ bool upload_chunk_mesh(Renderer::Impl& d, const contracts::ResidentChunk& rc, st
     cs.view.StrideInBytes = sizeof(contracts::ChunkVertex);
     cs.vertex_count = rc.vertex_count;
     d.chunkSlotOf[rc.key] = slot;
+    return true;
+}
+
+const char* kLitHlsl = R"(
+cbuffer Constants : register(b0) {
+    row_major float4x4 uMVP;
+    float3 uLightDir;
+    float  uPad;
+};
+Texture2DArray gTex : register(t0);
+SamplerState   gSamp : register(s0);
+struct VSIn  { float3 pos:POSITION; float3 nrm:NORMAL; float3 col:COLOR; float2 uv:TEXCOORD0; float mat:TEXCOORD1; };
+struct VSOut { float4 clip:SV_POSITION; float3 wnrm:NORMAL; float3 col:COLOR; float2 uv:TEXCOORD0; float mat:TEXCOORD1; };
+VSOut VSMain(VSIn i) {
+    VSOut o;
+    o.clip = mul(float4(i.pos, 1.0), uMVP);
+    o.wnrm = i.nrm; o.col = i.col; o.uv = i.uv; o.mat = i.mat;
+    return o;
+}
+float4 PSMain(VSOut i) : SV_TARGET {
+    float3 tex = gTex.Sample(gSamp, float3(i.uv, i.mat)).rgb;
+    float m = max(i.col.r, max(i.col.g, i.col.b));
+    float3 tint = (m > 0.001) ? (i.col / m) : float3(1,1,1);     // per-chunk hue (no darkening)
+    float3 albedo = tex * lerp(float3(1,1,1), tint, 0.5);
+    float ndl = saturate(dot(normalize(i.wnrm), -normalize(uLightDir)));
+    bool emissive = (i.mat >= 2.5 && i.mat < 3.5);               // fluorescent panels self-lit
+    float lighting = emissive ? 1.0 : (0.30 + 0.70 * ndl);
+    return float4(albedo * lighting, 1.0);
+}
+)";
+
+bool upload_textures(Renderer::Impl& d, uint64_t seed, std::string& err) {
+    const UINT slices = kTexCount;
+    D3D12_RESOURCE_DESC td = {};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = static_cast<UINT64>(kTexSize);
+    td.Height = static_cast<UINT>(kTexSize);
+    td.DepthOrArraySize = static_cast<UINT16>(slices);
+    td.MipLevels = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    const D3D12_HEAP_PROPERTIES def = heap_props(D3D12_HEAP_TYPE_DEFAULT);
+    if (FAILED(d.device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&d.texArray)))) {
+        err = "texture array create failed"; return false;
+    }
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp[kTexCount] = {};
+    UINT rows[kTexCount] = {};
+    UINT64 rowBytes[kTexCount] = {};
+    UINT64 total = 0;
+    d.device->GetCopyableFootprints(&td, 0, slices, 0, fp, rows, rowBytes, &total);
+
+    ComPtr<ID3D12Resource> upload;
+    D3D12_RESOURCE_DESC bd = {};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width = total;
+    bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
+    bd.Format = DXGI_FORMAT_UNKNOWN; bd.SampleDesc.Count = 1;
+    bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    const D3D12_HEAP_PROPERTIES up = heap_props(D3D12_HEAP_TYPE_UPLOAD);
+    if (FAILED(d.device->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &bd,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)))) {
+        err = "texture upload buffer failed"; return false;
+    }
+    uint8_t* mapped = nullptr;
+    const D3D12_RANGE none = { 0, 0 };
+    if (FAILED(upload->Map(0, &none, reinterpret_cast<void**>(&mapped)))) { err = "texture map failed"; return false; }
+    std::vector<uint8_t> rgba;
+    for (UINT s = 0; s < slices; ++s) {
+        generate_texture(static_cast<TexKind>(s), seed, rgba);
+        const UINT64 rp = fp[s].Footprint.RowPitch;
+        for (UINT y = 0; y < static_cast<UINT>(kTexSize); ++y) {
+            std::memcpy(mapped + fp[s].Offset + static_cast<size_t>(y) * rp,
+                        rgba.data() + static_cast<size_t>(y) * kTexSize * 4u,
+                        static_cast<size_t>(kTexSize) * 4u);
+        }
+    }
+    upload->Unmap(0, nullptr);
+
+    if (FAILED(d.alloc->Reset())) { err = "tex alloc reset"; return false; }
+    if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { err = "tex list reset"; return false; }
+    for (UINT s = 0; s < slices; ++s) {
+        D3D12_TEXTURE_COPY_LOCATION dst = {};
+        dst.pResource = d.texArray.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = s;
+        D3D12_TEXTURE_COPY_LOCATION src = {};
+        src.pResource = upload.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint = fp[s];
+        d.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+    const D3D12_RESOURCE_BARRIER toSrv = transition(
+        d.texArray.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    d.list->ResourceBarrier(1, &toSrv);
+    if (FAILED(d.list->Close())) { err = "tex list close"; return false; }
+    ID3D12CommandList* lists[] = { d.list.Get() };
+    d.queue->ExecuteCommandLists(1, lists);
+    const UINT64 v = ++d.fenceValue;
+    d.queue->Signal(d.fence.Get(), v);
+    if (d.fence->GetCompletedValue() < v) {
+        d.fence->SetEventOnCompletion(v, d.fenceEvent);
+        WaitForSingleObject(d.fenceEvent, 5000);
+    }
+
+    if (!d.srvHeap) {
+        D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+        hd.NumDescriptors = 1;
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (FAILED(d.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&d.srvHeap)))) { err = "srv heap"; return false; }
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Texture2DArray.MipLevels = 1;
+    sd.Texture2DArray.ArraySize = slices;
+    d.device->CreateShaderResourceView(d.texArray.Get(), &sd,
+                                       d.srvHeap->GetCPUDescriptorHandleForHeapStart());
+    d.texSeed = seed;
+    d.texUploaded = true;
+    return true;
+}
+
+bool ensure_lit_pipeline(Renderer::Impl& d, uint64_t seed, std::string& err) {
+    if (!d.texUploaded || d.texSeed != seed) {
+        if (!upload_textures(d, seed, err)) return false;
+    }
+    if (d.litReady) return true;
+
+    D3D12_DESCRIPTOR_RANGE range = {};
+    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    range.NumDescriptors = 1;
+    range.BaseShaderRegister = 0;
+    range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    D3D12_ROOT_PARAMETER params[2] = {};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[0].Constants.Num32BitValues = 20;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[1].DescriptorTable.NumDescriptorRanges = 1;
+    params[1].DescriptorTable.pDescriptorRanges = &range;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_STATIC_SAMPLER_DESC samp = {};
+    samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samp.ShaderRegister = 0;
+    samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    samp.MaxLOD = D3D12_FLOAT32_MAX;
+    D3D12_ROOT_SIGNATURE_DESC rs = {};
+    rs.NumParameters = 2;
+    rs.pParameters = params;
+    rs.NumStaticSamplers = 1;
+    rs.pStaticSamplers = &samp;
+    rs.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    ComPtr<ID3DBlob> sig, sigErr;
+    if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &sigErr))) { err = "lit SerializeRootSignature"; return false; }
+    if (FAILED(d.device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&d.litRoot)))) { err = "lit CreateRootSignature"; return false; }
+
+    ComPtr<ID3DBlob> vs, ps;
+    if (!compile_shader(kLitHlsl, "VSMain", "vs_5_0", vs, err)) return false;
+    if (!compile_shader(kLitHlsl, "PSMain", "ps_5_0", ps, err)) return false;
+    D3D12_INPUT_ELEMENT_DESC layout[5] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR",    0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 36, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 1, DXGI_FORMAT_R32_FLOAT,       0, 44, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    };
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
+    pso.pRootSignature = d.litRoot.Get();
+    pso.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
+    pso.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+    pso.InputLayout = { layout, 5 };
+    fill_opaque_pso_states(pso);
+    if (FAILED(d.device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&d.litPso)))) { err = "lit pso"; return false; }
+    d.litReady = true;
     return true;
 }
 
@@ -962,6 +1157,10 @@ bool Renderer::render_world_view(const contracts::WorldView& view) {
     return true;
 }
 
+void Renderer::set_texture_seed(uint64_t seed) {
+    if (impl_) impl_->pendingTexSeed = seed;
+}
+
 bool Renderer::render_chunks(const contracts::CameraPose& camera,
                              const std::vector<contracts::ResidentChunk>& resident,
                              uint32_t upload_budget, uint32_t* out_drawn) {
@@ -970,7 +1169,7 @@ bool Renderer::render_chunks(const contracts::CameraPose& camera,
         last_error_ = "render_chunks is headless-only (M3)";
         return false;
     }
-    if (!ensure_chunk_pipeline(d, last_error_)) return false;
+    if (!ensure_lit_pipeline(d, d.pendingTexSeed, last_error_)) return false;
 
     // Return slots whose chunk is no longer resident; upload new ones (budgeted).
     std::set<contracts::ChunkKey> live;
@@ -1017,9 +1216,12 @@ bool Renderer::render_chunks(const contracts::CameraPose& camera,
     D3D12_RECT scissor = { 0, 0, static_cast<LONG>(d.width), static_cast<LONG>(d.height) };
     d.list->RSSetViewports(1, &vp);
     d.list->RSSetScissorRects(1, &scissor);
-    d.list->SetGraphicsRootSignature(d.chunkRoot.Get());
-    d.list->SetPipelineState(d.chunkPso.Get());
+    ID3D12DescriptorHeap* heaps[] = { d.srvHeap.Get() };
+    d.list->SetDescriptorHeaps(1, heaps);
+    d.list->SetGraphicsRootSignature(d.litRoot.Get());
+    d.list->SetPipelineState(d.litPso.Get());
     d.list->SetGraphicsRoot32BitConstants(0, 20, constants, 0);
+    d.list->SetGraphicsRootDescriptorTable(1, d.srvHeap->GetGPUDescriptorHandleForHeapStart());
     d.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     uint32_t drawn = 0;
@@ -1097,6 +1299,7 @@ bool Renderer::render_topdown(const std::vector<contracts::ResidentChunk>& chunk
     constants[14] = maxY / range;
     constants[15] = 1.0f;
     constants[17] = -1.0f;            // light straight down
+    constants[19] = 1.0f;            // hide ceiling/fluorescent (see the maze)
 
     if (FAILED(d.alloc->Reset())) { last_error_ = "allocator reset failed"; return false; }
     if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "command list reset failed"; return false; }

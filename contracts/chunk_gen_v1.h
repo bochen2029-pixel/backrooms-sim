@@ -42,11 +42,26 @@ inline ChunkKey chunk_key_at(int32_t level, float x, float z) {
     return k;
 }
 
+// Material ids (match render_d3d12::TexKind / texture-array slices).
+constexpr float kMatWallpaper = 0.0f;
+constexpr float kMatCarpet = 1.0f;
+constexpr float kMatCeiling = 2.0f;
+constexpr float kMatFluorescent = 3.0f;
+constexpr float kMatBaseboard = 4.0f;
+
 struct ChunkVertex {
     float pos[3];
     float nrm[3];
-    float color[3];
+    float color[3];   // per-chunk tint (also drives the top-down debug view)
+    float uv[2];
+    float material;   // kMat* (selects texture-array slice; M5)
 };
+
+// Fluorescent ceiling cells form a regular grid (the backrooms light grid):
+// every other global cell in both axes. gen tiles + renderer lights agree here.
+inline bool is_fluorescent_cell(int64_t gi, int64_t gj) {
+    return ((gi & 1) == 0) && ((gj & 1) == 0);
+}
 
 struct ChunkData {
     ChunkKey key;
