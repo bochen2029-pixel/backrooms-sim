@@ -15,9 +15,10 @@ Backup remote: **https://github.com/bochen2029-pixel/backrooms-sim** (private).
 | **M5** | Procedural materials + raster fluorescent lighting | M5 | ✅ `m5-green` |
 | **M6** | Procedural audio: synth, room-probe reverb, offline WAV | M6 | ✅ `m6-green` |
 | **M7** | Biomes, set-piece pillars, verticality (level −1 stairwell) | M7 | ✅ `m7-green` |
-| M8–M12 | VHS post · DXR · soak · Director · acceptance | — | ⬜ pending |
+| **M8** | VHS post-processing stack + HUD/timestamp | M8 | ✅ `m8-green` |
+| M9–M12 | DXR · soak · Director · acceptance | — | ⬜ pending |
 
-**8 milestones green and pushed.** Each is verified by a machine-checkable gate
+**9 milestones green and pushed.** Each is verified by a machine-checkable gate
 (`scripts/gate.ps1 -Milestone M<N>` exits 0) and tagged; the remote is the backup.
 
 All numbers below are from real gate runs on the dev machine (RTX 4070 Ti SUPER,
@@ -126,6 +127,21 @@ reaches level −1 with cross-level connectivity + a reproducible hash, and each
 biome has a **fixed-pose lit golden**. Two golden re-captures (tint, then pillars)
 via `goldgen` + ADRs 031–033.
 
+### M8 — VHS Post-Processing + HUD
+The picture gets its analog-horror finish. A single **fullscreen post pass**
+(`render_d3d12`) binds the scene as a texture and composites into a second target:
+**barrel distortion**, **chromatic aberration**, **scanline/interlace flicker**,
+**vignette**, and **seeded film grain** (`hash(px, py, seed + ⌊time·60⌋)`, so a
+fixed time means fixed grain — goldens don't flake). A **HUD** is rasterised on
+the CPU (a 5×7 bitmap font, `app/hud.*`) — `TIME HH:MM:SS`, seed, odometer, chunk,
+level, FPS in CRT-phosphor green — and composited undistorted so it stays crisp.
+Post is **off by default**, so every earlier golden is byte-unchanged. **Gate (all
+4 exit criteria):** post ON/OFF A/B goldens bit-identical ×2 + golden-matched +
+debug-clean; the **timestamp** renders the right sim time (verified via telemetry
+*and* a pixel golden — OCR-free: 305,160 ticks → `00:42:23`); the post pass costs
+**~0.65 ms at 1440p** (budget < 1.5 ms); and the seeded grain keeps the goldens
+deterministic. ADR-034.
+
 ---
 
 ## Architecture & invariants (the rules that keep it coherent)
@@ -142,7 +158,7 @@ via `goldgen` + ADRs 031–033.
   (zero sealed boxes), INV-4 bounded memory (streaming ring), INV-5 core
   isolation (grep-gated), INV-7 headless verification, INV-8 golden integrity
   (only `goldgen` writes `/goldens`, always with a DECISIONS.md entry).
-- **Decisions:** ADR-001..033 in `docs/DECISIONS.md` (each summarised in
+- **Decisions:** ADR-001..034 in `docs/DECISIONS.md` (each summarised in
   ARCHITECTURE.md §8). Notable: vcpkg static triplet, `/fp:strict` core, the
   "test-the-gate" canary, the M3 hitch metric (p99 @1440p, NFR §9), the M4 maze +
   collision design, the M5 deterministic-flicker-in-`core` decision (ADR-026) and
@@ -169,7 +185,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gate.ps1 -Milestone 
 
 App modes built so far: `--headless` · `--window` · `--scene` · `--sim` ·
 `--stream` · `--walkbot` · `--topdown` · `--shot` · `--render-wav` · `--footsteps`
-· `--audiosoak` · `--biomeat` · `--descend` (see `app/MODULE.md`).
+· `--audiosoak` · `--biomeat` · `--descend` · `--post` (see `app/MODULE.md`).
 
 ## Three real bugs caught (and fixed properly, not tuned around)
 
@@ -190,21 +206,20 @@ App modes built so far: `--headless` · `--window` · `--scene` · `--sim` ·
 
 ## What's next
 
-- **M8** VHS post-processing + HUD: a post stack (film grain, chromatic
-  aberration, slight barrel distortion, scanline/interlace flicker, timestamp
-  overlay, autofocus-hunt blur pulse, vignette), all config-toggleable; HUD with
-  odometer, world seed, chunk coords, perf overlay.
-- **M9** DXR path-traced mode · **M10** 8 h walk-bot soak · **M11** the Director
-  (local LLM) · **M12** integration + 12 h acceptance.
+- **M9** DXR path-traced mode (2–3 sessions): DXR 1.1, BLAS per chunk, TLAS refit
+  on stream events, path-traced lighting with temporal accumulation; raster stays
+  default + fallback; emissive fluorescents become the real light sources.
+- **M10** 8 h walk-bot soak · **M11** the Director (local LLM) · **M12**
+  integration + 12 h acceptance.
 
 ## How to continue (next session)
 
 1. Read `docs/ARCHITECTURE.md`, the latest `docs/SESSION_LOG.md` entry, and the
-   M8 section of `docs/MILESTONES.md`.
-2. Produce the M8 change manifest (post-process pass in `render_d3d12`, config
-   toggles, HUD, golden coverage of the post stack) before writing code.
-3. Run `gate.ps1 -Milestone M8` until exit 0, regression-sweep M0–M7, tag
-   `m8-green`, push, write the SESSION_LOG entry.
+   M9 section of `docs/MILESTONES.md`.
+2. Produce the M9 change manifest (`render_dxr`: BLAS/TLAS build, DXR PSO, path
+   tracer, temporal accumulation, raster-parity gate) before writing code.
+3. Run `gate.ps1 -Milestone M9` until exit 0, regression-sweep M0–M8, tag
+   `m9-green`, push, write the SESSION_LOG entry.
 
-_The repo is the memory. Last fully-green tag: `m7-green`. Never resume from a
+_The repo is the memory. Last fully-green tag: `m8-green`. Never resume from a
 broken state — revert to the last green tag if needed._
