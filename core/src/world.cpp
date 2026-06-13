@@ -39,6 +39,13 @@ Vec3 test_room_spawn() {
     return {0.0f, kWandererHalfHeight + 0.02f, 0.0f};
 }
 
+const std::vector<Aabb>& open_ground() {
+    static const std::vector<Aabb> g = {
+        Aabb{{-1.0e6f, -1.0f, -1.0e6f}, {1.0e6f, 0.0f, 1.0e6f}},
+    };
+    return g;
+}
+
 std::vector<contracts::BoxInstance> test_room_box_instances() {
     std::vector<contracts::BoxInstance> out;
     out.reserve(test_room().size());
@@ -104,6 +111,11 @@ Vec3 move_and_collide(Vec3 pos, Vec3 he, Vec3& vel, float dt,
 }
 
 void tick(WorldState& s, const contracts::InputCommand& in) {
+    tick(s, in, test_room());
+}
+
+void tick(WorldState& s, const contracts::InputCommand& in,
+          const std::vector<Aabb>& collision) {
     Wanderer& w = s.wanderer;
 
     // Look.
@@ -133,7 +145,7 @@ void tick(WorldState& s, const contracts::InputCommand& in) {
     const Vec3 he{kWandererRadius, kWandererHalfHeight, kWandererRadius};
     const Vec3 old_pos = w.pos;
     bool grounded = false;
-    w.pos = move_and_collide(w.pos, he, w.vel, kTickDt, test_room(), grounded);
+    w.pos = move_and_collide(w.pos, he, w.vel, kTickDt, collision, grounded);
     w.on_ground = grounded;
 
     // Odometer (horizontal distance only).

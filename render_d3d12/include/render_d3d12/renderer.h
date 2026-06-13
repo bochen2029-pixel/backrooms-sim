@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "contracts/world_view_v1.h"
+#include "contracts/stream_events_v1.h"
 
 namespace br::render_d3d12 {
 
@@ -51,6 +52,14 @@ public:
     // Headless: render the test-room geometry from the view's camera (lit), with
     // depth, into the offscreen target. Deterministic for a fixed view/GPU.
     bool render_world_view(const contracts::WorldView& view);
+
+    // Headless: draw the resident streamed chunks from the camera (depth-tested,
+    // vertex-colored). Uploads up to `upload_budget` new chunk meshes per call
+    // and frees meshes that are no longer resident (bounds GPU memory, smooths
+    // hitches). Returns the number of chunks actually drawn via out_drawn.
+    bool render_chunks(const contracts::CameraPose& camera,
+                       const std::vector<contracts::ResidentChunk>& resident,
+                       uint32_t upload_budget, uint32_t* out_drawn);
 
     // Headless only: copy the rendered target back to CPU as tight RGBA.
     bool readback(FrameImage& out);

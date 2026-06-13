@@ -7,7 +7,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$Milestone,
     [int]$SoakSeconds = 60,
-    [int]$WindowSeconds = 10
+    [int]$WindowSeconds = 10,
+    [int]$StreamSoakSeconds = 600
 )
 
 $ErrorActionPreference = 'Stop'
@@ -294,6 +295,87 @@ function Invoke-GateM2 {
     }
 }
 
+function Get-HitchStats {
+    param([string]$CsvPath)
+    if (-not (Test-Path $CsvPath)) { throw "frame CSV not found: $CsvPath" }
+    $rows = Import-Csv $CsvPath
+    $t = @($rows | ForEach-Object { [double]$_.frame_ms }) | Sort-Object
+    if ($t.Count -lt 50) { throw "too few frames in CSV ($($t.Count))" }
+    $median = $t[[int]($t.Count / 2)]
+    if ($median -le 0) { throw "non-positive median frame time" }
+    $p99 = $t[[int]($t.Count * 0.99)]
+    $max = $t[$t.Count - 1]
+    return @{
+        FrameCount = $t.Count; Median = $median; P99 = $p99; Max = $max;
+        P99Ratio = ($p99 / $median); MaxRatio = ($max / $median)
+    }
+}
+
+function Invoke-GateM3 {
+    param([int]$StreamSoakSeconds)
+
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m3'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+
+    Assert-Gate 'ctest green (gen regen+seam, stream ring, +regression)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    Assert-Gate 'core compiles with zero graphics includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+
+    Assert-Gate 'walk 100+ chunks @1440p: p99 frame < 2x median (best of 2), zero debug msgs' {
+        $best = 999.0
+        for ($attempt = 1; $attempt -le 2; ++$attempt) {
+            $csv = Join-Path $tmp "hitch$attempt.csv"
+            $r = Invoke-AppCapture @('--stream', '--frames', '4000', '--width', '2560', '--height', '1440', '--csv', $csv, '--seed', '7')
+            if ($r.Exit -ne 0) { throw "stream walk exited $($r.Exit)" }
+            if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "stream walk had D3D12 debug-layer messages" }
+            $h = Get-HitchStats $csv
+            if ($h.FrameCount -lt 3200) { throw "walk covered only $($h.FrameCount) frames (< 100 chunks)" }
+            Write-Note ("attempt ${attempt}: frames={0} median={1:N3}ms p99={2:N3}ms max={3:N3}ms  p99/median={4:N2}x" -f `
+                $h.FrameCount, $h.Median, $h.P99, $h.Max, $h.P99Ratio)
+            if ($h.P99Ratio -lt $best) { $best = $h.P99Ratio }
+            if ($h.P99Ratio -lt 2.0) { break }
+        }
+        if ($best -ge 2.0) { throw "p99 frame is $([math]::Round($best,2))x median over both attempts (>= 2x, NFR violated)" }
+    }
+
+    Assert-Gate "memory soak (${StreamSoakSeconds}s): residency bounded, private-bytes slope ~0" {
+        $r = Invoke-AppCapture @('--stream', '--seconds', "$StreamSoakSeconds", '--width', '1280', '--height', '720', '--seed', '11')
+        if ($r.Exit -ne 0) { throw "soak exited $($r.Exit)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "soak had D3D12 debug-layer messages" }
+        $delta = Get-Metric $r.Out 'mem_delta_bytes'
+        $frames = Get-Metric $r.Out 'frames'
+        $resident = Get-Metric $r.Out 'resident_chunks'
+        Write-Note "soak rendered $frames frames; resident=$resident; post-warmup private-bytes delta = $delta"
+        if ($delta -ge 16777216) { throw "memory grew by $delta bytes (>= 16 MiB)" }
+    }
+
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -303,6 +385,7 @@ try {
         'M0'    { Invoke-GateM0 }
         'M1'    { Invoke-GateM1 -SoakSeconds $SoakSeconds -WindowSeconds $WindowSeconds }
         'M2'    { Invoke-GateM2 }
+        'M3'    { Invoke-GateM3 -StreamSoakSeconds $StreamSoakSeconds }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

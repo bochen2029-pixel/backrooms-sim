@@ -5,6 +5,6 @@ add_executable(backrooms src/main.cpp)
 target_link_libraries(backrooms PRIVATE
   backrooms_flags
   core gen stream telemetry audio render_d3d12 render_dxr director
-  br_stb user32)
+  br_stb user32 winmm)
 target_compile_definitions(backrooms PRIVATE UNICODE _UNICODE)
 set_target_properties(backrooms PROPERTIES OUTPUT_NAME "backrooms")

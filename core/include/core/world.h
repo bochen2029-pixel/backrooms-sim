@@ -53,13 +53,20 @@ const std::vector<Aabb>& test_room();
 Vec3 test_room_spawn();
 std::vector<contracts::BoxInstance> test_room_box_instances();
 
+// --- Open ground: a single large floor for the streaming walk (M3). ---------
+const std::vector<Aabb>& open_ground();
+
 // --- Collision: move an AABB proxy (half-extents he) by vel*dt against solid
 // boxes, resolving per axis with sliding + substepping. Zeroes blocked velocity
 // axes; sets on_ground when stopped from below. Returns the new center. ------
 Vec3 move_and_collide(Vec3 pos, Vec3 he, Vec3& vel, float dt,
                       const std::vector<Aabb>& boxes, bool& on_ground);
 
-// --- Advance exactly one 120 Hz tick (pure given (state, input)). -----------
+// --- Advance exactly one 120 Hz tick (pure given (state, input, collision)). -
+// The 2-arg form collides against the test room; the 3-arg form against any
+// supplied collision geometry (e.g. open_ground() for the streaming walk).
+void tick(WorldState& s, const contracts::InputCommand& in,
+          const std::vector<Aabb>& collision);
 void tick(WorldState& s, const contracts::InputCommand& in);
 
 // --- Per-tick state hash: position, velocity, orientation, RNG state, tick. --

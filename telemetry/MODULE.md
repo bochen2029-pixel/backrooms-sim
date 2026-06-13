@@ -5,9 +5,12 @@ minidump capture. Parsed by the gate scripts to enforce NFRs.
 
 **Depends on:** nothing (interface defined in `contracts/telemetry_v1.h`).
 
-**Public surface (M0).** `telemetry/telemetry.h` — identity stub.
+**Public surface.**
+- `telemetry/csv.h` (M3) — `FrameCsv`: writes `contracts::FrameMetrics` rows
+  (frame, frame_ms, resident_chunks, generated_total, mem_bytes) parsed by the
+  M3 hitch + soak gates.
+- `telemetry/telemetry.h` — identity stub.
 
-**Planned.** Frame/tick/memory/chunk-gen counters + CSV (M3), minidump +
-auto-restart logging (M10).
+**Planned.** Tick/chunk-gen counters (M3+), minidump + auto-restart logging (M10).
 
-**Status:** M0 stub.
+**Status:** M3 — frame-telemetry CSV.

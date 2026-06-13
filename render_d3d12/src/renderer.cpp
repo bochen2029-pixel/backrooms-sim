@@ -15,6 +15,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
+#include <set>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
@@ -61,6 +63,17 @@ ClearColor clear_color() noexcept {
     return ClearColor{ kClearR, kClearG, kClearB, kClearA };
 }
 
+// One slot in the chunk vertex-buffer pool: a persistently-mapped upload buffer
+// of fixed capacity, reused across chunks so steady-state uploads are a memcpy
+// (no per-frame allocation -> no streaming hitches).
+struct ChunkSlot {
+    ComPtr<ID3D12Resource> vb;
+    void* mapped = nullptr;
+    D3D12_VERTEX_BUFFER_VIEW view = {};
+    UINT vertex_count = 0;
+};
+constexpr size_t kChunkSlotCapacityBytes = 2048 * 36;  // 2048 verts * 36 B headroom
+
 struct Renderer::Impl {
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
@@ -91,6 +104,14 @@ struct Renderer::Impl {
     D3D12_VERTEX_BUFFER_VIEW vbView = {};
     UINT vertexCount = 0;
     bool sceneReady = false;
+
+    // Streamed-chunk pipeline + a reused vertex-buffer pool (M3).
+    ComPtr<ID3D12RootSignature> chunkRoot;
+    ComPtr<ID3D12PipelineState> chunkPso;
+    bool chunkReady = false;
+    std::vector<ChunkSlot> chunkPool;
+    std::vector<uint32_t> chunkFree;                 // free pool slot indices
+    std::map<contracts::ChunkKey, uint32_t> chunkSlotOf;
 
     HANDLE fenceEvent = nullptr;
     UINT64 fenceValue = 0;
@@ -607,9 +628,10 @@ void push_box(std::vector<float>& v, const contracts::BoxInstance& box) {
     push_quad(v, c001, c101, c111, c011, nzp);  // +Z
 }
 
-bool compile_shader(const char* entry, const char* target, ComPtr<ID3DBlob>& out, std::string& err) {
+bool compile_shader(const char* src, const char* entry, const char* target,
+                    ComPtr<ID3DBlob>& out, std::string& err) {
     ComPtr<ID3DBlob> errBlob;
-    const HRESULT hr = D3DCompile(kSceneHlsl, std::strlen(kSceneHlsl), "scene", nullptr,
+    const HRESULT hr = D3DCompile(src, std::strlen(src), "shader", nullptr,
                                   nullptr, entry, target,
                                   D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &out, &errBlob);
     if (FAILED(hr)) {
@@ -647,8 +669,8 @@ bool ensure_scene_pipeline(Renderer::Impl& d, std::string& err) {
     }
 
     ComPtr<ID3DBlob> vs, ps;
-    if (!compile_shader("VSMain", "vs_5_0", vs, err)) return false;
-    if (!compile_shader("PSMain", "ps_5_0", ps, err)) return false;
+    if (!compile_shader(kSceneHlsl, "VSMain", "vs_5_0", vs, err)) return false;
+    if (!compile_shader(kSceneHlsl, "PSMain", "ps_5_0", ps, err)) return false;
 
     D3D12_INPUT_ELEMENT_DESC layout[2] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -724,6 +746,140 @@ bool build_vertex_buffer(Renderer::Impl& d, const contracts::WorldView& view, st
     return true;
 }
 
+const char* kChunkHlsl = R"(
+cbuffer Constants : register(b0) {
+    row_major float4x4 uMVP;
+    float3 uLightDir;
+    float  uPad;
+};
+struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; float3 col : COLOR; };
+struct VSOut { float4 clip : SV_POSITION; float3 nrm : NORMAL; float3 col : COLOR; };
+VSOut VSMain(VSIn i) {
+    VSOut o;
+    o.clip = mul(float4(i.pos, 1.0), uMVP);
+    o.nrm = i.nrm;
+    o.col = i.col;
+    return o;
+}
+float4 PSMain(VSOut i) : SV_TARGET {
+    float ndl = saturate(dot(normalize(i.nrm), -normalize(uLightDir)));
+    return float4(i.col * (0.30 + 0.70 * ndl), 1.0);
+}
+)";
+
+void fill_opaque_pso_states(D3D12_GRAPHICS_PIPELINE_STATE_DESC& pso) {
+    pso.SampleMask = UINT_MAX;
+    pso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+    pso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
+    pso.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    pso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    pso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+    pso.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    pso.BlendState.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_NOOP;
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.RasterizerState.DepthClipEnable = TRUE;
+    pso.DepthStencilState.DepthEnable = TRUE;
+    pso.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pso.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    pso.DepthStencilState.StencilEnable = FALSE;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1;
+    pso.RTVFormats[0] = kFormat;
+    pso.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    pso.SampleDesc.Count = 1;
+}
+
+bool ensure_chunk_pipeline(Renderer::Impl& d, std::string& err) {
+    if (d.chunkReady) return true;
+
+    D3D12_ROOT_PARAMETER param = {};
+    param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    param.Constants.Num32BitValues = 20;
+    param.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    D3D12_ROOT_SIGNATURE_DESC rs = {};
+    rs.NumParameters = 1;
+    rs.pParameters = &param;
+    rs.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    ComPtr<ID3DBlob> sig, sigErr;
+    if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &sigErr))) {
+        err = "chunk SerializeRootSignature failed";
+        return false;
+    }
+    if (FAILED(d.device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                                             IID_PPV_ARGS(&d.chunkRoot)))) {
+        err = "chunk CreateRootSignature failed";
+        return false;
+    }
+    ComPtr<ID3DBlob> vs, ps;
+    if (!compile_shader(kChunkHlsl, "VSMain", "vs_5_0", vs, err)) return false;
+    if (!compile_shader(kChunkHlsl, "PSMain", "ps_5_0", ps, err)) return false;
+
+    D3D12_INPUT_ELEMENT_DESC layout[3] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"COLOR",    0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    };
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
+    pso.pRootSignature = d.chunkRoot.Get();
+    pso.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
+    pso.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+    pso.InputLayout = { layout, 3 };
+    fill_opaque_pso_states(pso);
+    if (FAILED(d.device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&d.chunkPso)))) {
+        err = "chunk CreateGraphicsPipelineState failed";
+        return false;
+    }
+    d.chunkReady = true;
+    return true;
+}
+
+bool upload_chunk_mesh(Renderer::Impl& d, const contracts::ResidentChunk& rc, std::string& err) {
+    const size_t bytes = static_cast<size_t>(rc.vertex_count) * sizeof(contracts::ChunkVertex);
+    if (bytes == 0) return true;
+    if (bytes > kChunkSlotCapacityBytes) { err = "chunk exceeds pool slot capacity"; return false; }
+
+    uint32_t slot;
+    if (!d.chunkFree.empty()) {
+        slot = d.chunkFree.back();
+        d.chunkFree.pop_back();
+    } else {
+        // Grow the pool: allocate + persistently map a fresh upload buffer.
+        ChunkSlot fresh;
+        D3D12_RESOURCE_DESC bd = {};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = kChunkSlotCapacityBytes;
+        bd.Height = 1;
+        bd.DepthOrArraySize = 1;
+        bd.MipLevels = 1;
+        bd.Format = DXGI_FORMAT_UNKNOWN;
+        bd.SampleDesc.Count = 1;
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        const D3D12_HEAP_PROPERTIES up = heap_props(D3D12_HEAP_TYPE_UPLOAD);
+        if (FAILED(d.device->CreateCommittedResource(
+                &up, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ,
+                nullptr, IID_PPV_ARGS(&fresh.vb)))) {
+            err = "chunk pool VB create failed";
+            return false;
+        }
+        const D3D12_RANGE none = { 0, 0 };
+        if (FAILED(fresh.vb->Map(0, &none, &fresh.mapped))) { err = "chunk pool VB map failed"; return false; }
+        fresh.view.StrideInBytes = sizeof(contracts::ChunkVertex);
+        d.chunkPool.push_back(std::move(fresh));
+        slot = static_cast<uint32_t>(d.chunkPool.size() - 1);
+    }
+
+    ChunkSlot& cs = d.chunkPool[slot];
+    std::memcpy(cs.mapped, rc.vertices, bytes);              // steady-state: memcpy only
+    cs.view.BufferLocation = cs.vb->GetGPUVirtualAddress();
+    cs.view.SizeInBytes = static_cast<UINT>(bytes);
+    cs.view.StrideInBytes = sizeof(contracts::ChunkVertex);
+    cs.vertex_count = rc.vertex_count;
+    d.chunkSlotOf[rc.key] = slot;
+    return true;
+}
+
 }  // namespace
 
 bool Renderer::render_world_view(const contracts::WorldView& view) {
@@ -791,6 +947,111 @@ bool Renderer::render_world_view(const contracts::WorldView& view) {
     ID3D12CommandList* lists[] = { d.list.Get() };
     d.queue->ExecuteCommandLists(1, lists);
 
+    const UINT64 v = ++d.fenceValue;
+    if (FAILED(d.queue->Signal(d.fence.Get(), v))) { last_error_ = "fence Signal failed"; return false; }
+    if (d.fence->GetCompletedValue() < v) {
+        if (FAILED(d.fence->SetEventOnCompletion(v, d.fenceEvent))) {
+            last_error_ = "SetEventOnCompletion failed";
+            return false;
+        }
+        if (WaitForSingleObject(d.fenceEvent, 5000) != WAIT_OBJECT_0) {
+            last_error_ = "fence wait timed out";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool Renderer::render_chunks(const contracts::CameraPose& camera,
+                             const std::vector<contracts::ResidentChunk>& resident,
+                             uint32_t upload_budget, uint32_t* out_drawn) {
+    Impl& d = *impl_;
+    if (d.windowed || !d.rt) {
+        last_error_ = "render_chunks is headless-only (M3)";
+        return false;
+    }
+    if (!ensure_chunk_pipeline(d, last_error_)) return false;
+
+    // Return slots whose chunk is no longer resident; upload new ones (budgeted).
+    std::set<contracts::ChunkKey> live;
+    for (const auto& rc : resident) live.insert(rc.key);
+    for (auto it = d.chunkSlotOf.begin(); it != d.chunkSlotOf.end();) {
+        if (live.find(it->first) == live.end()) {
+            d.chunkFree.push_back(it->second);
+            it = d.chunkSlotOf.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    uint32_t uploaded = 0;
+    for (const auto& rc : resident) {
+        if (d.chunkSlotOf.find(rc.key) == d.chunkSlotOf.end()) {
+            if (uploaded >= upload_budget) continue;
+            if (!upload_chunk_mesh(d, rc, last_error_)) return false;
+            ++uploaded;
+        }
+    }
+
+    const Mat4 mvp = mat_mul(view_lh(camera.pos, camera.yaw, camera.pitch),
+                             proj_lh(camera.fov_y, camera.aspect, 0.05f, 500.0f));
+    float constants[20];
+    std::memcpy(constants, mvp.m, sizeof(mvp.m));
+    float ld[3] = { -0.3f, -1.0f, -0.2f };
+    const float ll = std::sqrt(ld[0]*ld[0] + ld[1]*ld[1] + ld[2]*ld[2]);
+    constants[16] = ld[0]/ll; constants[17] = ld[1]/ll; constants[18] = ld[2]/ll;
+    constants[19] = 0.0f;
+
+    if (FAILED(d.alloc->Reset())) { last_error_ = "allocator reset failed"; return false; }
+    if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) {
+        last_error_ = "command list reset failed";
+        return false;
+    }
+
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = d.rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    const D3D12_CPU_DESCRIPTOR_HANDLE dsv = d.dsvHeap->GetCPUDescriptorHandleForHeapStart();
+    d.list->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+    d.list->ClearRenderTargetView(rtv, kClearFloat, 0, nullptr);
+    d.list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+    D3D12_VIEWPORT vp = { 0.0f, 0.0f, static_cast<float>(d.width), static_cast<float>(d.height), 0.0f, 1.0f };
+    D3D12_RECT scissor = { 0, 0, static_cast<LONG>(d.width), static_cast<LONG>(d.height) };
+    d.list->RSSetViewports(1, &vp);
+    d.list->RSSetScissorRects(1, &scissor);
+    d.list->SetGraphicsRootSignature(d.chunkRoot.Get());
+    d.list->SetPipelineState(d.chunkPso.Get());
+    d.list->SetGraphicsRoot32BitConstants(0, 20, constants, 0);
+    d.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    uint32_t drawn = 0;
+    for (const auto& rc : resident) {
+        const auto it = d.chunkSlotOf.find(rc.key);
+        if (it == d.chunkSlotOf.end()) continue;  // not uploaded yet (budgeted)
+        const ChunkSlot& cs = d.chunkPool[it->second];
+        d.list->IASetVertexBuffers(0, 1, &cs.view);
+        d.list->DrawInstanced(cs.vertex_count, 1, 0, 0);
+        ++drawn;
+    }
+    if (out_drawn) *out_drawn = drawn;
+
+    const D3D12_RESOURCE_BARRIER toCopy = transition(
+        d.rt.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    d.list->ResourceBarrier(1, &toCopy);
+    D3D12_TEXTURE_COPY_LOCATION dst = {};
+    dst.pResource = d.readback.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = d.footprint;
+    D3D12_TEXTURE_COPY_LOCATION src = {};
+    src.pResource = d.rt.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+    d.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    const D3D12_RESOURCE_BARRIER backToRt = transition(
+        d.rt.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    d.list->ResourceBarrier(1, &backToRt);
+
+    if (FAILED(d.list->Close())) { last_error_ = "command list close failed"; return false; }
+    ID3D12CommandList* lists[] = { d.list.Get() };
+    d.queue->ExecuteCommandLists(1, lists);
     const UINT64 v = ++d.fenceValue;
     if (FAILED(d.queue->Signal(d.fence.Get(), v))) { last_error_ = "fence Signal failed"; return false; }
     if (d.fence->GetCompletedValue() < v) {

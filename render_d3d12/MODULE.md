@@ -18,6 +18,9 @@ renderer (INV-6).
   `contracts::WorldView` camera, depth-tested and lit (root-constant MVP + a
   fixed light), via a runtime-compiled (D3DCompile) PSO. Single source of room
   geometry comes from `core::test_room`.
+- `render_chunks` (M3) — headless: draws resident streamed chunks (pos/nrm/color
+  pipeline) with a persistently-mapped vertex-buffer pool (allocation-free
+  stream-in) and a per-frame upload budget. Frees evicted chunk slots.
 
 **Links:** `d3d12 dxgi dxguid d3dcompiler Psapi` (PRIVATE — implementation detail).
 

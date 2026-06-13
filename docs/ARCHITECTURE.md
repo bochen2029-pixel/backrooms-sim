@@ -179,6 +179,9 @@ Convention: errors cross module boundaries as typed results, never exceptions; `
 | 016 | **M2 collision: AABB-proxy capsule, per-axis swept + substepped** | Robust no-penetration/sliding/no-tunneling on axis-aligned geometry |
 | 017 | **M2 contracts world_view_v1 + replay_v1** | First boundary headers crossed; shared `contracts` INTERFACE target |
 | 018 | **M2 test-room golden (640×360, lit, depth)** | First geometry golden; deterministic across runs (INV-8) |
+| 019 | **M3 streaming: pure world-coord chunks + ring + worker pool** | Unbounded, seam-correct, bounded residency (INV-2/3/4); sim decoupled |
+| 020 | **M3 chunk VB pool + warmup** | Allocation-free stream-in; p99/median ≈ 1.2x; no first-frame hitch |
+| 021 | **M3 gate: p99 < 2× median @1280×720; private-bytes soak** | Aligns with NFR §9; non-flaky; soak duration parameterized |
 
 ## 9. Non-Functional Requirements
 

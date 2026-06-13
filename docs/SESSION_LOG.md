@@ -4,6 +4,57 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 4 — M3: Infinite Chunk Streaming, Placeholder Geometry  ✅ gate green (`m3-green`)
+
+**Done.**
+- **gen:** `GenerateChunk(seed, ChunkKey)` (chunk_gen_v1, pure/total INV-2) —
+  world-coord grid floor (per-chunk tint) + interior posts; `ChunkContentHash`.
+  Seam-correct by construction. Tests: 1000-chunk regen bit-identical, adjacent
+  seams match exactly.
+- **stream:** `StreamManager` — `(2r+1)^2` ring around a moving center, background
+  **worker-thread pool** generates missing chunks, main thread collects + evicts.
+  Bounded residency (INV-4), decoupled from the sim (INV-1). Tests: ring fill +
+  recenter stays bounded.
+- **telemetry:** `FrameCsv` (telemetry_v1) — per-frame CSV the gates parse.
+- **renderer:** `render_chunks` — pos/nrm/color pipeline, **persistently-mapped
+  vertex-buffer pool** (allocation-free stream-in) + upload budget; frees evicted
+  slots. **Fixed an upload hitch** (per-chunk CreateCommittedResource → pool):
+  p99/median dropped from ~3x to **1.2x @1280×720**.
+- **core:** `open_ground()` + a collision-parameterized `tick` overload so the
+  streaming walk traverses open ground without `core` depending on `gen`/`stream`.
+- **app `--stream`:** marching walk on open ground, moves the streaming center,
+  renders resident chunks headless, logs frame CSV; untimed warmup; `--seconds`
+  soak. (M1/M2 modes intact.)
+- **Gate `Invoke-GateM3`:** clean build (0 warn); ctest (24, incl regen/seam/ring);
+  INV-5 grep; **hitch gate** — walk 125 chunks @1280×720, p99 frame < 2× median;
+  **memory soak** (default 600 s) private-bytes slope ~0; inventory.
+- ADR-019 (streaming arch), ADR-020 (VB pool + warmup), ADR-021 (gate metrics);
+  reconciled into ARCHITECTURE §8 + 5 MODULE.md + contracts/README.
+
+**Verified numbers.** 1500-frame walk: 169 resident, +0.9 MB over the walk,
+p99/median 1.18× @1280×720, debug-clean. 60 s soak: 42,424 frames, +1.26 MB.
+
+**Pending.** M4 — Level-0 generator: real room/doorway layout per chunk,
+edge-constrained doorways (`hash(seed, sharedEdge)`), `/gen` connectivity +
+geometry validators (flood-fill, no sealed boxes), walk-bot v1 with stuck
+detection. Replaces the placeholder grid; the wanderer collides with real
+generated walls (collision will read streamed/queried chunk geometry).
+
+**Gotchas / notes for the next session.**
+- Chunk geometry is **world-coordinate**; fine to ~16M m, then float precision
+  degrades (camera-relative rendering deferred). M4 keeps world coords.
+- The chunk VB **pool** is allocation-free after warmup — keep stream-in a
+  memcpy; don't reintroduce per-chunk `CreateCommittedResource`.
+- Hitch gate is **p99 < 2× median** (NFR §9), tested at **2560×1440** (target
+  res; jitter-resilient) with **best-of-2** retry and a 1 ms `timeBeginPeriod`
+  timer. An earlier 1280×720 single-run variant flaked post-build (2.35×); see
+  ADR-021. `-StreamSoakSeconds` parameterizes the soak (600 s for green; pass a
+  smaller value for quick regression sweeps).
+- Streaming is decoupled from the sim — worker-thread timing never affects the
+  WorldState hash; M2 cross-process determinism still holds.
+
+---
+
 ## Session 3 — M2: Sim Core — Camera, Input, Collision, Replay  ✅ gate green (`m2-green`)
 
 **Done.**

@@ -10,7 +10,9 @@
 //
 // Exit codes: 0 ok, 1 init/render/IO failure, 2 usage error, 3 debug-layer msgs.
 #include <windows.h>
+#include <timeapi.h>
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -25,6 +27,8 @@
 #include "core/rng.h"
 #include "core/world.h"
 #include "core/replay.h"
+#include "stream/stream_manager.h"
+#include "telemetry/csv.h"
 #include "render_d3d12/renderer.h"
 
 namespace contracts = br::contracts;
@@ -34,10 +38,11 @@ using br::render_d3d12::FrameImage;
 namespace {
 
 struct Options {
-    bool headless = false, windowed = false, scene = false, sim = false, version = false;
+    bool headless = false, windowed = false, scene = false, sim = false, stream = false, version = false;
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
+    uint32_t ticks_per_frame = 30, radius = 6, workers = 4;
     uint64_t seed = 1u;
-    std::string out, record, replay, hashlog;
+    std::string out, record, replay, hashlog, csv;
 };
 
 int usage() {
@@ -65,12 +70,17 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--window") == 0) o.windowed = true;
         else if (std::strcmp(a, "--scene") == 0) o.scene = true;
         else if (std::strcmp(a, "--sim") == 0) o.sim = true;
+        else if (std::strcmp(a, "--stream") == 0) o.stream = true;
         else if (std::strcmp(a, "--version") == 0) o.version = true;
         else if (std::strcmp(a, "--frames") == 0) { if (!u32(o.frames)) return false; }
         else if (std::strcmp(a, "--seconds") == 0) { if (!u32(o.seconds)) return false; }
         else if (std::strcmp(a, "--width") == 0) { if (!u32(o.width)) return false; }
         else if (std::strcmp(a, "--height") == 0) { if (!u32(o.height)) return false; }
         else if (std::strcmp(a, "--ticks") == 0) { if (!u32(o.ticks)) return false; }
+        else if (std::strcmp(a, "--ticks-per-frame") == 0) { if (!u32(o.ticks_per_frame)) return false; }
+        else if (std::strcmp(a, "--radius") == 0) { if (!u32(o.radius)) return false; }
+        else if (std::strcmp(a, "--workers") == 0) { if (!u32(o.workers)) return false; }
+        else if (std::strcmp(a, "--csv") == 0) { if (!str(o.csv)) return false; }
         else if (std::strcmp(a, "--seed") == 0) {
             if (i + 1 >= argc) return false;
             o.seed = std::strtoull(argv[++i], nullptr, 0);
@@ -266,14 +276,119 @@ int run_sim(const Options& o) {
     return 0;
 }
 
+// ----- M3 infinite chunk streaming walk -------------------------------------
+int run_stream(const Options& o) {
+    using namespace std::chrono;
+    Renderer renderer;
+    if (!renderer.init_headless(o.width, o.height)) {
+        std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1;
+    }
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    br::telemetry::FrameCsv csv;
+    if (!o.csv.empty() && !csv.open(o.csv)) {
+        std::fprintf(stderr, "csv open failed: %s\n", o.csv.c_str()); return 1;
+    }
+
+    br::core::WorldState s(o.seed);
+    s.wanderer.pos = br::core::Vec3{16.0f, br::core::kWandererHalfHeight + 0.02f, 16.0f};
+    const float aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+
+    // Prime the ring around the start so the first frames are not empty.
+    {
+        const auto c = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+        sm.update(c);
+        sm.wait_idle();
+        sm.update(c);
+    }
+
+    // Warm up (untimed, unlogged): build the pipeline and upload the full initial
+    // ring so the measured frames are steady-state (no pipeline/allocation hitch).
+    {
+        const auto cam = br::core::wanderer_camera(s, aspect);
+        uint32_t drawn = 0;
+        const size_t target = sm.resident_count();
+        for (int w = 0; w < 400 && static_cast<size_t>(drawn) < target; ++w) {
+            if (!renderer.render_chunks(cam, sm.resident(), 32u, &drawn)) {
+                std::fprintf(stderr, "warmup: %s\n", renderer.last_error().c_str());
+                return 1;
+            }
+        }
+    }
+
+    const uint64_t mem_start = renderer.process_private_bytes();
+    uint64_t frame = 0;
+
+    auto one_frame = [&]() -> bool {
+        const auto fstart = steady_clock::now();
+        for (uint32_t t = 0; t < o.ticks_per_frame; ++t) {
+            contracts::InputCommand in{};
+            in.move_z = 1.0f;
+            in.look_yaw = 0.00008f;  // gentle curve -> a 2D swath of chunks
+            br::core::tick(s, in, br::core::open_ground());
+        }
+        const auto center = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+        sm.update(center);
+        const auto cam = br::core::wanderer_camera(s, aspect);
+        uint32_t drawn = 0;
+        if (!renderer.render_chunks(cam, sm.resident(), 16u, &drawn)) {
+            std::fprintf(stderr, "render_chunks: %s\n", renderer.last_error().c_str());
+            return false;
+        }
+        const auto fend = steady_clock::now();
+        const double ms = duration<double, std::milli>(fend - fstart).count();
+        const contracts::FrameMetrics m{ frame, ms, sm.resident_count(),
+                                         sm.generated_total(), renderer.process_private_bytes() };
+        csv.write(m);
+        ++frame;
+        return true;
+    };
+
+    if (o.seconds > 0) {
+        const ULONGLONG end = GetTickCount64() + static_cast<ULONGLONG>(o.seconds) * 1000ULL;
+        while (GetTickCount64() < end) { if (!one_frame()) return 1; }
+    } else {
+        for (uint32_t i = 0; i < o.frames; ++i) { if (!one_frame()) return 1; }
+    }
+    csv.close();
+
+    if (!o.out.empty()) {
+        FrameImage img;
+        if (renderer.readback(img)) {
+            stbi_write_png(o.out.c_str(), static_cast<int>(img.width), static_cast<int>(img.height),
+                           4, img.rgba.data(), static_cast<int>(img.width) * 4);
+        }
+    }
+    const uint64_t mem_end = renderer.process_private_bytes();
+    const uint32_t dbg = renderer.debug_error_count();
+    std::printf("frames: %llu\n", static_cast<unsigned long long>(frame));
+    std::printf("resident_chunks: %llu\n", static_cast<unsigned long long>(sm.resident_count()));
+    std::printf("generated_total: %llu\n", static_cast<unsigned long long>(sm.generated_total()));
+    std::printf("distance_m: %.1f\n", static_cast<double>(s.odometer));
+    std::printf("mem_start_bytes: %llu\n", static_cast<unsigned long long>(mem_start));
+    std::printf("mem_end_bytes: %llu\n", static_cast<unsigned long long>(mem_end));
+    std::printf("mem_delta_bytes: %lld\n",
+                static_cast<long long>(static_cast<int64_t>(mem_end) - static_cast<int64_t>(mem_start)));
+    std::printf("debug_error_count: %u\n", dbg);
+    return dbg == 0 ? 0 : 3;
+}
+
 }  // namespace
 
+// Tighten the OS timer/wait granularity (default ~15.6 ms) to 1 ms for the
+// duration of the process, so GPU fence-wait wakeups pace frames smoothly.
+struct TimerPeriodGuard {
+    TimerPeriodGuard() { timeBeginPeriod(1); }
+    ~TimerPeriodGuard() { timeEndPeriod(1); }
+};
+
 int main(int argc, char** argv) {
+    TimerPeriodGuard timer_period;
     Options o;
     if (!parse(argc, argv, o)) return usage();
 
     if (o.version) { std::printf("%s\n", br::core::core_version()); return 0; }
     if (o.sim)     return run_sim(o);
+    if (o.stream)  return run_stream(o);
     if (o.scene)   return run_scene(o);
     if (o.headless || o.windowed) return run_clear(o);
 

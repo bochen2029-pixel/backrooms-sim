@@ -10,11 +10,14 @@ ChunkKey)` is pure and total; no neighbor queries; cross-seam agreement only
 via shared edge hashes. INV-3 Connectivity — no sealed regions. Compiled
 `/fp:strict`.
 
-**Public surface (M0).** `gen/gen.h` — identity stub.
+**Public surface.**
+- `contracts/chunk_gen_v1.h` (M3) — `GenerateChunk(seed, ChunkKey)` (pure/total,
+  INV-2) + `ChunkContentHash`. M3 geometry is placeholder: a world-coordinate
+  grid floor (per-chunk tint) + interior posts, seam-correct by construction.
+- `gen/gen.h` — identity stub.
 
-**Planned.** `GenerateChunk` + `ChunkContentHash` (M3), Level 0 rooms/doorways
-+ connectivity & geometry validators (M4), biomes/set pieces/verticality (M7).
+**Planned.** Level-0 rooms/doorways + connectivity & geometry validators (M4),
+biomes/set pieces/verticality (M7).
 
-**Contracts produced:** `contracts/chunk_gen_v1.h` (M3).
-
-**Status:** M0 stub.
+**Status:** M3 — `GenerateChunk` (placeholder geometry). Regen-identical across
+1000 chunks; adjacent-chunk seams match exactly.

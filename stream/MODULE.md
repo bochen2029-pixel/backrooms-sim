@@ -5,11 +5,14 @@
 
 **Depends on:** `core`, `gen`.
 
-**Public surface (M0).** `stream/stream.h` — identity stub.
+**Public surface.**
+- `stream/stream_manager.h` (M3) — `StreamManager`: a `(2r+1)^2` chunk ring
+  around a moving center; background worker pool generates missing chunks
+  (`gen::GenerateChunk`), main thread collects + evicts. Bounded residency
+  (INV-4); decoupled from the sim (INV-1). Exposes a `ResidentChunk` snapshot
+  (contracts/stream_events_v1.h).
+- `stream/stream.h` — identity stub.
 
-**Planned.** Load ring + background generation + main-thread GPU upload (M3),
-TLAS-refit residency events (M9).
+**Planned.** TLAS-refit residency events (M9), prefetch/priority by heading.
 
-**Contracts produced:** `contracts/stream_events_v1.h` (M3).
-
-**Status:** M0 stub.
+**Status:** M3 — ring + worker pool, bounded + recentering verified.
