@@ -13,7 +13,7 @@ every change to one reconciles ARCHITECTURE.md §5 in the same commit
 | `replay_v1.h` | input + Event Log serialization | **present (M2)** |
 | `chunk_gen_v1.h` | gen → stream/render | **present (M3; +uv/material + fluorescent grid M5)** |
 | `stream_events_v1.h` | stream → renderers | **present (M3)** |
-| `audio_events_v1.h` | core → audio | M6 |
+| `audio_events_v1.h` | core → audio | **present (M6)** |
 | `telemetry_v1.h` | all → telemetry | **present (M3)** |
 | `director_v1/` | core ⇄ director (JSON Schemas) | M11 |
 

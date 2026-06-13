@@ -11,7 +11,8 @@ add_executable(unit_tests
   unit/test_chunk.cpp
   unit/test_stream.cpp
   unit/test_layout.cpp
-  unit/test_texgen.cpp)
+  unit/test_texgen.cpp
+  unit/test_audio.cpp)
 target_link_libraries(unit_tests PRIVATE
   backrooms_flags
   core gen stream telemetry audio render_d3d12 render_dxr director

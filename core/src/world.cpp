@@ -192,4 +192,20 @@ contracts::CameraPose wanderer_camera(const WorldState& s, float aspect) {
     return c;
 }
 
+uint64_t footstep_count(const WorldState& s) {
+    const float n = s.odometer / contracts::kStrideLength;
+    if (n <= 0.0f) return 0;
+    return static_cast<uint64_t>(n);  // floor; odometer is non-negative
+}
+
+contracts::AudioListener audio_listener(const WorldState& s) {
+    contracts::AudioListener l{};
+    const Vec3 eye = s.wanderer.pos + Vec3{0.0f, kEyeHeight, 0.0f};
+    l.pos[0] = eye.x; l.pos[1] = eye.y; l.pos[2] = eye.z;
+    l.yaw = s.wanderer.yaw;
+    l.speed = std::sqrt(s.wanderer.vel.x * s.wanderer.vel.x +
+                        s.wanderer.vel.z * s.wanderer.vel.z);
+    return l;
+}
+
 }  // namespace br::core

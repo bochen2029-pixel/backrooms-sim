@@ -13,6 +13,7 @@
 #include "core/aabb.h"
 #include "core/math.h"
 #include "core/rng.h"
+#include "contracts/audio_events_v1.h"
 #include "contracts/replay_v1.h"
 #include "contracts/world_view_v1.h"
 
@@ -74,5 +75,16 @@ uint64_t world_state_hash(const WorldState& s);
 
 // --- Renderer-facing camera pose for the current wanderer. ------------------
 contracts::CameraPose wanderer_camera(const WorldState& s, float aspect);
+
+// --- Audio-facing, derived deterministically from the (hashed) WorldState. ---
+// Footfalls are a pure function of the odometer: a footstep every kStrideLength
+// metres. `footstep_count` is monotone non-decreasing; the audio path detects a
+// footfall on the tick where it increments, so footstep ticks reproduce exactly
+// from a replay (INV-1) without changing the replay format.
+uint64_t footstep_count(const WorldState& s);
+
+// The listener (wanderer's ear) for the audio mixer: eye-height position, yaw
+// for stereo panning, and horizontal speed for footstep/bed loudness.
+contracts::AudioListener audio_listener(const WorldState& s);
 
 }  // namespace br::core
