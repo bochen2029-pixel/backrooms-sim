@@ -12,10 +12,10 @@ Backup remote: **https://github.com/bochen2029-pixel/backrooms-sim** (private).
 | **M2** | Sim core: tick, camera, collision, replay | M2 | ✅ `m2-green` |
 | **M3** | Infinite chunk streaming + telemetry | M3 | ✅ `m3-green` |
 | **M4** | Level-0 generator: maze, doorways, walk-bot | M4 | ✅ `m4-green` |
-| **M5** | Procedural materials + raster lighting | M5 | 🟡 in progress (textures done) |
+| **M5** | Procedural materials + raster fluorescent lighting | M5 | ✅ `m5-green` |
 | M6–M12 | audio · biomes · VHS post · DXR · soak · Director · acceptance | — | ⬜ pending |
 
-**5 milestones green and pushed.** Each is verified by a machine-checkable gate
+**6 milestones green and pushed.** Each is verified by a machine-checkable gate
 (`scripts/gate.ps1 -Milestone M<N>` exits 0) and tagged; the remote is the backup.
 
 All numbers below are from real gate runs on the dev machine (RTX 4070 Ti SUPER,
@@ -68,17 +68,24 @@ collides with generated walls (gathered by the app, keeping `core` gen-free).
 deterministically**. Top-down ortho debug golden. **Gate:** 10,000-chunk
 connectivity + geometry, walk-bot, top-down goldens (seeds 1 & 7).
 
-### M5 — Procedural Materials + Raster Lighting (🟡 in progress)
-**Done:** procedural textures — wallpaper, carpet, ceiling tile, fluorescent
-panel, baseboard (`render_d3d12/texgen.*`, D3D12-free, deterministic per
-(kind, seed); determinism unit test green).
-**Remaining:** GPU texture-array upload + SRV/sampler, chunk UV/material + a
-ceiling with fluorescent panels, the textured + **forward fluorescent lighting**
-shader with **seeded deterministic flicker** (computed in `core`, replayable),
-the 5-pose × 3-seed goldens, the luminance-histogram gate, and the **≥120 FPS @
-1440p** perf gate. (The top-down debug render must skip the new ceiling so the
-maze stays visible; the M4 top-down golden will be re-captured via `goldgen` +
-an ADR.)
+### M5 — Procedural Materials + Raster Fluorescent Lighting
+It now *looks* like the backrooms. All materials are procedural (no asset files):
+**yellow wallpaper, damp carpet, dark ceiling tiles, glowing fluorescent panels,
+scuffed baseboards** (`render_d3d12/texgen.*`, D3D12-free, deterministic per
+(kind, seed)). Each `ChunkVertex` carries uv + material; `GenerateChunk` paints
+floor/walls and emits a **ceiling** with the fluorescent-tile grid (shared
+verbatim with the renderer's lights; render-only, not collidable). The lit
+pipeline uploads a **Texture2DArray** (fenced) and samples by (material, uv) with
+a per-chunk hue tint. **Forward fluorescent lighting:** the renderer gathers the
+ceiling-grid lights near the camera, each scaled by **`core::light_flicker(seed,
+id, tick)`** — deterministic flicker computed in `core` so lit replays reproduce
+exactly — over flat ambient, with a highlight knee that keeps the wallpaper's hue
+instead of clipping to white. `render_topdown` discards the ceiling so the M4
+maze goldens stay **bit-exact** (no re-capture). **Gate:** texture determinism,
+**5 poses × 3 seeds lit goldens** (`goldens/m5/`, `goldgen`-captured) bit-identical
+×2 + golden-matched + **luminance-histogram band** (no all-black/blown-out) +
+debug-clean, **≥120 FPS @1440p** (best-of-2, measured **~179 FPS**), and a
+regression pass over the M1/M2/M4 render goldens.
 
 ---
 
@@ -96,10 +103,11 @@ an ADR.)
   (zero sealed boxes), INV-4 bounded memory (streaming ring), INV-5 core
   isolation (grep-gated), INV-7 headless verification, INV-8 golden integrity
   (only `goldgen` writes `/goldens`, always with a DECISIONS.md entry).
-- **Decisions:** ADR-001..024 in `docs/DECISIONS.md` (each summarised in
+- **Decisions:** ADR-001..027 in `docs/DECISIONS.md` (each summarised in
   ARCHITECTURE.md §8). Notable: vcpkg static triplet, `/fp:strict` core, the
   "test-the-gate" canary, the M3 hitch metric (p99 @1440p, NFR §9), the M4 maze +
-  collision design, far-chunk float-precision deferral (camera-relative
+  collision design, the M5 deterministic-flicker-in-`core` decision (ADR-026) and
+  lit-render gate (ADR-027), far-chunk float-precision deferral (camera-relative
   rendering still to come).
 
 ## Verification harness
@@ -118,7 +126,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gate.ps1 -Milestone 
 ```
 
 App modes built so far: `--headless` · `--window` · `--scene` · `--sim` ·
-`--stream` · `--walkbot` · `--topdown` (see `app/MODULE.md`).
+`--stream` · `--walkbot` · `--topdown` · `--shot` (see `app/MODULE.md`).
 
 ## Two real bugs caught (and fixed properly, not tuned around)
 
@@ -132,20 +140,22 @@ App modes built so far: `--headless` · `--window` · `--scene` · `--sim` ·
 
 ## What's next
 
-- **Finish M5** (the larger half): GPU textures + forward fluorescent lighting +
-  flicker + goldens + luminance + 120 FPS gate. See the M5 section in
-  `docs/SESSION_LOG.md` for the precise remaining steps.
-- **M6** procedural audio (offline WAV gate) · **M7** biomes/set pieces/verticality
-  · **M8** VHS post + HUD · **M9** DXR path-traced mode · **M10** 8 h walk-bot
-  soak · **M11** the Director (local LLM) · **M12** integration + 12 h acceptance.
+- **M6** procedural audio: room-probe reverb + procedural synth (fluorescent buzz,
+  HVAC drone, footsteps), driven by the sim, with an **offline-WAV headless gate**
+  (render audio to a deterministic WAV, assert spectral/level bands — no speakers
+  needed). New boundary contract `audio_events_v1` (core → audio).
+- **M7** biomes/set pieces/verticality · **M8** VHS post + HUD · **M9** DXR
+  path-traced mode · **M10** 8 h walk-bot soak · **M11** the Director (local LLM) ·
+  **M12** integration + 12 h acceptance.
 
 ## How to continue (next session)
 
 1. Read `docs/ARCHITECTURE.md`, the latest `docs/SESSION_LOG.md` entry, and the
-   M5 section of `docs/MILESTONES.md`.
-2. Continue M5 from the textures already in `render_d3d12/texgen.*` (green).
-3. Run `gate.ps1 -Milestone M5` until exit 0, regression-sweep M0–M4, tag
-   `m5-green`, push, write the SESSION_LOG entry.
+   M6 section of `docs/MILESTONES.md`.
+2. Produce the M6 change manifest (audio module surface, `audio_events_v1`
+   contract, `--render-wav` app mode, `wavcheck` tool) before writing code.
+3. Run `gate.ps1 -Milestone M6` until exit 0, regression-sweep M0–M5, tag
+   `m6-green`, push, write the SESSION_LOG entry.
 
-_The repo is the memory. Last fully-green tag: `m4-green`. Never resume from a
+_The repo is the memory. Last fully-green tag: `m5-green`. Never resume from a
 broken state — revert to the last green tag if needed._
