@@ -882,6 +882,89 @@ function Invoke-GateM8 {
     }
 }
 
+function Invoke-GateM9 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+
+    $bin = Get-BinDir
+    $hashdiff = Join-Path $bin 'hashdiff.exe'
+
+    Assert-Gate 'ctest green (full regression)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    # DXR is enhancement-only (INV-6): the gate needs a DXR-capable device + the
+    # signed-DXIL toolchain. If absent the gate cannot run (this is a dev-GPU gate).
+    Assert-Gate 'DXR available (device5 + RaytracingTier >= 1.0 + signed DXIL)' {
+        $r = Invoke-AppCapture @('--dxr-probe')
+        if ($r.Exit -ne 0) { throw "dxr-probe exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'dxr_ready') -ne 1) { throw "device not DXR-ready: $($r.Out)" }
+    }
+
+    # Exit gate #1: cross-renderer primary-hit depth compare. Raster vs DXR at the
+    # same pose; per-pixel NDC depth linearized to eye-space metres, compared. Near-
+    # exact agreement proves the acceleration structures hold exactly the streamed
+    # geometry the rasteriser draws. (Thresholds clear the measured values ~250x;
+    # a missing chunk or mis-built AS blows straight past them.)
+    Assert-Gate 'cross-renderer depth compare: raster vs DXR within epsilon (5 poses)' {
+        for ($p = 0; $p -le 4; $p++) {
+            $r = Invoke-AppCapture @('--dxr-depth', '--seed', '1', '--pose', "$p", '--width', '640', '--height', '360')
+            if ($r.Exit -ne 0) { throw "pose ${p}: --dxr-depth exited $($r.Exit): $($r.Out)" }
+            if ((Get-Metric $r.Out 'raster_debug') -ne 0) { throw "pose ${p}: raster debug-layer messages" }
+            if ((Get-Metric $r.Out 'dxr_debug') -ne 0) { throw "pose ${p}: DXR debug-layer messages" }
+            $bothFg = Get-Metric $r.Out 'both_fg_pixels'
+            if ($bothFg -lt 10000) { throw "pose ${p}: only $bothFg co-foreground pixels (geometry/basis misaligned)" }
+            $mis  = Get-MetricFloat $r.Out 'both_fg_mismatch_frac'
+            $mean = Get-MetricFloat $r.Out 'mean_fg_depth_relerr'
+            $edge = Get-MetricFloat $r.Out 'edge_frac'
+            if ($mis  -gt 0.001) { throw "pose ${p}: depth mismatch frac $mis > 0.001" }
+            if ($mean -gt 0.005) { throw "pose ${p}: mean depth rel-err $mean > 0.005" }
+            if ($edge -gt 0.02)  { throw "pose ${p}: silhouette/edge frac $edge > 0.02" }
+            Write-Note "pose ${p}: fg=$bothFg mismatch=$mis mean_relerr=$mean edge=$edge"
+        }
+    }
+
+    # Regression: the additive depth-readback path must not perturb raster output.
+    Assert-Gate 'regression: M5 lit shot + M4 top-down goldens still bit-match' {
+        $tmp = Join-Path $RepoRoot 'runs\gate-m9'
+        if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        $shot = Join-Path $tmp 'm5_shot.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        $d = (& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M5 lit shot golden regressed (diff=$d)" }
+        $td = Join-Path $tmp 'm4_td.png'
+        $r = Invoke-AppCapture @('--topdown', '--seed', '1', '--width', '512', '--height', '512', '--out', $td)
+        if ($r.Exit -ne 0) { throw "M4 top-down exited $($r.Exit)" }
+        $d = (& $hashdiff diff $td (Join-Path $RepoRoot 'goldens\m4\topdown_seed1.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M4 top-down golden regressed (diff=$d)" }
+    }
+
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+
+    Write-Note 'M9 gate covers exit gate #1 (depth compare); gates #2-#4 land in phases 3-4'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -897,6 +980,7 @@ try {
         'M6'    { Invoke-GateM6 -AudioSoakSeconds $AudioSoakSeconds }
         'M7'    { Invoke-GateM7 }
         'M8'    { Invoke-GateM8 }
+        'M9'    { Invoke-GateM9 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

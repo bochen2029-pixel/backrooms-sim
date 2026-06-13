@@ -167,7 +167,13 @@ struct DxrRenderer::Impl {
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     UINT readbackRows = 0;
     UINT64 readbackRowSize = 0, readbackTotal = 0;
-    ComPtr<ID3D12DescriptorHeap> uavHeap;  // shader-visible (1 UAV)
+    ComPtr<ID3D12DescriptorHeap> uavHeap;  // shader-visible (u0 color, u1 depth)
+
+    // Primary-hit NDC depth output (M9 phase 2b, the cross-renderer depth gate).
+    ComPtr<ID3D12Resource> depthTex;       // R32_FLOAT, UNORDERED_ACCESS (u1)
+    ComPtr<ID3D12Resource> depthReadback;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT depthFootprint{};
+    UINT64 depthTotal = 0;
 
     ComPtr<ID3D12RootSignature> globalRS;
     ComPtr<ID3D12StateObject> pso;
@@ -269,13 +275,30 @@ bool DxrRenderer::init(uint32_t w, uint32_t h) {
     if (FAILED(d.device->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &bd,
             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&d.readbackBuf)))) { last_error_ = "readback"; return false; }
 
-    // Shader-visible UAV heap + view.
+    // Shader-visible UAV heap: slot 0 = color (u0), slot 1 = depth (u1).
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
-    hd.NumDescriptors = 1; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    hd.NumDescriptors = 2; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(d.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&d.uavHeap)))) { last_error_ = "uav heap"; return false; }
+    const UINT uavInc = d.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
     ud.Format = kDxrFormat; ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     d.device->CreateUnorderedAccessView(d.uav.Get(), nullptr, &ud, d.uavHeap->GetCPUDescriptorHandleForHeapStart());
+
+    // Primary-hit NDC depth output (R32_FLOAT) + its readback buffer + UAV (u1).
+    D3D12_RESOURCE_DESC dt = td;
+    dt.Format = DXGI_FORMAT_R32_FLOAT;
+    if (FAILED(d.device->CreateCommittedResource(&defHeap, D3D12_HEAP_FLAG_NONE, &dt,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&d.depthTex)))) { last_error_ = "depth tex"; return false; }
+    d.device->GetCopyableFootprints(&dt, 0, 1, 0, &d.depthFootprint, nullptr, nullptr, &d.depthTotal);
+    D3D12_RESOURCE_DESC dbd = bd;
+    dbd.Width = d.depthTotal;
+    if (FAILED(d.device->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &dbd,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&d.depthReadback)))) { last_error_ = "depth readback"; return false; }
+    D3D12_UNORDERED_ACCESS_VIEW_DESC dud{};
+    dud.Format = DXGI_FORMAT_R32_FLOAT; dud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    D3D12_CPU_DESCRIPTOR_HANDLE depthUavCpu = d.uavHeap->GetCPUDescriptorHandleForHeapStart();
+    depthUavCpu.ptr += uavInc;  // slot 1
+    d.device->CreateUnorderedAccessView(d.depthTex.Get(), nullptr, &dud, depthUavCpu);
 
     // Global root signature: one UAV descriptor table (u0).
     D3D12_DESCRIPTOR_RANGE range{};
@@ -389,6 +412,23 @@ bool DxrRenderer::readback(std::vector<uint8_t>& rgba) {
     return true;
 }
 
+bool DxrRenderer::readback_depth(std::vector<float>& depth) {
+    Impl& d = *impl_;
+    if (!d.depthReadback) { last_error_ = "no depth readback buffer"; return false; }
+    void* mapped = nullptr;
+    const D3D12_RANGE rd{ 0, static_cast<SIZE_T>(d.depthTotal) };
+    if (FAILED(d.depthReadback->Map(0, &rd, &mapped))) { last_error_ = "depth readback map"; return false; }
+    depth.resize(static_cast<size_t>(d.width) * d.height);
+    const auto* base = static_cast<const uint8_t*>(mapped) + d.depthFootprint.Offset;
+    const SIZE_T srcPitch = d.depthFootprint.Footprint.RowPitch;
+    for (uint32_t y = 0; y < d.height; ++y)
+        std::memcpy(&depth[static_cast<size_t>(y) * d.width], base + static_cast<size_t>(y) * srcPitch,
+                    static_cast<size_t>(d.width) * sizeof(float));
+    const D3D12_RANGE noWrite{ 0, 0 };
+    d.depthReadback->Unmap(0, &noWrite);
+    return true;
+}
+
 uint32_t DxrRenderer::debug_error_count() {
     Impl& d = *impl_;
     if (!d.infoQueue) return 0;
@@ -417,14 +457,20 @@ uint32_t DxrRenderer::debug_error_count() {
 
 namespace {
 
+// Near/far planes — must match render_d3d12's render_chunks proj_lh(0.05, 500)
+// so the DXR and raster NDC depth buffers use the same hyperbolic mapping.
+constexpr float kSceneNear = 0.05f;
+constexpr float kSceneFar = 500.0f;
+
 const char* kSceneShader = R"(
 cbuffer Cam : register(b0) {
     float3 uPos;   float uTanY;
     float3 uFwd;   float uAspect;
-    float3 uRight; float _p0;
-    float3 uUp;    float _p1;
+    float3 uRight; float uNear;
+    float3 uUp;    float uFar;
 };
 RWTexture2D<float4> g_out : register(u0);
+RWTexture2D<float>  g_depth : register(u1);
 RaytracingAccelerationStructure g_scene : register(t0);
 struct Payload { float3 color; float t; };
 
@@ -436,10 +482,20 @@ void RayGen() {
     float sx = (2.0 * uv.x - 1.0) * uTanY * uAspect;
     float sy = (1.0 - 2.0 * uv.y) * uTanY;
     float3 dir = normalize(uFwd + uRight * sx + uUp * sy);
-    RayDesc ray; ray.Origin = uPos; ray.Direction = dir; ray.TMin = 0.02; ray.TMax = 500.0;
+    RayDesc ray; ray.Origin = uPos; ray.Direction = dir; ray.TMin = 0.02; ray.TMax = uFar;
     Payload p; p.color = float3(0.02, 0.02, 0.06); p.t = -1.0;
     TraceRay(g_scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, p);
     g_out[px] = float4(p.color, 1.0);
+    // NDC depth matching render_d3d12's proj_lh(uNear,uFar): hyperbolic [0,1],
+    // computed from the eye-space z (hit distance projected onto the forward
+    // axis), so the DXR and raster depth buffers are comparable per pixel.
+    float ndc = 1.0;
+    if (p.t > 0.0) {
+        float vz = p.t * dot(dir, uFwd);
+        float q = uFar / (uFar - uNear);
+        ndc = q * (1.0 - uNear / vz);
+    }
+    g_depth[px] = ndc;
 }
 [shader("closesthit")]
 void CHit(inout Payload p, BuiltInTriangleIntersectionAttributes attr) {
@@ -572,8 +628,8 @@ bool DxrRenderer::build_scene(const std::vector<contracts::ResidentChunk>& chunk
     // Build the scene state object + SBT once (independent of geometry).
     if (!d.scenePso) {
         D3D12_DESCRIPTOR_RANGE range{};
-        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; range.NumDescriptors = 1; range.BaseShaderRegister = 0;
-        range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; range.NumDescriptors = 2; range.BaseShaderRegister = 0;
+        range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;  // u0 = color, u1 = depth
         D3D12_ROOT_PARAMETER rp[3]{};
         rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         rp[0].Constants.Num32BitValues = 16; rp[0].Constants.ShaderRegister = 0;
@@ -639,8 +695,8 @@ bool DxrRenderer::render_scene(const contracts::CameraPose& cam) {
     float c[16] = {};
     c[0] = cam.pos[0]; c[1] = cam.pos[1]; c[2] = cam.pos[2]; c[3] = std::tan(cam.fov_y * 0.5f);
     c[4] = fwd.x;   c[5] = fwd.y;   c[6] = fwd.z;   c[7] = cam.aspect;
-    c[8] = right.x; c[9] = right.y; c[10] = right.z; c[11] = 0.0f;
-    c[12] = up.x;   c[13] = up.y;   c[14] = up.z;   c[15] = 0.0f;
+    c[8] = right.x; c[9] = right.y; c[10] = right.z; c[11] = kSceneNear;
+    c[12] = up.x;   c[13] = up.y;   c[14] = up.z;   c[15] = kSceneFar;
 
     if (FAILED(d.alloc->Reset())) { last_error_ = "alloc reset"; return false; }
     if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "list reset"; return false; }
@@ -668,6 +724,16 @@ bool DxrRenderer::render_scene(const contracts::CameraPose& cam) {
     d.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     const D3D12_RESOURCE_BARRIER back = transition(d.uav.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     d.list->ResourceBarrier(1, &back);
+
+    // Copy the primary-hit NDC depth to its readback buffer (M9 gate #1).
+    const D3D12_RESOURCE_BARRIER dToCopy = transition(d.depthTex.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    d.list->ResourceBarrier(1, &dToCopy);
+    D3D12_TEXTURE_COPY_LOCATION ddst{}; ddst.pResource = d.depthReadback.Get(); ddst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; ddst.PlacedFootprint = d.depthFootprint;
+    D3D12_TEXTURE_COPY_LOCATION dsrc{}; dsrc.pResource = d.depthTex.Get(); dsrc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dsrc.SubresourceIndex = 0;
+    d.list->CopyTextureRegion(&ddst, 0, 0, 0, &dsrc, nullptr);
+    const D3D12_RESOURCE_BARRIER dBack = transition(d.depthTex.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    d.list->ResourceBarrier(1, &dBack);
+
     if (FAILED(d.list->Close())) { last_error_ = "scene list close"; return false; }
     ID3D12CommandList* lists[] = { d.list.Get() };
     d.queue->ExecuteCommandLists(1, lists);

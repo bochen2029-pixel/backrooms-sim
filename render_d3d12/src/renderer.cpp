@@ -548,6 +548,66 @@ bool Renderer::readback(FrameImage& out) {
     return true;
 }
 
+bool Renderer::readback_depth(std::vector<float>& out, uint32_t* width, uint32_t* height) {
+    Impl& d = *impl_;
+    if (d.windowed || !d.depth) {
+        last_error_ = "readback_depth is only available in headless mode";
+        return false;
+    }
+    const D3D12_RESOURCE_DESC dd = d.depth->GetDesc();  // D32_FLOAT
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
+    UINT rows = 0; UINT64 rowSize = 0, total = 0;
+    d.device->GetCopyableFootprints(&dd, 0, 1, 0, &fp, &rows, &rowSize, &total);
+
+    // Transient readback buffer (gate-only path; not perf-critical).
+    D3D12_RESOURCE_DESC bd = {};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = total; bd.Height = 1;
+    bd.DepthOrArraySize = 1; bd.MipLevels = 1; bd.Format = DXGI_FORMAT_UNKNOWN;
+    bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    const D3D12_HEAP_PROPERTIES rbHeap = heap_props(D3D12_HEAP_TYPE_READBACK);
+    ComPtr<ID3D12Resource> rb;
+    if (FAILED(d.device->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &bd,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&rb)))) {
+        last_error_ = "depth readback buffer alloc failed"; return false;
+    }
+
+    if (FAILED(d.alloc->Reset())) { last_error_ = "allocator reset failed"; return false; }
+    if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "command list reset failed"; return false; }
+    const D3D12_RESOURCE_BARRIER toCopy = transition(d.depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    d.list->ResourceBarrier(1, &toCopy);
+    D3D12_TEXTURE_COPY_LOCATION dst = {}; dst.pResource = rb.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = fp;
+    D3D12_TEXTURE_COPY_LOCATION src = {}; src.pResource = d.depth.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+    d.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    const D3D12_RESOURCE_BARRIER back = transition(d.depth.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    d.list->ResourceBarrier(1, &back);
+    if (FAILED(d.list->Close())) { last_error_ = "command list close failed"; return false; }
+    ID3D12CommandList* lists[] = { d.list.Get() };
+    d.queue->ExecuteCommandLists(1, lists);
+    const UINT64 v = ++d.fenceValue;
+    if (FAILED(d.queue->Signal(d.fence.Get(), v))) { last_error_ = "fence Signal failed"; return false; }
+    if (d.fence->GetCompletedValue() < v) {
+        if (FAILED(d.fence->SetEventOnCompletion(v, d.fenceEvent))) { last_error_ = "SetEventOnCompletion failed"; return false; }
+        if (WaitForSingleObject(d.fenceEvent, 5000) != WAIT_OBJECT_0) { last_error_ = "fence wait timed out"; return false; }
+    }
+
+    void* mapped = nullptr;
+    const D3D12_RANGE readRange = { 0, static_cast<SIZE_T>(total) };
+    if (FAILED(rb->Map(0, &readRange, &mapped))) { last_error_ = "depth readback Map failed"; return false; }
+    out.assign(static_cast<size_t>(d.width) * d.height, 1.0f);
+    const auto* base = static_cast<const uint8_t*>(mapped) + static_cast<size_t>(fp.Offset);
+    const SIZE_T srcPitch = fp.Footprint.RowPitch;
+    for (UINT row = 0; row < d.height; ++row) {
+        std::memcpy(out.data() + static_cast<size_t>(row) * d.width,
+                    base + static_cast<size_t>(row) * srcPitch,
+                    static_cast<size_t>(d.width) * sizeof(float));
+    }
+    const D3D12_RANGE noWrite = { 0, 0 };
+    rb->Unmap(0, &noWrite);
+    if (width) *width = d.width;
+    if (height) *height = d.height;
+    return true;
+}
+
 uint32_t Renderer::debug_error_count() {
     Impl& d = *impl_;
     if (!d.infoQueue) return 0;

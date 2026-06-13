@@ -44,6 +44,10 @@ errors to process exit codes for the gate scripts (ARCHITECTURE.md §7).
 - `--dxr-test` (M9) — DispatchRays smoke test (raygen UV gradient → PNG).
 - `--dxr --pose P [--seed S]` (M9) — BLAS/TLAS of the resident chunks, primary-ray
   render from the same poses as `--shot` (distance-shaded); reports debug errors.
+- `--dxr-depth --pose P [--seed S]` (M9) — renders the same pose with the raster
+  renderer and the DXR path tracer, reads back both depth buffers, linearizes NDC
+  depth to eye-space and compares per pixel (exit gate #1). Prints co-foreground
+  pixel count, depth mismatch/edge fractions, mean/max rel-err, both debug counts.
 
 **Planned.** `config.toml` + flag/config mirroring (M12), noclip intro + photo
 mode (M12), `--no-director` (M11).

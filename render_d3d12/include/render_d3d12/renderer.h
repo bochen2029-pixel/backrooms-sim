@@ -84,6 +84,12 @@ public:
     // Headless only: copy the rendered target back to CPU as tight RGBA.
     bool readback(FrameImage& out);
 
+    // Headless only: copy the D32_FLOAT depth buffer from the last render back to
+    // CPU as NDC depth (DirectX [0,1], left-handed; cleared/background = 1.0),
+    // row-major width*height. Comparable to render_dxr's depth at the same pose
+    // (M9 gate #1). Leaves the depth buffer in DEPTH_WRITE for the next render.
+    bool readback_depth(std::vector<float>& out, uint32_t* width, uint32_t* height);
+
     // Count of D3D12 debug-layer messages at CORRUPTION/ERROR/WARNING severity
     // accumulated so far (the M1 debug-layer gate requires this to be 0).
     uint32_t debug_error_count();

@@ -52,6 +52,13 @@ public:
     bool render_scene(const contracts::CameraPose& camera);
 
     bool readback(std::vector<uint8_t>& rgba);    // size width*height*4, RGBA
+
+    // Read back the per-pixel primary-hit depth from the last render_scene() as
+    // NDC depth (DirectX [0,1], left-handed; background/miss = 1.0), row-major
+    // width*height. Uses the same hyperbolic projection as render_d3d12's depth
+    // buffer at the same pose, so the two are comparable per pixel (M9 gate #1).
+    bool readback_depth(std::vector<float>& depth);
+
     uint32_t width() const;
     uint32_t height() const;
     uint32_t debug_error_count();

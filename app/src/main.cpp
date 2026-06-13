@@ -53,6 +53,7 @@ struct Options {
     bool walkbot = false, topdown = false, version = false, shot = false;
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
     bool biomeat = false, descend = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
+    bool dxr_depth = false;
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
     uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0;
     uint64_t seed = 1u;
@@ -100,6 +101,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--dxr-probe") == 0) o.dxr_probe = true;
         else if (std::strcmp(a, "--dxr-test") == 0) o.dxr_test = true;
         else if (std::strcmp(a, "--dxr") == 0) o.dxr = true;
+        else if (std::strcmp(a, "--dxr-depth") == 0) o.dxr_depth = true;
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
         else if (std::strcmp(a, "--version") == 0) o.version = true;
         else if (std::strcmp(a, "--frames") == 0) { if (!u32(o.frames)) return false; }
@@ -935,6 +937,104 @@ int run_dxr(const Options& o) {
     return dbg == 0 ? 0 : 3;
 }
 
+// ----- M9 phase 2b: cross-renderer primary-hit depth compare (exit gate #1) ---
+// Render the same pose with the rasteriser and the DXR path tracer, read back
+// both depth buffers (NDC), linearize to eye-space metres, and compare per
+// pixel. Agreement proves the DXR acceleration structures hold exactly the
+// streamed geometry the rasteriser draws.
+int run_dxr_depth(const Options& o) {
+    struct Pose { float yaw, pitch; };
+    static const Pose kPoses[5] = {
+        {0.0f, 0.0f}, {1.5707963f, 0.0f}, {3.1415927f, 0.0f}, {0.7853982f, 0.42f}, {4.0f, -0.38f},
+    };
+    const Pose pz = kPoses[o.pose % 5u];
+    const float ex = 16.0f, ez = 16.0f;
+    const float ey = br::core::kWandererHalfHeight + 0.02f + br::core::kEyeHeight;
+    contracts::CameraPose cam{};
+    cam.pos[0] = ex; cam.pos[1] = ey; cam.pos[2] = ez;
+    cam.yaw = pz.yaw; cam.pitch = pz.pitch;
+    cam.fov_y = 1.2217305f;  // ~70 deg, matches --shot / --dxr
+    cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    const auto center = contracts::chunk_key_at(0, ex, ez);
+    sm.update(center); sm.wait_idle(); sm.update(center);
+
+    // Raster depth at the pose (warm up the chunk pool, then read the D32 buffer).
+    Renderer raster;
+    if (!raster.init_headless(o.width, o.height)) { std::fprintf(stderr, "raster init: %s\n", raster.last_error().c_str()); return 1; }
+    raster.set_texture_seed(o.seed);
+    uint32_t drawn = 0;
+    const size_t target = sm.resident_count();
+    for (int w = 0; w < 400 && static_cast<size_t>(drawn) < target; ++w) {
+        if (!raster.render_chunks(cam, sm.resident(), 64u, o.ticks, &drawn)) {
+            std::fprintf(stderr, "raster warmup: %s\n", raster.last_error().c_str()); return 1;
+        }
+    }
+    if (!raster.render_chunks(cam, sm.resident(), 64u, o.ticks, &drawn)) {
+        std::fprintf(stderr, "raster render: %s\n", raster.last_error().c_str()); return 1;
+    }
+    std::vector<float> draster; uint32_t rw = 0, rh = 0;
+    if (!raster.readback_depth(draster, &rw, &rh)) { std::fprintf(stderr, "raster depth: %s\n", raster.last_error().c_str()); return 1; }
+    const uint32_t rasterDbg = raster.debug_error_count();
+
+    // DXR depth at the same pose from the same resident geometry.
+    br::render_dxr::DxrRenderer dr;
+    if (!dr.init(o.width, o.height)) { std::fprintf(stderr, "dxr init: %s\n", dr.last_error().c_str()); return 1; }
+    if (!dr.build_scene(sm.resident())) { std::fprintf(stderr, "dxr scene: %s\n", dr.last_error().c_str()); return 1; }
+    if (!dr.render_scene(cam)) { std::fprintf(stderr, "dxr render: %s\n", dr.last_error().c_str()); return 1; }
+    std::vector<float> ddxr;
+    if (!dr.readback_depth(ddxr)) { std::fprintf(stderr, "dxr depth: %s\n", dr.last_error().c_str()); return 1; }
+    const uint32_t dxrDbg = dr.debug_error_count();
+
+    // NDC depth is hyperbolic; linearize to eye-space z (metres) with the shared
+    // near/far before applying a relative epsilon.
+    const float kNear = 0.05f, kFar = 500.0f;
+    const float q = kFar / (kFar - kNear);
+    const float kBg = 0.99999f;   // NDC >= this -> background (clear / miss)
+    const float kRelTol = 0.02f;  // 2% linear-depth agreement
+    auto linz = [&](float dv) -> float {
+        const float denom = 1.0f - dv / q;
+        if (denom <= 1e-6f) return kFar;
+        return kNear / denom;
+    };
+
+    const size_t n = static_cast<size_t>(o.width) * o.height;
+    uint64_t both_fg = 0, mismatch = 0, edge = 0, both_bg = 0;
+    double sum_relerr = 0.0, max_relerr = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const float dvr = draster[i], dvd = ddxr[i];
+        const bool bgR = dvr >= kBg, bgD = dvd >= kBg;
+        if (bgR && bgD) { ++both_bg; continue; }
+        if (bgR != bgD) { ++edge; continue; }   // silhouette / AA
+        ++both_fg;
+        const float zr = linz(dvr), zd = linz(dvd);
+        float diff = zr - zd; if (diff < 0.0f) diff = -diff;
+        float den = zr > zd ? zr : zd; if (den < 1.0f) den = 1.0f;
+        const double rel = static_cast<double>(diff / den);
+        sum_relerr += rel;
+        if (rel > max_relerr) max_relerr = rel;
+        if (rel > kRelTol) ++mismatch;
+    }
+    const double fgD = both_fg > 0 ? static_cast<double>(both_fg) : 1.0;
+    const double mismatch_frac = static_cast<double>(mismatch) / fgD;
+    const double mean_relerr = sum_relerr / fgD;
+    const double edge_frac = static_cast<double>(edge) / static_cast<double>(n);
+
+    std::printf("resident_chunks: %llu\n", static_cast<unsigned long long>(sm.resident_count()));
+    std::printf("pose: %u\n", o.pose % 5u);
+    std::printf("both_fg_pixels: %llu\n", static_cast<unsigned long long>(both_fg));
+    std::printf("both_bg_pixels: %llu\n", static_cast<unsigned long long>(both_bg));
+    std::printf("edge_pixels: %llu\n", static_cast<unsigned long long>(edge));
+    std::printf("both_fg_mismatch_frac: %.6f\n", mismatch_frac);
+    std::printf("mean_fg_depth_relerr: %.6f\n", mean_relerr);
+    std::printf("max_fg_depth_relerr: %.6f\n", max_relerr);
+    std::printf("edge_frac: %.6f\n", edge_frac);
+    std::printf("raster_debug: %u\n", rasterDbg);
+    std::printf("dxr_debug: %u\n", dxrDbg);
+    return (rasterDbg == 0 && dxrDbg == 0) ? 0 : 3;
+}
+
 // ----- M9 DXR dispatch test: raygen writes a UV gradient via DispatchRays ------
 int run_dxr_test(const Options& o) {
     br::render_dxr::DxrRenderer r;
@@ -986,6 +1086,7 @@ int main(int argc, char** argv) {
     if (o.descend)    return run_descend(o);
     if (o.dxr_probe)  return run_dxr_probe(o);
     if (o.dxr_test)   return run_dxr_test(o);
+    if (o.dxr_depth)  return run_dxr_depth(o);
     if (o.dxr)        return run_dxr(o);
     if (o.sim)     return run_sim(o);
     if (o.walkbot) return run_walkbot(o);
