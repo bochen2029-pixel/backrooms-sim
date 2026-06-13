@@ -9,6 +9,9 @@
 #include <string>
 #include <vector>
 
+#include "contracts/stream_events_v1.h"
+#include "contracts/world_view_v1.h"
+
 namespace br::render_dxr {
 
 // End-to-end DXR capability, probed on the actual device + toolchain.
@@ -38,6 +41,16 @@ public:
 
     bool init(uint32_t width, uint32_t height);
     bool render_gradient();                       // raygen writes a UV gradient
+
+    // Build BLAS-per-chunk + a TLAS from the resident streamed geometry (M9
+    // phase 2). Vertices are world-space (no per-instance transform), so the AS
+    // holds exactly what the raster renderer draws.
+    bool build_scene(const std::vector<contracts::ResidentChunk>& chunks);
+
+    // Cast primary rays from the camera through the TLAS; closest-hit shades by
+    // distance, miss = background. (gate #1 visualisation; depth-compare next.)
+    bool render_scene(const contracts::CameraPose& camera);
+
     bool readback(std::vector<uint8_t>& rgba);    // size width*height*4, RGBA
     uint32_t width() const;
     uint32_t height() const;

@@ -41,6 +41,9 @@ errors to process exit codes for the gate scripts (ARCHITECTURE.md §7).
   (VHS-only, for the post-pass perf measure). `app/hud.*` is the 5×7 bitmap font.
 - `--dxr-probe` (M9) — print the DXR capability of the box (adapter, Device5,
   raytracing tier, DXC availability + a trial compile); exit 0 iff DXR-ready.
+- `--dxr-test` (M9) — DispatchRays smoke test (raygen UV gradient → PNG).
+- `--dxr --pose P [--seed S]` (M9) — BLAS/TLAS of the resident chunks, primary-ray
+  render from the same poses as `--shot` (distance-shaded); reports debug errors.
 
 **Planned.** `config.toml` + flag/config mirroring (M12), noclip intro + photo
 mode (M12), `--no-director` (M11).

@@ -52,7 +52,7 @@ struct Options {
     bool headless = false, windowed = false, scene = false, sim = false, stream = false;
     bool walkbot = false, topdown = false, version = false, shot = false;
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
-    bool biomeat = false, descend = false, post = false, dxr_probe = false, dxr_test = false;
+    bool biomeat = false, descend = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
     uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0;
     uint64_t seed = 1u;
@@ -99,6 +99,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--post") == 0) o.post = true;
         else if (std::strcmp(a, "--dxr-probe") == 0) o.dxr_probe = true;
         else if (std::strcmp(a, "--dxr-test") == 0) o.dxr_test = true;
+        else if (std::strcmp(a, "--dxr") == 0) o.dxr = true;
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
         else if (std::strcmp(a, "--version") == 0) o.version = true;
         else if (std::strcmp(a, "--frames") == 0) { if (!u32(o.frames)) return false; }
@@ -896,6 +897,44 @@ int run_dxr_probe(const Options&) {
     return ready ? 0 : 7;
 }
 
+// ----- M9 DXR scene: BLAS/TLAS of the resident chunks + primary-ray render -----
+int run_dxr(const Options& o) {
+    // Same 5 canonical poses + spawn as --shot, so DXR and raster line up.
+    struct Pose { float yaw, pitch; };
+    static const Pose kPoses[5] = {
+        {0.0f, 0.0f}, {1.5707963f, 0.0f}, {3.1415927f, 0.0f}, {0.7853982f, 0.42f}, {4.0f, -0.38f},
+    };
+    const Pose pz = kPoses[o.pose % 5u];
+    const float ex = 16.0f, ez = 16.0f;
+    const float ey = br::core::kWandererHalfHeight + 0.02f + br::core::kEyeHeight;
+    contracts::CameraPose cam{};
+    cam.pos[0] = ex; cam.pos[1] = ey; cam.pos[2] = ez;
+    cam.yaw = pz.yaw; cam.pitch = pz.pitch;
+    cam.fov_y = 1.2217305f;
+    cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    const auto center = contracts::chunk_key_at(0, ex, ez);
+    sm.update(center); sm.wait_idle(); sm.update(center);
+
+    br::render_dxr::DxrRenderer r;
+    if (!r.init(o.width, o.height)) { std::fprintf(stderr, "dxr init: %s\n", r.last_error().c_str()); return 1; }
+    if (!r.build_scene(sm.resident())) { std::fprintf(stderr, "dxr scene: %s\n", r.last_error().c_str()); return 1; }
+    if (!r.render_scene(cam)) { std::fprintf(stderr, "dxr render: %s\n", r.last_error().c_str()); return 1; }
+    std::vector<uint8_t> rgba;
+    if (!r.readback(rgba)) { std::fprintf(stderr, "dxr readback: %s\n", r.last_error().c_str()); return 1; }
+    if (!o.out.empty()) {
+        if (stbi_write_png(o.out.c_str(), static_cast<int>(r.width()), static_cast<int>(r.height()),
+                           4, rgba.data(), static_cast<int>(r.width()) * 4) == 0) {
+            std::fprintf(stderr, "PNG write failed: %s\n", o.out.c_str()); return 1;
+        }
+    }
+    const uint32_t dbg = r.debug_error_count();
+    std::printf("resident_chunks: %llu\n", static_cast<unsigned long long>(sm.resident_count()));
+    std::printf("debug_error_count: %u\n", dbg);
+    return dbg == 0 ? 0 : 3;
+}
+
 // ----- M9 DXR dispatch test: raygen writes a UV gradient via DispatchRays ------
 int run_dxr_test(const Options& o) {
     br::render_dxr::DxrRenderer r;
@@ -947,6 +986,7 @@ int main(int argc, char** argv) {
     if (o.descend)    return run_descend(o);
     if (o.dxr_probe)  return run_dxr_probe(o);
     if (o.dxr_test)   return run_dxr_test(o);
+    if (o.dxr)        return run_dxr(o);
     if (o.sim)     return run_sim(o);
     if (o.walkbot) return run_walkbot(o);
     if (o.topdown) return run_topdown(o);
