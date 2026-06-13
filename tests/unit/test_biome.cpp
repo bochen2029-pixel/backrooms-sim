@@ -74,3 +74,27 @@ TEST_CASE("every biome layout is fully connected over 10000 chunks (M7 gate)", "
         }
     }
 }
+
+TEST_CASE("every biome's generated geometry is valid, incl pillars (M7 gate)", "[m7][biome]") {
+    // Walk the world and validate real GenerateChunk geometry for chunks of each
+    // biome (so pillar biomes — parking garage / pillar halls — are covered).
+    const uint64_t seed = 31337u;
+    int done[kBiomeCount] = {0};
+    int remaining = kBiomeCount;
+    const int kPer = 2000;
+    for (int64_t scan = 0; scan < 4000000 && remaining > 0; ++scan) {
+        const int64_t cx = scan % 2048;
+        const int64_t cz = scan / 2048;
+        const int bi = static_cast<int>(biome_at(seed, 0, cx, cz));
+        if (done[bi] >= kPer) continue;
+        const br::contracts::ChunkData cd =
+            br::contracts::GenerateChunk(seed, br::contracts::ChunkKey{0, cx, cz});
+        INFO("biome " << biome_name(static_cast<Biome>(bi)) << " chunk (" << cx << "," << cz << ")");
+        REQUIRE(br::contracts::ValidateChunkGeometry(cd));
+        if (++done[bi] == kPer) --remaining;
+    }
+    for (int bi = 0; bi < kBiomeCount; ++bi) {
+        INFO("biome " << biome_name(static_cast<Biome>(bi)));
+        REQUIRE(done[bi] == kPer);
+    }
+}

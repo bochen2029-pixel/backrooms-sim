@@ -84,7 +84,9 @@ struct ChunkData {
 ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key);
 uint64_t ChunkContentHash(const ChunkData& c);
 
-// Geometry validator: no degenerate/floating/fat/overlapping walls (M4 gate).
+// Geometry validator: every collision box is a valid wall (thin in exactly one
+// axis) or a small square pillar (thin in both, <= 1 m; M7), none degenerate/
+// floating/fat/overlapping (M4 gate, extended for pillars in ADR-032).
 bool ValidateChunkGeometry(const ChunkData& c);
 
 }  // namespace br::contracts

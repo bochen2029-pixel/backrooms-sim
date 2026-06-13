@@ -31,8 +31,14 @@ via shared edge hashes. INV-3 Connectivity — no sealed regions. Compiled
   cross-biome seams stay connected (INV-3).
 - `gen/gen.h` — identity stub.
 
-**Planned.** Set pieces (pillar halls, flooded) + the geometry-validator
-extension for pillars; verticality (level −1 + stairwells) — M7 phases 2b–3.
+**Pillars (M7 phase 2b).** `GenerateChunk` adds free-standing 0.5 m square
+collidable columns at cell centres with probability `pillar_density` (parking
+garage / pillar halls). `ValidateChunkGeometry` accepts them as a category
+distinct from walls (ADR-032); ~1.75 m clearance keeps connectivity + navigation
+intact.
+
+**Planned.** Flooded / poolroom set-piece geometry; verticality (level −1 +
+stairwells) — M7 phase 3.
 
 **Status:** M7 (in progress) — biome field wired into generation (per-biome carve
 ratio + tint); distribution within ±2 % over 102,400 chunks; per-biome 10k-chunk

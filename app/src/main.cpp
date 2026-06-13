@@ -29,6 +29,7 @@
 #include "core/replay.h"
 #include "contracts/chunk_gen_v1.h"
 #include "contracts/audio_events_v1.h"
+#include "gen/biome.h"
 #include "stream/stream_manager.h"
 #include "telemetry/csv.h"
 #include "render_d3d12/renderer.h"
@@ -48,6 +49,7 @@ struct Options {
     bool headless = false, windowed = false, scene = false, sim = false, stream = false;
     bool walkbot = false, topdown = false, version = false, shot = false;
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
+    bool biomeat = false;
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
     uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0;
     uint64_t seed = 1u;
@@ -89,6 +91,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--audiolog") == 0) { if (!str(o.audiolog)) return false; }
         else if (std::strcmp(a, "--audiosoak") == 0) o.audiosoak = true;
         else if (std::strcmp(a, "--audio") == 0) o.audio = true;
+        else if (std::strcmp(a, "--biomeat") == 0) o.biomeat = true;
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
         else if (std::strcmp(a, "--version") == 0) o.version = true;
         else if (std::strcmp(a, "--frames") == 0) { if (!u32(o.frames)) return false; }
@@ -805,6 +808,15 @@ int run_audiosoak(const Options& o) {
     return (underruns == 0) ? 0 : 5;
 }
 
+// ----- M7 biome inspection: the biome at the --shot spawn chunk (0,0) ---------
+int run_biomeat(const Options& o) {
+    const br::gen::Biome b = br::gen::biome_at(o.seed, 0, 0, 0);
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("biome_id: %d\n", static_cast<int>(b));
+    std::printf("biome: %s\n", br::gen::biome_name(b));
+    return 0;
+}
+
 }  // namespace
 
 // Tighten the OS timer/wait granularity (default ~15.6 ms) to 1 ms for the
@@ -823,6 +835,7 @@ int main(int argc, char** argv) {
     if (o.render_wav) return run_render_wav(o);
     if (o.footsteps)  return run_footsteps(o);
     if (o.audiosoak)  return run_audiosoak(o);
+    if (o.biomeat)    return run_biomeat(o);
     if (o.sim)     return run_sim(o);
     if (o.walkbot) return run_walkbot(o);
     if (o.topdown) return run_topdown(o);

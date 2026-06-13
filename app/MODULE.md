@@ -30,6 +30,8 @@ errors to process exit codes for the gate scripts (ARCHITECTURE.md §7).
 - `--audiosoak [--audio] [--seconds S | --ticks N] [--seed S]` (M6) — drive the
   sim flat-out while the real-time mixer thread runs; reports mean tick time +
   `underruns` (proves the audio thread never blocks the sim).
+- `--biomeat [--seed S]` (M7) — print the biome at the spawn chunk (0,0); used to
+  target a known biome for per-biome goldens / gate captures.
 
 **Planned.** `config.toml` + flag/config mirroring (M12), noclip intro + photo
 mode (M12), `--no-director` (M11).

@@ -4,9 +4,9 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
-## Session 8 — M7: Biomes, Set Pieces, Verticality  🟡 IN PROGRESS (phases 1–2a done)
+## Session 8 — M7: Biomes, Set Pieces, Verticality  🟡 IN PROGRESS (phases 1–2b done)
 
-**Last green tag: `m6-green`. Phases 1 + 2a committed (all gates still pass).**
+**Last green tag: `m6-green`. Phases 1 + 2a + 2b committed (all gates still pass).**
 
 **Done (phase 1).** The **biome field** — `gen/biome.{h,cpp}`: a pure,
 low-frequency `biome_at(seed, level, cx, cz)` over a coarse **K=3** chunk lattice
@@ -25,14 +25,27 @@ connect (INV-3); seam-crack / regen / doorway-agreement tests stay green.
 connectivity — 5×10k). M4 top-down + M5 lit-shot goldens **re-captured via
 goldgen** (ADR-031; determinism + match verified, diff 0).
 
+**Done (phase 2b).** **Pillars** — `GenerateChunk` adds 0.5 m square full-height
+collidable columns at cell centres with prob `pillar_density` (consumed from the
+chunk RNG only when the biome calls for it → pillar-free biomes stay
+bit-identical). `ValidateChunkGeometry` extended to accept square pillars (thin
+both axes ≤ 1 m) vs walls (thin one axis) — ADR-032. `test_biome`: **per-biome
+geometry valid, 2000 chunks each** (incl pillars). Walk-bot 1 km × 5 seeds, 0
+stuck (pillars don't wedge). `--biomeat` app mode → per-biome lit goldens
+`goldens/m7/biome_<name>.png` (classic=seed1, cubicle=4, pipe=2, garage=11,
+pool=25; parking garage shows columns). M5 seed-42 shots re-captured (pillar
+biome).
+
 **Remaining for M7 (start here).**
-- **Phase 2b — pillars + set pieces + per-biome goldens.** Add pillars in open
-  cells (parking garage / pillar halls) as collision boxes; **extend
-  `ValidateChunkGeometry`** to accept square pillars (thin in BOTH axes, ≤ ~1 m)
-  as a valid category distinct from walls (+ADR). Geometry validator over 10k per
-  biome (exit gate #1 geometry). Per-biome fixed-pose goldens (exit gate #4) —
-  needs a way to render a KNOWN biome (e.g., a `--shot --biome N` that seeds the
-  spawn chunk to that biome, or pick seeds whose chunk (0,0) is each biome).
+- **Phase 3 — verticality.** Level −1 generation (`ChunkKey.level=-1`, Y-offset,
+  altered params) + a **stairwell set piece** (descending step boxes) placed
+  deterministically/rare, connecting level 0↔−1. A **scripted-descent replay**
+  (app mode): wanderer walks down, Y drops a level, lands in a level −1 chunk;
+  assert cross-level connectivity + determinism hash reproduces (exit gate #3).
+  Capsule collision already steps DOWN via gravity; no step-up needed.
+- **Phase 4 — gate.** `Invoke-GateM7`: 4 exit gates (per-biome validators 10k /
+  distribution 100k ±2 % / stairwell descent / per-biome goldens) + regression
+  M0–M6 + ADRs + SESSION_LOG + tag `m7-green`.
 - **Phase 3 — verticality.** Level −1 generation (`ChunkKey.level=-1`, Y-offset,
   altered params) + a **stairwell set piece** (descending step boxes) placed
   deterministically/rare, connecting level 0↔−1. A **scripted-descent replay**

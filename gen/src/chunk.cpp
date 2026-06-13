@@ -125,6 +125,29 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
         }
     }
 
+    // Pillars (set-piece columns: parking garage, pillar halls). A small square
+    // column at the cell centre — full-height, collidable — leaving ~1.75 m of
+    // clearance on each side, so it never blocks cell-to-cell passage (the cell
+    // grid that validate_connectivity flood-fills is unaffected). Only consumed
+    // when the biome calls for it, so pillar-free biomes stay bit-identical.
+    if (bp.pillar_density > 0.0f) {
+        const float ps = 0.25f;  // half-extent -> 0.5 m square column
+        const float pcol[3] = { wall_col[0] * 0.85f, wall_col[1] * 0.85f, wall_col[2] * 0.85f };
+        for (int i = 0; i < G; ++i) {
+            for (int j = 0; j < G; ++j) {
+                if (rng.next_double() >= static_cast<double>(bp.pillar_density)) continue;
+                const float pcx = ox + (static_cast<float>(i) + 0.5f) * cs;
+                const float pcz = oz + (static_cast<float>(j) + 0.5f) * cs;
+                push_box(c.vertices, pcx - ps, 0.0f, pcz - ps, pcx + ps, kWallHeight, pcz + ps,
+                         pcol, kMatBaseboard);
+                BoxInstance bi;
+                bi.mn[0] = pcx - ps; bi.mn[1] = 0.0f; bi.mn[2] = pcz - ps;
+                bi.mx[0] = pcx + ps; bi.mx[1] = kWallHeight; bi.mx[2] = pcz + ps;
+                c.collision.push_back(bi);
+            }
+        }
+    }
+
     c.content_hash = ChunkContentHash(c);
     return c;
 }
@@ -152,12 +175,20 @@ uint64_t ChunkContentHash(const ChunkData& c) {
 bool ValidateChunkGeometry(const ChunkData& c) {
     const float eps = 0.01f;
     const float thin = gen::kCellSize * 0.5f;  // 2.0 m separator
+    const float kPillarMax = 1.0f;             // a pillar is a small square column
     for (const BoxInstance& b : c.collision) {
-        if (b.mx[0] - b.mn[0] <= eps || b.mx[1] - b.mn[1] <= eps || b.mx[2] - b.mn[2] <= eps) return false;
-        if (b.mn[1] < -eps || b.mn[1] > eps) return false;
-        const bool thinX = (b.mx[0] - b.mn[0]) <= thin;
-        const bool thinZ = (b.mx[2] - b.mn[2]) <= thin;
-        if (thinX == thinZ) return false;
+        const float ex = b.mx[0] - b.mn[0];
+        const float ez = b.mx[2] - b.mn[2];
+        if (ex <= eps || b.mx[1] - b.mn[1] <= eps || ez <= eps) return false;  // degenerate
+        if (b.mn[1] < -eps || b.mn[1] > eps) return false;                     // floating
+        const bool thinX = ex <= thin;
+        const bool thinZ = ez <= thin;
+        // A box is either a WALL (thin in exactly one axis) or a free-standing
+        // PILLAR (small + square: thin in BOTH axes, <= 1 m). Anything thin in
+        // neither axis is a fat/degenerate block (M7: pillars are valid geometry).
+        const bool is_wall = (thinX != thinZ);
+        const bool is_pillar = thinX && thinZ && ex <= kPillarMax && ez <= kPillarMax;
+        if (!is_wall && !is_pillar) return false;
     }
     for (size_t i = 0; i < c.collision.size(); ++i) {
         for (size_t j = i + 1; j < c.collision.size(); ++j) {
