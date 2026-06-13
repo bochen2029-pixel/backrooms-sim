@@ -4,11 +4,42 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
-## Session 10 — M9: DXR Path-Traced Mode  🟡 SCOPED + FEASIBILITY CONFIRMED (no code yet)
+## Session 10 — M9: DXR Path-Traced Mode  🟡 IN PROGRESS (phase 1a done — toolchain proven)
 
-**Last green tag: `m8-green` (the tip; M9 is the next milestone, a 2–3 session
-build). Start here.** Feasibility was verified this session; the implementation
-is a fresh-context job.
+**Last green tag: `m8-green`; phase 1a committed on top (additive, all gates pass).
+Start at phase 1b.** The hardest risk (DXR toolchain) is retired.
+
+**Done (phase 1a).** `render_dxr/dxc.*` — runtime DXC wrapper (loads
+`dxcompiler.dll` via LoadLibrary + SDK scan; compiles HLSL → **signed** SM 6.3
+DXIL through `IDxcCompiler3`; `dxil.dll` signs from beside it). `render_dxr/dxr.h`
+`probe_caps()` — own `ID3D12Device5`, `CheckFeatureSupport(OPTIONS5)` tier, + a
+trial DXR-library compile. `app --dxr-probe`. **Measured: RTX 4070 Ti SUPER,
+device5=1, RaytracingTier 1.1, DXC → 2088 B signed DXIL, dxr_ready=1.** ADR-035
+(dxc system dep; self-contained render_dxr). No vcpkg change; FXC raster untouched.
+
+**Remaining for M9 (start at phase 1b).**
+- **Phase 1b — trivial dispatch.** A `DxrRenderer` (own Device5 + queue +
+  GraphicsCommandList4): RT **state object** (DXIL_LIBRARY raygen +
+  SHADER_CONFIG + PIPELINE_CONFIG + GLOBAL_ROOT_SIGNATURE with a UAV), an **SBT**
+  (one raygen record, 32 B id aligned to 64 B), a UAV render target, **DispatchRays**
+  writing a UV gradient (no TraceRay yet), readback → PNG, **debug-layer/DRED
+  clean**. Proves the whole dispatch machinery.
+- **Phase 2 — AS + depth compare (gate #1):** BLAS per `ResidentChunk` (triangles
+  from `ChunkVertex`) + TLAS; raygen now `TraceRay`s primary rays → hit `RayTCurrent`
+  → depth; `app --dxr`; compare DXR primary-hit depth vs raster depth within epsilon.
+- **Phase 3 (gate #2):** closest-hit PT (emissive fluorescents as lights, shadow +
+  diffuse-GI rays, seeded per-(pixel,sample) RNG), accumulation; 1000+ spp at 3
+  poses; RMSE < threshold (via `soak.ps1`).
+- **Phase 4 (gates #3, #4):** interactive PT (accum reset on move; ≥60 FPS;
+  no-ghost histogram-after-teleport), TLAS refit on stream; walk-bot 1 km PT, zero
+  debug/DRED.
+- **Phase 5:** `Invoke-GateM9` (4 gates + regression) + tag `m9-green`.
+
+**Gotchas.** Command list must be `ID3D12GraphicsCommandList4` (SetPipelineState1
++ DispatchRays). SBT records: shader id is `D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES`
+(32), each record aligned to `D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT` (64),
+table base to 64. AS buffers need `ALLOW_UNORDERED_ACCESS` + the
+`RAYTRACING_ACCELERATION_STRUCTURE` state; build needs a scratch buffer.
 
 **Feasibility (confirmed).**
 - **GPU:** NVIDIA RTX 4070 Ti SUPER present → DXR 1.1 (Tier ≥ 1.0) capable.
