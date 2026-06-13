@@ -1,0 +1,12 @@
+# Normalize line endings; let git decide text vs binary by default.
+* text=auto
+
+# Scripts that must keep a specific ending.
+*.ps1   text eol=crlf
+*.sh    text eol=lf
+
+# Goldens and any binary reference artifacts (INV-8) — never munge.
+*.png   binary
+*.wav   binary
+*.dmp   binary
+*.bin   binary

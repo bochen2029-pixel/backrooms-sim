@@ -1,0 +1,28 @@
+# Build output
+/build/
+/build-*/
+/out/
+**/vcpkg_installed/
+
+# Run artifacts and telemetry (ARCHITECTURE.md §10)
+/runs/*
+!/runs/.gitkeep
+
+# vcpkg (external, bootstrapped by scripts/bootstrap; never vendored)
+/extern/vcpkg/
+
+# IDE / tooling
+.vs/
+.vscode/
+*.user
+CMakeUserPresets.json
+compile_commands.json
+
+# Redundant delivery artifacts (the starter zip + its extracted duplicate of
+# this very repo). The repo root is the source of truth.
+/files/
+*.zip
+
+# OS
+Thumbs.db
+desktop.ini
