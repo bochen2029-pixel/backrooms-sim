@@ -4,11 +4,43 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
-## Session 10 — M9: DXR Path-Traced Mode  🟡 IN PROGRESS (phase 1 done — toolchain + dispatch proven)
+## Session 10 — M9: DXR Path-Traced Mode  🟡 IN PROGRESS (phases 1 + 2a done — DXR traces the maze)
 
-**Last green tag: `m8-green`; phases 1a + 1b committed on top (additive, all gates
-pass). Start at phase 2.** Both hard risks (DXR toolchain + the DispatchRays
-machinery) are retired and debug-clean.
+**Last green tag: `m8-green`; phases 1a/1b/2a committed on top (additive, all gates
+pass). Start at phase 2b (the depth-compare gate).** The DXR path tracer now traces
+the real streamed geometry, debug-clean.
+
+**Done (phase 2a — BLAS/TLAS + TraceRay).** `DxrRenderer::build_scene(chunks)`
+builds a BLAS per resident chunk (triangles from `ChunkVertex`, world-space) + a
+TLAS (identity instances); the scene state object adds a hit group + miss, SBT =
+raygen|miss|hitgroup (64 B records), TLAS bound as a root SRV (t0).
+`render_scene(camera)` casts primary rays (yaw/pitch/fov ray basis), closest-hit
+shades by distance. `app --dxr --pose P`. **Verified: 169-chunk scene, maze traced
+with correct depth, debug/DRED clean.** Fix: AS **scratch** buffers must be created
+in `COMMON` (D3D12 ignores `UNORDERED_ACCESS` initial state for buffers → 1 warning
+per chunk otherwise).
+
+**Remaining for M9 (start at phase 2b).**
+- **Phase 2b — depth compare (exit gate #1).** Make raster vs DXR primary-hit
+  depths comparable per pixel: pass the **same** view+proj (or invViewProj) to
+  both. Easiest: expose `render_d3d12`'s MVP / add a depth-buffer readback
+  (`readback_depth`), have the DXR raygen generate rays from `invViewProj` (not the
+  yaw/pitch basis — that may not match raster's `view_lh`/`proj_lh` exactly) and
+  write **NDC depth** = project(hitPos)·MVP. Compare within epsilon over the frame
+  (allow edge AA). Gate: `--dxr-depth` + raster `--shot` depth at the same pose.
+  NOTE: the current ray basis gives a plausible image but is NOT guaranteed to
+  match raster's convention — align it (or switch to invViewProj) for the numeric
+  compare.
+- **Phase 3 (gate #2):** closest-hit PT (emissive fluorescents as lights, shadow +
+  diffuse-GI rays, seeded per-(pixel,sample) RNG), accumulation buffer; 1000+ spp
+  at 3 poses; RMSE < threshold (via `soak.ps1`). Shading currently distance-only.
+- **Phase 4 (gates #3, #4):** interactive PT (accum reset on move; ≥60 FPS;
+  no-ghost histogram-after-teleport), TLAS refit on stream; walk-bot 1 km PT, zero
+  debug/DRED.
+- **Phase 5:** `Invoke-GateM9` (4 gates + regression) + tag `m9-green`.
+
+**Earlier this session (phases 1a + 1b).** Both hard risks (DXR toolchain + the
+DispatchRays machinery) retired and debug-clean.
 
 **Done (phase 1a — toolchain).** `render_dxr/dxc.*` — runtime DXC wrapper (loads
 `dxcompiler.dll` via LoadLibrary + SDK scan; compiles HLSL → **signed** SM 6.3
