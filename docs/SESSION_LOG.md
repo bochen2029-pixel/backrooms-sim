@@ -4,6 +4,59 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 7 — M6: Procedural Audio  ✅ gate green (`m6-green`)
+
+**Status: `gate.ps1 -Milestone M6` exits 0.** The backrooms now *sounds* like the
+backrooms: a 60 Hz fluorescent hum, an HVAC drone bed, footsteps timed to the
+walk, and reverb that opens up in larger rooms — all procedural, all deterministic,
+all verified headlessly (no speakers). ADRs 028–030. **No new dependency**
+(miniaudio deferred to real-time playback, headless-first).
+
+**Done.**
+- **Contract** `contracts/audio_events_v1.h` (core→audio): `AudioListener`,
+  `FootstepEvent`, `kAudioSampleRate=48000`, `kAudioChannels=2`, `kStrideLength`.
+- **core** (pure, additive, no hash/replay change): `footstep_count(odometer)` =
+  floor(odometer/stride); `audio_listener(state)`. Footsteps derive from the
+  already-hashed odometer → reproduce from a replay (INV-1); `core` stays
+  audio-free (returns only contract types, INV-5).
+- **audio** module: `Synth` (deterministic 60 Hz hum + harmonics, HVAC noise bed,
+  footstep transients, Freeverb reverb sized by RT60), `room_probe` (16-ray
+  mean-free-path → reverb seconds), header-only `wav.h` (PCM16), `AudioEngine`
+  (headless real-time mixer thread, prebuffered producer ~170 ms headroom, fed
+  lock-free).
+- **app**: `--render-wav` (offline: maze walk → 400 frames/tick → PCM16 WAV +
+  footstep log, bit-identical x2), `--footsteps` (independent reference log),
+  `--audiosoak [--audio]` (real-time mixer soak; mean tick time + underruns).
+- **tools/wavcheck**: WAV reader + self-contained radix-2 FFT; `spectrum` +
+  `assert` (60 Hz fundamental + 120/180 Hz harmonics over noise floor; RMS
+  silence check).
+- **Gate `Invoke-GateM6`** (`-AudioSoakSeconds`, default 60): ctest (synth
+  determinism, WAV round-trip, 60 Hz hum, room-probe, footstep floor + full
+  regression) · INV-5 · offline WAV **deterministic x2** + `wavcheck assert` ·
+  **footstep 1:1** (audiolog == replay reference) · **soak: 0 underruns** +
+  audio-on tick time within 1.5× of off · M5/M4 render-golden regression ·
+  inventory. Measured: 60 Hz at ~12000× floor, 64/64 footsteps aligned, 0
+  underruns over 60 s (and a 10-min soak), tick-time delta ~0.4%.
+
+**Pending / next.** M7 — Biomes, set pieces, verticality (biome field over chunk
+space; rare set pieces; level −1 descent).
+
+**Gotchas.**
+- All sound-affecting randomness lives in `core`/`Synth` seeded state — never
+  wall-clock — so the offline WAV is bit-identical across runs/processes.
+  `AudioEngine` is the **only** place wall-clock is allowed (real-time pacing).
+- The audio "golden" is the **WAV spectrum** (wavcheck FFT bands), not a committed
+  byte-file — audio is per-toolchain like renders are per-GPU. The gate checks
+  determinism-x2 + spectral bands instead of a stored WAV.
+- Underruns must be measured against a **prebuffered** ring (headroom), not a
+  zero-headroom deadline — the first engine model false-failed on Windows sleep
+  jitter (110 underruns); the headroom model gives 0. Sim throughput off vs on is
+  the proof the audio thread doesn't block the tick loop.
+- `sr/120 = 400` is an exact integer (48000/120) → one tick maps to exactly 400
+  audio frames, no resampling.
+
+---
+
 ## Session 6 — M5: Procedural Materials + Raster Lighting v1  ✅ gate green (`m5-green`)
 
 **Status: `gate.ps1 -Milestone M5` exits 0.** Backrooms now *looks* like the

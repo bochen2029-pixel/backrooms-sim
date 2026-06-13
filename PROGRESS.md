@@ -13,9 +13,10 @@ Backup remote: **https://github.com/bochen2029-pixel/backrooms-sim** (private).
 | **M3** | Infinite chunk streaming + telemetry | M3 | ✅ `m3-green` |
 | **M4** | Level-0 generator: maze, doorways, walk-bot | M4 | ✅ `m4-green` |
 | **M5** | Procedural materials + raster fluorescent lighting | M5 | ✅ `m5-green` |
-| M6–M12 | audio · biomes · VHS post · DXR · soak · Director · acceptance | — | ⬜ pending |
+| **M6** | Procedural audio: synth, room-probe reverb, offline WAV | M6 | ✅ `m6-green` |
+| M7–M12 | biomes · VHS post · DXR · soak · Director · acceptance | — | ⬜ pending |
 
-**6 milestones green and pushed.** Each is verified by a machine-checkable gate
+**7 milestones green and pushed.** Each is verified by a machine-checkable gate
 (`scripts/gate.ps1 -Milestone M<N>` exits 0) and tagged; the remote is the backup.
 
 All numbers below are from real gate runs on the dev machine (RTX 4070 Ti SUPER,
@@ -87,6 +88,26 @@ maze goldens stay **bit-exact** (no re-capture). **Gate:** texture determinism,
 debug-clean, **≥120 FPS @1440p** (best-of-2, measured **~179 FPS**), and a
 regression pass over the M1/M2/M4 render goldens.
 
+### M6 — Procedural Audio
+Now it *sounds* like the backrooms: a 60 Hz fluorescent mains hum + harmonics, an
+HVAC drone bed, footsteps timed to the walk, and reverb that opens up in larger
+rooms — all procedural (no asset files), all deterministic, all verified headlessly
+(no speakers). `core` derives footfalls as a pure floor of the odometer
+(`footstep_count`) and the `audio_listener`, returning only contract types so it
+stays audio-free (INV-5) and footsteps reproduce from a replay with no
+replay-format change. The `audio` module is a deterministic block `Synth` (hum,
+HVAC, footstep transients, Freeverb reverb sized by a 16-ray **room probe**),
+header-only PCM16 WAV I/O, and a headless real-time **`AudioEngine`** (prebuffered
+mixer thread fed lock-free from the sim). `app --render-wav` writes a bit-identical
+WAV at exactly 400 audio frames/tick; `tools/wavcheck` runs a self-contained FFT.
+**No new dependency** — miniaudio is deferred to real-time speaker playback
+(headless-first). **Gate:** WAV deterministic ×2 + `wavcheck` (60 Hz fundamental +
+harmonics over the noise floor, RMS silence check); footstep log **1:1** with the
+replay; **soak with zero underruns** + audio-on tick time within 1.5× of off (the
+audio thread never blocks the sim). Measured: 60 Hz at ~12000× the noise floor,
+64/64 footsteps aligned, 0 underruns over 60 s (and a 10-min soak), tick-time delta
+~0.4%.
+
 ---
 
 ## Architecture & invariants (the rules that keep it coherent)
@@ -96,19 +117,20 @@ regression pass over the M1/M2/M4 render goldens.
   `app` (composition root) · `tools`. Dependency arrows point downward only; CI
   checks the inventory matches the directory listing.
 - **Contracts** (`contracts/*.h`, header-only `contracts` target): `geometry_v1`,
-  `world_view_v1`, `replay_v1`, `chunk_gen_v1`, `stream_events_v1`, `telemetry_v1`
-  are live; `audio_events_v1` (M6) and `director_v1` (M11) pending.
+  `world_view_v1`, `replay_v1`, `chunk_gen_v1`, `stream_events_v1`, `telemetry_v1`,
+  `audio_events_v1` are live; `director_v1` (M11) pending.
 - **Key invariants** held and gated: INV-1 determinism (per-binary, bit-exact
   across runs/replays/processes), INV-2 generation purity, INV-3 connectivity
   (zero sealed boxes), INV-4 bounded memory (streaming ring), INV-5 core
   isolation (grep-gated), INV-7 headless verification, INV-8 golden integrity
   (only `goldgen` writes `/goldens`, always with a DECISIONS.md entry).
-- **Decisions:** ADR-001..027 in `docs/DECISIONS.md` (each summarised in
+- **Decisions:** ADR-001..030 in `docs/DECISIONS.md` (each summarised in
   ARCHITECTURE.md §8). Notable: vcpkg static triplet, `/fp:strict` core, the
   "test-the-gate" canary, the M3 hitch metric (p99 @1440p, NFR §9), the M4 maze +
   collision design, the M5 deterministic-flicker-in-`core` decision (ADR-026) and
-  lit-render gate (ADR-027), far-chunk float-precision deferral (camera-relative
-  rendering still to come).
+  lit-render gate (ADR-027), the M6 deterministic-audio + no-miniaudio-yet
+  decision (ADR-028) and WAV-spectrum gate (ADR-030), far-chunk float-precision
+  deferral (camera-relative rendering still to come).
 
 ## Verification harness
 
@@ -126,9 +148,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gate.ps1 -Milestone 
 ```
 
 App modes built so far: `--headless` · `--window` · `--scene` · `--sim` ·
-`--stream` · `--walkbot` · `--topdown` · `--shot` (see `app/MODULE.md`).
+`--stream` · `--walkbot` · `--topdown` · `--shot` · `--render-wav` · `--footsteps`
+· `--audiosoak` (see `app/MODULE.md`).
 
-## Two real bugs caught (and fixed properly, not tuned around)
+## Three real bugs caught (and fixed properly, not tuned around)
 
 1. **Far-chunk float precision** tripped the M4 geometry validator (a 0.3 m wall
    measured 0.312 m at 320 km from origin). Fixed with validator thresholds
@@ -137,25 +160,31 @@ App modes built so far: `--headless` · `--window` · `--scene` · `--sim` ·
 2. **Em-dash in a Catch2 test name** made `catch_discover_tests` register a name
    that ctest's re-invocation couldn't match (Unicode arg round-trip), so a
    correct connectivity test "failed" only under ctest. Keep test names ASCII.
+3. **Audio "underruns" that weren't.** The first real-time mixer model gave each
+   block exactly one real-time slot (zero headroom), so ordinary Windows sleep
+   jitter under load counted as 110 underruns. The fix was the *correct model*,
+   not a looser threshold: a prebuffered producer that renders ahead of a virtual
+   read cursor with ~170 ms headroom (how a real device ring works) — 0 underruns,
+   and the off-vs-on tick-time comparison still proves the audio thread never
+   blocks the sim.
 
 ## What's next
 
-- **M6** procedural audio: room-probe reverb + procedural synth (fluorescent buzz,
-  HVAC drone, footsteps), driven by the sim, with an **offline-WAV headless gate**
-  (render audio to a deterministic WAV, assert spectral/level bands — no speakers
-  needed). New boundary contract `audio_events_v1` (core → audio).
-- **M7** biomes/set pieces/verticality · **M8** VHS post + HUD · **M9** DXR
-  path-traced mode · **M10** 8 h walk-bot soak · **M11** the Director (local LLM) ·
-  **M12** integration + 12 h acceptance.
+- **M7** biomes, set pieces, verticality: a low-frequency biome field over chunk
+  space (classic yellow, cubicle farm, parking garage, poolrooms, pipe corridors),
+  rare set pieces (pillar halls, flooded sections, stairwells to level −1 with
+  altered generator params), biome-blended seams.
+- **M8** VHS post + HUD · **M9** DXR path-traced mode · **M10** 8 h walk-bot soak ·
+  **M11** the Director (local LLM) · **M12** integration + 12 h acceptance.
 
 ## How to continue (next session)
 
 1. Read `docs/ARCHITECTURE.md`, the latest `docs/SESSION_LOG.md` entry, and the
-   M6 section of `docs/MILESTONES.md`.
-2. Produce the M6 change manifest (audio module surface, `audio_events_v1`
-   contract, `--render-wav` app mode, `wavcheck` tool) before writing code.
-3. Run `gate.ps1 -Milestone M6` until exit 0, regression-sweep M0–M5, tag
-   `m6-green`, push, write the SESSION_LOG entry.
+   M7 section of `docs/MILESTONES.md`.
+2. Produce the M7 change manifest (biome field in `gen`, set-piece injection,
+   biome-aware materials/audio, seam blending, the M7 gate) before writing code.
+3. Run `gate.ps1 -Milestone M7` until exit 0, regression-sweep M0–M6, tag
+   `m7-green`, push, write the SESSION_LOG entry.
 
-_The repo is the memory. Last fully-green tag: `m5-green`. Never resume from a
+_The repo is the memory. Last fully-green tag: `m6-green`. Never resume from a
 broken state — revert to the last green tag if needed._

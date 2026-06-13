@@ -22,9 +22,18 @@ errors to process exit codes for the gate scripts (ARCHITECTURE.md §7).
   tick T (bit-exact per seed/pose/tick/GPU). Prints a luminance histogram
   (`luma_mean`, `luma_p01/p50/p99`, `frac_black`, `frac_white`) so the gate can
   assert the frame is neither all-black nor blown-out.
+- `--render-wav --out a.wav [--seed S] [--ticks N] [--audiolog f]` (M6) — offline
+  audio: drive the deterministic maze walk, synth the mix (400 frames/tick),
+  write a PCM16 WAV (+ footstep-tick log). Bit-identical across runs.
+- `--footsteps --out f [--seed S] [--ticks N]` (M6) — the independent footstep
+  reference: the same walk, footstep ticks only (gate aligns it with `--audiolog`).
+- `--audiosoak [--audio] [--seconds S | --ticks N] [--seed S]` (M6) — drive the
+  sim flat-out while the real-time mixer thread runs; reports mean tick time +
+  `underruns` (proves the audio thread never blocks the sim).
 
 **Planned.** `config.toml` + flag/config mirroring (M12), noclip intro + photo
 mode (M12), `--no-director` (M11).
 
-**Status:** M5 — adds `--shot` (fixed-pose lit goldens + luminance histogram) to
-the render/sim/stream/walkbot/topdown CLI modes.
+**Status:** M6 — adds `--render-wav`, `--footsteps`, `--audiosoak` (procedural
+audio: offline WAV + headless real-time soak) to the
+render/sim/stream/walkbot/topdown/shot CLI modes.

@@ -8,7 +8,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Milestone,
     [int]$SoakSeconds = 60,
     [int]$WindowSeconds = 10,
-    [int]$StreamSoakSeconds = 600
+    [int]$StreamSoakSeconds = 600,
+    [int]$AudioSoakSeconds = 60
 )
 
 $ErrorActionPreference = 'Stop'
@@ -576,6 +577,110 @@ function Invoke-GateM5 {
     }
 }
 
+function Invoke-GateM6 {
+    param([int]$AudioSoakSeconds)
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+
+    $bin = Get-BinDir
+    $tmp = Join-Path $RepoRoot 'runs\gate-m6'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $wavcheck = Join-Path $bin 'wavcheck.exe'
+    $hashdiff = Join-Path $bin 'hashdiff.exe'
+
+    Assert-Gate 'ctest green (audio determinism/WAV/room-probe/footsteps + regression)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+
+    # Offline WAV: deterministic across two fresh processes, and its spectrum has
+    # the 60 Hz fluorescent fundamental + harmonics and is not silent (wavcheck).
+    $stepsA = Join-Path $tmp 'a.steps'
+    Assert-Gate 'offline WAV deterministic x2, 60 Hz fundamental + harmonics, not silent' {
+        if (-not (Test-Path $wavcheck)) { throw "wavcheck.exe not built" }
+        $w1 = Join-Path $tmp 'a.wav'
+        $w2 = Join-Path $tmp 'b.wav'
+        $r1 = Invoke-AppCapture @('--render-wav', '--seed', '7', '--ticks', '3600', '--out', $w1, '--audiolog', $stepsA)
+        if ($r1.Exit -ne 0) { throw "render-wav run1 exited $($r1.Exit)" }
+        $r2 = Invoke-AppCapture @('--render-wav', '--seed', '7', '--ticks', '3600', '--out', $w2)
+        if ($r2.Exit -ne 0) { throw "render-wav run2 exited $($r2.Exit)" }
+        if ((Get-FileHash $w1).Hash -ne (Get-FileHash $w2).Hash) { throw "WAV not bit-identical across runs" }
+        & $wavcheck assert $w1 --min-rms 0.02 --fund-ratio 8 --harm-ratio 3 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "wavcheck assert failed (exit $LASTEXITCODE)" }
+        $rms = Get-MetricFloat $r1.Out 'rms'
+        Write-Note "WAV bit-identical x2; wavcheck OK (60 Hz + harmonics); rms=$rms"
+    }
+
+    # The audio footstep log must align 1:1 with the replay's step ticks.
+    Assert-Gate 'footstep events align 1:1 with replay step ticks' {
+        $ref = Join-Path $tmp 'ref.steps'
+        $rr = Invoke-AppCapture @('--footsteps', '--seed', '7', '--ticks', '3600', '--out', $ref)
+        if ($rr.Exit -ne 0) { throw "footsteps reference exited $($rr.Exit)" }
+        if (-not (Test-Path $stepsA)) { throw "audio footstep log missing (render step did not run)" }
+        if ((Get-Content $stepsA -Raw) -ne (Get-Content $ref -Raw)) {
+            throw "audio footstep log differs from the replay step log"
+        }
+        $n = (Get-Content $ref | Measure-Object -Line).Lines
+        if ($n -lt 10) { throw "implausibly few footsteps ($n)" }
+        Write-Note "audio + replay footstep logs identical ($n steps, 1:1)"
+    }
+
+    # Real-time mixer: zero underruns over the soak, and the audio thread does not
+    # inflate the sim tick time (it runs on its own thread, fed lock-free).
+    Assert-Gate "audio soak (${AudioSoakSeconds}s): zero underruns, audio thread does not block the sim" {
+        $on = Invoke-AppCapture @('--audiosoak', '--seed', '9', '--seconds', "$AudioSoakSeconds", '--audio')
+        if ($on.Exit -ne 0) { throw "audio soak exited $($on.Exit)" }
+        $u = Get-Metric $on.Out 'underruns'
+        if ($u -ne 0) { throw "$u buffer underruns over ${AudioSoakSeconds}s" }
+        $blocks = Get-Metric $on.Out 'audio_blocks'
+        $meanOn = Get-MetricFloat $on.Out 'mean_tick_ns'
+        $off = Invoke-AppCapture @('--audiosoak', '--seed', '9', '--seconds', "$AudioSoakSeconds")
+        if ($off.Exit -ne 0) { throw "baseline (audio-off) soak exited $($off.Exit)" }
+        $meanOff = Get-MetricFloat $off.Out 'mean_tick_ns'
+        Write-Note ("soak: 0 underruns, {0} blocks; mean tick off={1:N1}ns on={2:N1}ns" -f $blocks, $meanOff, $meanOn)
+        if ($meanOn -gt $meanOff * 1.5 + 50.0) {
+            throw "audio inflates sim tick time (off=$([math]::Round($meanOff,1))ns on=$([math]::Round($meanOn,1))ns)"
+        }
+    }
+
+    # M6 touches no render code; confirm the M5/M4 render goldens didn't move.
+    Assert-Gate 'regression: M5 lit shot + M4 top-down goldens still bit-match' {
+        $shot = Join-Path $tmp 'm5_shot.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "M5 shot had debug-layer messages" }
+        $d = (& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M5 lit shot golden regressed (diff=$d)" }
+        $td = Join-Path $tmp 'm4_td.png'
+        $r = Invoke-AppCapture @('--topdown', '--seed', '1', '--width', '512', '--height', '512', '--out', $td)
+        if ($r.Exit -ne 0) { throw "M4 top-down exited $($r.Exit)" }
+        $d = (& $hashdiff diff $td (Join-Path $RepoRoot 'goldens\m4\topdown_seed1.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M4 top-down golden regressed (diff=$d)" }
+    }
+
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -588,6 +693,7 @@ try {
         'M3'    { Invoke-GateM3 -StreamSoakSeconds $StreamSoakSeconds }
         'M4'    { Invoke-GateM4 }
         'M5'    { Invoke-GateM5 }
+        'M6'    { Invoke-GateM6 -AudioSoakSeconds $AudioSoakSeconds }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

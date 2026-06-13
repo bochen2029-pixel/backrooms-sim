@@ -11,7 +11,8 @@
 | `wavcheck` | FFT/RMS analysis of offline WAV renders | M6 |
 
 **Depends on:** varies. `hashdiff`/`goldgen` use `core` + isolated `br_stb`
-(stb_image/stb_image_write) for image I/O.
+(stb_image/stb_image_write) for image I/O. `wavcheck` links `audio` for the
+header-only `audio/wav.h` reader; its FFT is self-contained.
 
-**Status:** M0 — `hashdiff` + `goldgen` implemented; others stubbed at their
-milestones.
+**Status:** M6 — `hashdiff`, `goldgen`, `wavcheck` implemented; `contactsheet`
+arrives at M10.
