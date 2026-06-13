@@ -4,6 +4,49 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 8 — M7: Biomes, Set Pieces, Verticality  🟡 IN PROGRESS (phase 1 done)
+
+**Last green tag: `m6-green`. Phase 1 committed (additive, all gates still pass).**
+
+**Done (phase 1).** The **biome field** — `gen/biome.{h,cpp}`: a pure,
+low-frequency `biome_at(seed, level, cx, cz)` over a coarse **K=3** chunk lattice
+with a weighted CDF → contiguous regions with designed proportions. 5 biomes:
+ClassicYellow 44 %, CubicleFarm 22 %, PipeCorridors 16 %, ParkingGarage 12 %,
+Poolrooms 6 %. `BiomeParams` (carve ratio, pillar density, floor tint, wall
+darken) ready for the generation wiring. `test_biome`: determinism, low-frequency
+contiguity, and **distribution over 102,400 chunks within ±2 %** (M7 exit gate
+#2 — green). GenerateChunk NOT yet changed (no golden ripple).
+
+**Remaining for M7 (start here).**
+- **Phase 2 — biome-parameterized generation.** Thread `BiomeParams` through
+  `generate_layout` (carve ratio) + `chunk.cpp` (pillars in open cells, biome
+  tint via `floor_tint`/`wall_darken`, materials). **Keep the M4 edge-doorway
+  protocol unchanged** so cross-biome seams still connect (INV-3). Then: per-biome
+  M4 validator suite (connectivity + geometry, 10k each — exit gate #1) by
+  forcing each biome; **re-capture the M4 top-down (seeds 1,7) + M5 lit-shot
+  (seeds 1,7,42 × 5 poses) goldens** via `goldgen` (legitimate generation change
+  → ADR in the same commit, Iron Rule 6); per-biome fixed-pose goldens (exit gate
+  #4).
+- **Phase 3 — verticality.** Level −1 generation (`ChunkKey.level=-1`, Y-offset,
+  altered params) + a **stairwell set piece** (descending step boxes) placed
+  deterministically/rare, connecting level 0↔−1. A **scripted-descent replay**
+  (app mode): wanderer walks down, Y drops a level, lands in a level −1 chunk;
+  assert cross-level connectivity + determinism hash reproduces (exit gate #3).
+  Note: capsule collision already steps DOWN via gravity; no step-up needed.
+- **Phase 4 — gate.** `Invoke-GateM7`: 4 exit gates + regression M0–M6 + ADRs +
+  SESSION_LOG + tag `m7-green`.
+
+**Gotchas.**
+- Biomes must NOT touch the edge-doorway protocol (`door_index`) — only internal
+  layout/decoration — or cross-biome seams seal (INV-3 fail).
+- Phase 2 changes `GenerateChunk` → M4/M5 goldens change. Re-capture via `goldgen`
+  + ADR in the SAME commit; never hand-edit goldens.
+- `biome_params` is currently unused (built clean under /WX as external linkage);
+  it gets consumed in phase 2.
+- Distribution gate uses seed 1234 (K=3 gives ~4σ margin for the 44 % biome).
+
+---
+
 ## Session 7 — M6: Procedural Audio  ✅ gate green (`m6-green`)
 
 **Status: `gate.ps1 -Milestone M6` exits 0.** The backrooms now *sounds* like the
