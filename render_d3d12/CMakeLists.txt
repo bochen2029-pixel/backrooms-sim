@@ -4,7 +4,8 @@
 # the renderer source enter here, not at M0.
 add_library(render_d3d12 STATIC
   src/render_d3d12.cpp
-  src/renderer.cpp)
+  src/renderer.cpp
+  src/texgen.cpp)
 target_include_directories(render_d3d12 PUBLIC include)
 target_link_libraries(render_d3d12
   PUBLIC core stream contracts

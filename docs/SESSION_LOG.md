@@ -4,6 +4,45 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 6 — M5: Procedural Materials + Raster Lighting  🟡 IN PROGRESS (phase 1)
+
+**Done (committed, additive, all gates still green).**
+- **Procedural textures** — `render_d3d12/texgen.h/.cpp` (D3D12-free, unit-tested):
+  `generate_texture` for Wallpaper / Carpet / CeilingTile / Fluorescent /
+  Baseboard (256×256 RGBA, deterministic per-pixel hash + structural patterns),
+  `texture_hash`. Determinism test green (per (kind,seed) stable; kinds/seeds
+  differ). This is the **texture-determinism** exit gate, satisfied.
+- Progress report written to `PROGRESS.md`.
+
+**Remaining for M5 (the larger half — start here next session).**
+1. GPU upload: 5 textures as a **Texture2DArray** + shader-visible SRV heap +
+   **static sampler** + root signature with a descriptor table.
+2. Extend `ChunkVertex` with **uv + material**; `GenerateChunk` assigns
+   materials (floor=Carpet, walls=Wallpaper) and ADD a **ceiling** with
+   CeilingTile + Fluorescent panels. (Vertex stride change → update the chunk +
+   topdown pipeline input layouts.)
+3. **Textured + lit chunk shader**: sample the array by (material, uv); forward
+   **fluorescent grid lighting** (ceiling-height lights, falloff + flat ambient +
+   emissive panels). Lights gathered near-camera into a CBV.
+4. **Deterministic flicker** in `core` — `light_flicker(seed, light_id, tick)`
+   (replayable); renderer multiplies light intensity by it.
+5. `render_topdown` must **discard ceiling/fluorescent** fragments so the maze
+   stays visible → **re-capture the M4 top-down golden** via `goldgen` + an ADR
+   (geometry changed). `render_world_view` (M2 room) can stay flat to keep its
+   golden, or also be textured (then re-capture + ADR).
+6. Gate `Invoke-GateM5`: texture hash (done) · **5 poses × 3 seeds goldens**
+   (fixed-pose textured+lit renders, perceptual diff < threshold) · **luminance
+   histogram** band (catch all-black/blown-out) · **≥120 FPS @1440p** + zero
+   debug. Then regression M0–M4, tag `m5-green`.
+
+**Gotchas carried forward.** Chunk geometry vert count will rise again (ceiling)
+— check the renderer chunk VB pool capacity (`kChunkSlotCapacityBytes`, currently
+6144 verts/slot). Keep flicker in `core` so replays reproduce lighting. Texture
+upload needs a transition to `PIXEL_SHADER_RESOURCE` and a one-time upload-heap
+copy (untimed warmup, like the M3 pool).
+
+---
+
 ## Session 5 — M4: Level-0 Generator — Rooms, Doorways, Connectivity  ✅ gate green (`m4-green`)
 
 **Done.**
