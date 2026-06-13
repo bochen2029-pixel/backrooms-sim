@@ -4,6 +4,64 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 10 — M9: DXR Path-Traced Mode  🟡 SCOPED + FEASIBILITY CONFIRMED (no code yet)
+
+**Last green tag: `m8-green` (the tip; M9 is the next milestone, a 2–3 session
+build). Start here.** Feasibility was verified this session; the implementation
+is a fresh-context job.
+
+**Feasibility (confirmed).**
+- **GPU:** NVIDIA RTX 4070 Ti SUPER present → DXR 1.1 (Tier ≥ 1.0) capable.
+  (Intel UHD 630 also present; the renderer already picks HIGH_PERFORMANCE.)
+- **DXC (the new toolchain piece):** DXR shaders need SM 6.3+ DXIL, which the
+  FXC/`D3DCompile` path used everywhere else cannot produce. `dxcompiler.dll` +
+  `dxil.dll` (validator/signer — needed so the runtime accepts the DXIL) exist at
+  `C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\` (also 26100).
+  Headers `dxcapi.h` + `d3d12.h` (with the raytracing structs) are on the SDK
+  include path. **NOT in System32/PATH** → the DLLs must be copied next to the
+  exe (CMake post-build) or LoadLibrary'd from the SDK path.
+- New **system dependency** (dxc) → needs an ADR (no vcpkg entry; like d3dcompiler).
+
+**Architecture decision.** Build `render_dxr` **self-contained** (its own
+`ID3D12Device5`, queue, AS/PSO/SBT) rather than literally sharing
+`render_d3d12`'s device object — cleaner for headless determinism + isolation;
+both renderers consume the same `contracts::ResidentChunk` geometry so the
+cross-renderer depth compare is apples-to-apples. (Reconcile render_dxr MODULE.md:
+"device/share" → "same adapter-selection + same geometry contract".)
+
+**Plan (5 phases; tasks #40–#44).**
+1. **Foundation:** Device5 + `CheckFeatureSupport(OPTIONS5)` RaytracingTier
+   (graceful fail if absent); runtime DXC wrapper (`DxcCreateInstance` from
+   dxcompiler.dll via dxcapi.h; copy both DLLs to `build/bin`); a trivial DXR
+   state object + raygen writing a UAV + SBT + `DispatchRays` + readback —
+   debug-layer/DRED clean. Proves the whole toolchain. ADR for the dxc dep.
+2. **AS + depth compare (gate #1):** BLAS per resident chunk (triangles from
+   `ChunkVertex`), TLAS; raygen primary rays → hit distance → depth; `app --dxr`;
+   compare DXR primary-hit depth vs raster depth within epsilon.
+3. **PT lighting + converged golden (gate #2):** closest-hit shading, emissive
+   fluorescents as lights, shadow + diffuse-GI rays, **seeded per-(pixel,sample)
+   RNG** (deterministic); accumulation buffer; 1,000+ spp at 3 fixed poses; RMSE
+   vs stored reference < threshold (run via `scripts/soak.ps1`).
+4. **Interactive PT + streaming (gates #3, #4):** reduced bounces while moving,
+   **accumulation resets on camera movement** (no-ghost: histogram delta after a
+   teleport); ≥ 60 FPS walking; TLAS refit on stream events; walk-bot 1 km in PT
+   mode, **zero debug-layer/DRED**.
+5. **Gate:** `Invoke-GateM9` (4 exit gates + M0–M8 regression + inventory) + ADRs
+   + tag `m9-green`.
+
+**Gotchas (anticipated).**
+- DXR DXIL must be **signed** (dxil.dll next to dxcompiler.dll) or the device
+  rejects the state object. Copy BOTH DLLs to bin.
+- Path tracing is stochastic → goldens need a **fixed seed + fixed spp + a
+  deterministic accumulation order**; compare by **RMSE** (not bit-exact) to
+  absorb GPU float reassociation across vendors.
+- Raster stays the **default + fallback** (INV-6) — DXR is enhancement-only; never
+  let `core`/`gen`/`stream` depend on it.
+- Keep the existing `D3DCompile` (SM 5.0) raster path untouched; dxc is a
+  separate compile path used only by `render_dxr`.
+
+---
+
 ## Session 9 — M8: VHS Post-Processing + HUD  ✅ gate green (`m8-green`)
 
 **Status: `gate.ps1 -Milestone M8` exits 0.** The picture now has the analog-horror
