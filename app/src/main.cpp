@@ -30,6 +30,7 @@
 #include "contracts/chunk_gen_v1.h"
 #include "contracts/audio_events_v1.h"
 #include "gen/biome.h"
+#include "gen/layout.h"
 #include "stream/stream_manager.h"
 #include "telemetry/csv.h"
 #include "render_d3d12/renderer.h"
@@ -49,7 +50,7 @@ struct Options {
     bool headless = false, windowed = false, scene = false, sim = false, stream = false;
     bool walkbot = false, topdown = false, version = false, shot = false;
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
-    bool biomeat = false;
+    bool biomeat = false, descend = false;
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
     uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0;
     uint64_t seed = 1u;
@@ -92,6 +93,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--audiosoak") == 0) o.audiosoak = true;
         else if (std::strcmp(a, "--audio") == 0) o.audio = true;
         else if (std::strcmp(a, "--biomeat") == 0) o.biomeat = true;
+        else if (std::strcmp(a, "--descend") == 0) o.descend = true;
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
         else if (std::strcmp(a, "--version") == 0) o.version = true;
         else if (std::strcmp(a, "--frames") == 0) { if (!u32(o.frames)) return false; }
@@ -808,6 +810,52 @@ int run_audiosoak(const Options& o) {
     return (underruns == 0) ? 0 : 5;
 }
 
+// ----- M7 verticality: scripted descent of a stairwell to level -1 ------------
+// Builds a level-0 approach floor, a stairwell set piece, and a level -1 landing,
+// then walks the wanderer forward. Gravity + capsule collision carry it down the
+// steps. Reports the drop, the level reached, sublevel connectivity/geometry, and
+// the determinism hash (the gate runs it twice and compares).
+int run_descend(const Options& o) {
+    using namespace br::core;
+    WorldState s(o.seed);
+    s.wanderer.pos = Vec3{-4.0f, kWandererHalfHeight + 0.02f, 4.0f};
+
+    const float botY = contracts::level_base_y(-1);
+    std::vector<Aabb> col;
+    col.push_back(Aabb{{-10.0f, -1.0f, 0.0f}, {0.0f, 0.0f, 12.0f}});            // level-0 approach floor
+    std::vector<contracts::BoxInstance> steps;
+    br::gen::build_stairwell(0.0f, 0.0f, 0, steps);                              // stairwell set piece
+    for (const auto& b : steps)
+        col.push_back(Aabb{{b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]}});
+    col.push_back(Aabb{{12.0f, botY - 1.0f, 0.0f}, {26.0f, botY, 12.0f}});      // level -1 landing floor
+    col.push_back(Aabb{{26.0f, botY - 1.0f, 0.0f}, {26.5f, 3.0f, 12.0f}});      // end wall
+    col.push_back(Aabb{{-10.0f, botY - 1.0f, -0.5f}, {26.5f, 3.0f, 0.0f}});     // z- corridor wall
+    col.push_back(Aabb{{-10.0f, botY - 1.0f, 8.0f}, {26.5f, 3.0f, 8.5f}});      // z+ corridor wall
+
+    const float startY = s.wanderer.pos.y;
+    contracts::InputCommand in{};
+    in.move_x = 1.0f;  // walk +X toward and down the stairwell
+    const uint32_t ticks = (o.ticks > 0) ? o.ticks : 1500u;
+    for (uint32_t t = 0; t < ticks; ++t) tick(s, in, col);
+
+    const float endY = s.wanderer.pos.y;
+    const int32_t level_reached = (endY < botY + 2.0f) ? -1 : 0;
+    const contracts::ChunkKey lkey = contracts::chunk_key_at(-1, s.wanderer.pos.x, s.wanderer.pos.z);
+    const contracts::ChunkData cd = contracts::GenerateChunk(o.seed, lkey);
+    const bool conn = br::gen::validate_connectivity(br::gen::generate_layout(o.seed, lkey));
+    const bool geom = contracts::ValidateChunkGeometry(cd);
+
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("start_y: %.3f\n", static_cast<double>(startY));
+    std::printf("end_y: %.3f\n", static_cast<double>(endY));
+    std::printf("drop_m: %.3f\n", static_cast<double>(startY - endY));
+    std::printf("level_reached: %d\n", level_reached);
+    std::printf("sublevel_connected: %d\n", conn ? 1 : 0);
+    std::printf("sublevel_geom_valid: %d\n", geom ? 1 : 0);
+    std::printf("final_hash: %016llx\n", static_cast<unsigned long long>(world_state_hash(s)));
+    return (level_reached == -1 && conn && geom) ? 0 : 6;
+}
+
 // ----- M7 biome inspection: the biome at the --shot spawn chunk (0,0) ---------
 int run_biomeat(const Options& o) {
     const br::gen::Biome b = br::gen::biome_at(o.seed, 0, 0, 0);
@@ -836,6 +884,7 @@ int main(int argc, char** argv) {
     if (o.footsteps)  return run_footsteps(o);
     if (o.audiosoak)  return run_audiosoak(o);
     if (o.biomeat)    return run_biomeat(o);
+    if (o.descend)    return run_descend(o);
     if (o.sim)     return run_sim(o);
     if (o.walkbot) return run_walkbot(o);
     if (o.topdown) return run_topdown(o);

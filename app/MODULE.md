@@ -32,6 +32,10 @@ errors to process exit codes for the gate scripts (ARCHITECTURE.md §7).
   `underruns` (proves the audio thread never blocks the sim).
 - `--biomeat [--seed S]` (M7) — print the biome at the spawn chunk (0,0); used to
   target a known biome for per-biome goldens / gate captures.
+- `--descend [--seed S] [--ticks N]` (M7) — scripted stairwell descent to level
+  −1: builds the approach floor + stairwell set piece + landing, walks the
+  wanderer down (gravity/collision), reports drop / level reached / sublevel
+  connectivity / determinism hash.
 
 **Planned.** `config.toml` + flag/config mirroring (M12), noclip intro + photo
 mode (M12), `--no-director` (M11).

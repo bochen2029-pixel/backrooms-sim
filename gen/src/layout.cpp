@@ -96,6 +96,23 @@ ChunkLayout generate_layout_carve(uint64_t world_seed, contracts::ChunkKey key,
     return L;
 }
 
+void build_stairwell(float x0, float z0, int32_t top_level,
+                     std::vector<contracts::BoxInstance>& out) {
+    const float topY = contracts::level_base_y(top_level);
+    const float botY = contracts::level_base_y(top_level - 1);
+    const int steps = 8;
+    const float run = 1.5f;  // horizontal depth per step
+    const float drop = (topY - botY) / static_cast<float>(steps);  // 0.5 m per step
+    for (int k = 0; k < steps; ++k) {
+        const float sx0 = x0 + static_cast<float>(k) * run;
+        const float top = topY - drop * static_cast<float>(k + 1);  // this step's top surface
+        contracts::BoxInstance b;
+        b.mn[0] = sx0;        b.mn[1] = botY - 1.0f; b.mn[2] = z0;
+        b.mx[0] = sx0 + run;  b.mx[1] = top;         b.mx[2] = z0 + kStairWidth;
+        out.push_back(b);
+    }
+}
+
 bool validate_connectivity(const ChunkLayout& L) {
     bool visited[G][G] = {};
     int stackX[G * G + 1];

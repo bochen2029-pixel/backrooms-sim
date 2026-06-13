@@ -37,8 +37,14 @@ garage / pillar halls). `ValidateChunkGeometry` accepts them as a category
 distinct from walls (ADR-032); ~1.75 m clearance keeps connectivity + navigation
 intact.
 
-**Planned.** Flooded / poolroom set-piece geometry; verticality (level −1 +
-stairwells) — M7 phase 3.
+**Verticality (M7 phase 3).** Levels stack in world Y via
+`contracts::level_base_y` (level 0 → Y=0 unchanged; level −1 → Y=−4, dimmer).
+`generate_layout` / `GenerateChunk` work at any level; `build_stairwell` emits a
+descending step set piece connecting two levels (collision-only). The wanderer
+descends it under gravity (`app --descend`), deterministically.
+
+**Planned.** Flooded / poolroom set-piece geometry; in-world stairwell placement
++ rendered stairwells (a later milestone).
 
 **Status:** M7 (in progress) — biome field wired into generation (per-biome carve
 ratio + tint); distribution within ±2 % over 102,400 chunks; per-biome 10k-chunk

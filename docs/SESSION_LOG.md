@@ -4,9 +4,9 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
-## Session 8 — M7: Biomes, Set Pieces, Verticality  🟡 IN PROGRESS (phases 1–2b done)
+## Session 8 — M7: Biomes, Set Pieces, Verticality  🟡 IN PROGRESS (phases 1–3 done, only the gate remains)
 
-**Last green tag: `m6-green`. Phases 1 + 2a + 2b committed (all gates still pass).**
+**Last green tag: `m6-green`. Phases 1 + 2a + 2b + 3 committed (all gates still pass).**
 
 **Done (phase 1).** The **biome field** — `gen/biome.{h,cpp}`: a pure,
 low-frequency `biome_at(seed, level, cx, cz)` over a coarse **K=3** chunk lattice
@@ -36,16 +36,23 @@ stuck (pillars don't wedge). `--biomeat` app mode → per-biome lit goldens
 pool=25; parking garage shows columns). M5 seed-42 shots re-captured (pillar
 biome).
 
-**Remaining for M7 (start here).**
-- **Phase 3 — verticality.** Level −1 generation (`ChunkKey.level=-1`, Y-offset,
-  altered params) + a **stairwell set piece** (descending step boxes) placed
-  deterministically/rare, connecting level 0↔−1. A **scripted-descent replay**
-  (app mode): wanderer walks down, Y drops a level, lands in a level −1 chunk;
-  assert cross-level connectivity + determinism hash reproduces (exit gate #3).
-  Capsule collision already steps DOWN via gravity; no step-up needed.
-- **Phase 4 — gate.** `Invoke-GateM7`: 4 exit gates (per-biome validators 10k /
-  distribution 100k ±2 % / stairwell descent / per-biome goldens) + regression
-  M0–M6 + ADRs + SESSION_LOG + tag `m7-green`.
+**Done (phase 3 — verticality).** `contracts::level_base_y(level)=level*4 m`
+(level 0 → Y=0 unchanged; level −1 → Y=−4, dimmer). `GenerateChunk` offsets all
+geometry by it; `ValidateChunkGeometry` floor check is level-relative.
+`gen::build_stairwell` emits descending step boxes (set piece). `app --descend`
+walks the wanderer down via gravity/collision — measured **4.019 m drop (one
+level)** to level −1, hash-reproducible, landing chunk connected + valid (ADR-033).
+`test_biome`: 4,000 level −1 chunks connected + geometry-valid (exit gate #3).
+
+**Remaining for M7 (start here — last step).**
+- **Phase 4 — gate.** `scripts/gate.ps1` `Invoke-GateM7`: clean build + no-warn +
+  ctest (all M7 biome/geometry/connectivity/level −1 + regression) + INV-5 +
+  **(#2)** distribution 100k ±2 % (ctest) + **(#1)** per-biome 10k connectivity +
+  geometry (ctest) + **(#3)** `--descend` deterministic ×2 + level −1 reached +
+  sublevel connected + **(#4)** per-biome goldens `goldens/m7/biome_*.png`
+  bit-match (+ M4/M5 render-golden regression) + inventory. Then add the dispatch
+  case, run green, ADRs already written (031–033), update PROGRESS + memory, tag
+  `m7-green`, push.
 - **Phase 3 — verticality.** Level −1 generation (`ChunkKey.level=-1`, Y-offset,
   altered params) + a **stairwell set piece** (descending step boxes) placed
   deterministically/rare, connecting level 0↔−1. A **scripted-descent replay**

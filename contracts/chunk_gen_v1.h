@@ -60,6 +60,12 @@ struct ChunkVertex {
 constexpr float kCellSize = kChunkSize / 8.0f;  // 4 m (matches gen layout)
 constexpr float kCeilingHeight = 3.0f;
 
+// Levels stack vertically (M7 verticality): level L's floor sits at this world Y,
+// its ceiling at +kCeilingHeight, with a 1 m slab below before the next level.
+// Level 0 maps to Y=0, so level-0 geometry is unchanged.
+constexpr float kLevelHeight = 4.0f;
+inline float level_base_y(int32_t level) { return static_cast<float>(level) * kLevelHeight; }
+
 // Fluorescent ceiling cells form a regular grid (the backrooms light grid):
 // every other global cell in both axes. gen tiles + renderer lights agree here.
 inline bool is_fluorescent_cell(int64_t gi, int64_t gj) {

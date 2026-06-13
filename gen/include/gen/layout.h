@@ -9,6 +9,7 @@
 // communication (INV-2/INV-3). `validate_connectivity` flood-fills the cell grid.
 //
 #include <cstdint>
+#include <vector>
 
 #include "contracts/chunk_gen_v1.h"
 
@@ -43,5 +44,13 @@ bool validate_connectivity(const ChunkLayout& layout);
 
 // Master per-chunk RNG seed (shared by layout + chunk geometry tint).
 uint64_t chunk_seed(uint64_t world_seed, contracts::ChunkKey key);
+
+// A descending stairwell set piece (M7 verticality): solid step boxes that walk
+// the wanderer down from level `top_level` to `top_level - 1`, starting at world
+// (x0, z0) and running +X over `kStairWidth` in Z. Collision-only (the sim
+// descends it under gravity; rendering integrates later). Appends to `out`.
+constexpr float kStairWidth = 8.0f;
+void build_stairwell(float x0, float z0, int32_t top_level,
+                     std::vector<contracts::BoxInstance>& out);
 
 }  // namespace br::gen

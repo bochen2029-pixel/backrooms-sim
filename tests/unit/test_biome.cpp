@@ -98,3 +98,19 @@ TEST_CASE("every biome's generated geometry is valid, incl pillars (M7 gate)", "
         REQUIRE(done[bi] == kPer);
     }
 }
+
+TEST_CASE("level -1 chunks are connected and geometry-valid (cross-level, M7 gate)", "[m7][biome]") {
+    // Verticality: sublevel generation must hold the same invariants as level 0
+    // (INV-3 connectivity; valid geometry at the level's Y-offset floor).
+    const uint64_t seed = 555u;
+    // Keep coords in the precision-safe band (geometry is built in world coords;
+    // far-chunk float noise is a documented deferral, ADR-022) — same as M4.
+    for (int64_t k = 0; k < 4000; ++k) {
+        const br::contracts::ChunkKey key{-1, (k % 1000) - 500, (k / 1000) - 2};
+        ChunkLayout L = generate_layout(seed, key);
+        INFO("level -1 chunk " << k << " (" << key.cx << "," << key.cz << ")");
+        REQUIRE(validate_connectivity(L));
+        const br::contracts::ChunkData cd = br::contracts::GenerateChunk(seed, key);
+        REQUIRE(br::contracts::ValidateChunkGeometry(cd));
+    }
+}

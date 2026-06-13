@@ -50,11 +50,11 @@ void push_box(std::vector<ChunkVertex>& v, float x0, float y0, float z0,
     push_quad(v, c001, c101, c111, c011, nzp, col, mat);
 }
 
-void add_wall(ChunkData& c, float x0, float z0, float x1, float z1, const float col[3]) {
-    push_box(c.vertices, x0, 0.0f, z0, x1, kWallHeight, z1, col, kMatWallpaper);
+void add_wall(ChunkData& c, float x0, float z0, float x1, float z1, const float col[3], float baseY) {
+    push_box(c.vertices, x0, baseY, z0, x1, baseY + kWallHeight, z1, col, kMatWallpaper);
     BoxInstance bi;
-    bi.mn[0] = x0; bi.mn[1] = 0.0f; bi.mn[2] = z0;
-    bi.mx[0] = x1; bi.mx[1] = kWallHeight; bi.mx[2] = z1;
+    bi.mn[0] = x0; bi.mn[1] = baseY; bi.mn[2] = z0;
+    bi.mx[0] = x1; bi.mx[1] = baseY + kWallHeight; bi.mx[2] = z1;
     c.collision.push_back(bi);
 }
 }  // namespace
@@ -71,12 +71,17 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
     const int G = gen::kCellsPerChunk;
     const float H = kWallHeight;
 
+    // Vertical level offset (M7): level 0 -> baseY 0 (unchanged); sublevels (-1)
+    // sit below and read dimmer/grimier.
+    const float baseY = level_base_y(key.level);
+    const float sub = (key.level < 0) ? 0.6f : 1.0f;
+
     br::core::Pcg64 rng(gen::chunk_seed(world_seed, key));
     const gen::BiomeParams bp = gen::biome_params(gen::biome_at(world_seed, key.level, key.cx, key.cz));
     const float floor_col[3] = {
-        (0.58f + 0.22f * static_cast<float>(rng.next_double())) * bp.floor_tint[0],
-        (0.52f + 0.20f * static_cast<float>(rng.next_double())) * bp.floor_tint[1],
-        (0.26f + 0.14f * static_cast<float>(rng.next_double())) * bp.floor_tint[2],
+        (0.58f + 0.22f * static_cast<float>(rng.next_double())) * bp.floor_tint[0] * sub,
+        (0.52f + 0.20f * static_cast<float>(rng.next_double())) * bp.floor_tint[1] * sub,
+        (0.26f + 0.14f * static_cast<float>(rng.next_double())) * bp.floor_tint[2] * sub,
     };
     const float wall_col[3] = { floor_col[0] * bp.wall_darken, floor_col[1] * bp.wall_darken,
                                 floor_col[2] * bp.wall_darken };
@@ -92,13 +97,14 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
             const float x1 = ox + static_cast<float>(i + 1) * cs;
             const float z0 = oz + static_cast<float>(j) * cs;
             const float z1 = oz + static_cast<float>(j + 1) * cs;
-            const float f0[3]={x0,0.0f,z0}, f1[3]={x1,0.0f,z0}, f2[3]={x1,0.0f,z1}, f3[3]={x0,0.0f,z1};
+            const float f0[3]={x0,baseY,z0}, f1[3]={x1,baseY,z0}, f2[3]={x1,baseY,z1}, f3[3]={x0,baseY,z1};
             push_quad(c.vertices, f0, f1, f2, f3, up, floor_col, kMatCarpet);
 
             const int64_t gi = key.cx * G + i;
             const int64_t gj = key.cz * G + j;
             const bool lamp = is_fluorescent_cell(gi, gj);
-            const float ck0[3]={x0,H,z0}, ck1[3]={x1,H,z0}, ck2[3]={x1,H,z1}, ck3[3]={x0,H,z1};
+            const float cy = baseY + H;
+            const float ck0[3]={x0,cy,z0}, ck1[3]={x1,cy,z0}, ck2[3]={x1,cy,z1}, ck3[3]={x0,cy,z1};
             push_quad(c.vertices, ck0, ck3, ck2, ck1, down,
                       lamp ? lamp_col : ceil_col, lamp ? kMatFluorescent : kMatCeiling);
         }
@@ -111,7 +117,7 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
             const float xc = ox + static_cast<float>(xi) * cs;
             const float z0 = oz + static_cast<float>(j) * cs;
             const float z1 = oz + static_cast<float>(j + 1) * cs;
-            add_wall(c, xc - t, z0, xc + t, z1, wall_col);
+            add_wall(c, xc - t, z0, xc + t, z1, wall_col, baseY);
         }
     }
     // Horizontal walls (z-lines).
@@ -121,7 +127,7 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
             const float zc = oz + static_cast<float>(zj) * cs;
             const float x0 = ox + static_cast<float>(i) * cs;
             const float x1 = ox + static_cast<float>(i + 1) * cs;
-            add_wall(c, x0, zc - t, x1, zc + t, wall_col);
+            add_wall(c, x0, zc - t, x1, zc + t, wall_col, baseY);
         }
     }
 
@@ -138,11 +144,11 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
                 if (rng.next_double() >= static_cast<double>(bp.pillar_density)) continue;
                 const float pcx = ox + (static_cast<float>(i) + 0.5f) * cs;
                 const float pcz = oz + (static_cast<float>(j) + 0.5f) * cs;
-                push_box(c.vertices, pcx - ps, 0.0f, pcz - ps, pcx + ps, kWallHeight, pcz + ps,
+                push_box(c.vertices, pcx - ps, baseY, pcz - ps, pcx + ps, baseY + kWallHeight, pcz + ps,
                          pcol, kMatBaseboard);
                 BoxInstance bi;
-                bi.mn[0] = pcx - ps; bi.mn[1] = 0.0f; bi.mn[2] = pcz - ps;
-                bi.mx[0] = pcx + ps; bi.mx[1] = kWallHeight; bi.mx[2] = pcz + ps;
+                bi.mn[0] = pcx - ps; bi.mn[1] = baseY; bi.mn[2] = pcz - ps;
+                bi.mx[0] = pcx + ps; bi.mx[1] = baseY + kWallHeight; bi.mx[2] = pcz + ps;
                 c.collision.push_back(bi);
             }
         }
@@ -176,11 +182,12 @@ bool ValidateChunkGeometry(const ChunkData& c) {
     const float eps = 0.01f;
     const float thin = gen::kCellSize * 0.5f;  // 2.0 m separator
     const float kPillarMax = 1.0f;             // a pillar is a small square column
+    const float baseY = level_base_y(c.key.level);  // floor Y for this chunk's level
     for (const BoxInstance& b : c.collision) {
         const float ex = b.mx[0] - b.mn[0];
         const float ez = b.mx[2] - b.mn[2];
         if (ex <= eps || b.mx[1] - b.mn[1] <= eps || ez <= eps) return false;  // degenerate
-        if (b.mn[1] < -eps || b.mn[1] > eps) return false;                     // floating
+        if (b.mn[1] < baseY - eps || b.mn[1] > baseY + eps) return false;      // floating
         const bool thinX = ex <= thin;
         const bool thinZ = ez <= thin;
         // A box is either a WALL (thin in exactly one axis) or a free-standing
