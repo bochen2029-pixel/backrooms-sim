@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -109,6 +110,294 @@ DxrCaps probe_caps() {
     }
 
     return caps;
+}
+
+// ---------------------------------------------------------------------------
+// DxrRenderer (M9 phase 1b): full DispatchRays pipeline proof.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const char* kRaygenShader = R"(
+RWTexture2D<float4> g_out : register(u0);
+[shader("raygeneration")]
+void RayGen() {
+    uint2 px = DispatchRaysIndex().xy;
+    uint2 dim = DispatchRaysDimensions().xy;
+    float2 uv = (float2(px) + 0.5) / float2(dim);
+    g_out[px] = float4(uv.x, uv.y, 0.5, 1.0);
+}
+)";
+
+constexpr DXGI_FORMAT kDxrFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+D3D12_HEAP_PROPERTIES heap_props(D3D12_HEAP_TYPE t) {
+    D3D12_HEAP_PROPERTIES p{};
+    p.Type = t;
+    return p;
+}
+
+D3D12_RESOURCE_BARRIER transition(ID3D12Resource* r, D3D12_RESOURCE_STATES from,
+                                  D3D12_RESOURCE_STATES to) {
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = r;
+    b.Transition.StateBefore = from;
+    b.Transition.StateAfter = to;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    return b;
+}
+
+}  // namespace
+
+struct DxrRenderer::Impl {
+    ComPtr<ID3D12Device5> device;
+    ComPtr<ID3D12CommandQueue> queue;
+    ComPtr<ID3D12CommandAllocator> alloc;
+    ComPtr<ID3D12GraphicsCommandList4> list;
+    ComPtr<ID3D12Fence> fence;
+    ComPtr<ID3D12InfoQueue> infoQueue;
+    HANDLE fenceEvent = nullptr;
+    UINT64 fenceValue = 0;
+
+    ComPtr<ID3D12Resource> uav;          // raygen output (UNORDERED_ACCESS)
+    ComPtr<ID3D12Resource> readbackBuf;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT readbackRows = 0;
+    UINT64 readbackRowSize = 0, readbackTotal = 0;
+    ComPtr<ID3D12DescriptorHeap> uavHeap;  // shader-visible (1 UAV)
+
+    ComPtr<ID3D12RootSignature> globalRS;
+    ComPtr<ID3D12StateObject> pso;
+    ComPtr<ID3D12Resource> sbt;            // raygen shader table
+
+    uint32_t width = 0, height = 0;
+
+    void wait_idle() {
+        const UINT64 v = ++fenceValue;
+        queue->Signal(fence.Get(), v);
+        if (fence->GetCompletedValue() < v) {
+            fence->SetEventOnCompletion(v, fenceEvent);
+            WaitForSingleObject(fenceEvent, 5000);
+        }
+    }
+};
+
+DxrRenderer::DxrRenderer() : impl_(std::make_unique<Impl>()) {}
+DxrRenderer::~DxrRenderer() {
+    if (impl_ && impl_->fenceEvent) CloseHandle(impl_->fenceEvent);
+}
+
+uint32_t DxrRenderer::width() const { return impl_ ? impl_->width : 0; }
+uint32_t DxrRenderer::height() const { return impl_ ? impl_->height : 0; }
+
+bool DxrRenderer::init(uint32_t w, uint32_t h) {
+    Impl& d = *impl_;
+    d.width = w;
+    d.height = h;
+
+    ComPtr<ID3D12Debug> debug;
+    UINT factoryFlags = 0;
+    if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
+        debug->EnableDebugLayer();
+        factoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
+    }
+    ComPtr<IDXGIFactory6> factory;
+    if (FAILED(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&factory)))) { last_error_ = "factory"; return false; }
+    ComPtr<ID3D12Device> dev0;
+    ComPtr<IDXGIAdapter1> adapter;
+    for (UINT i = 0; factory->EnumAdapterByGpuPreference(
+             i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)) != DXGI_ERROR_NOT_FOUND; ++i) {
+        DXGI_ADAPTER_DESC1 desc{};
+        adapter->GetDesc1(&desc);
+        if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0 &&
+            SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&dev0)))) break;
+        adapter.Reset(); dev0.Reset();
+    }
+    if (!dev0 || FAILED(dev0.As(&d.device))) { last_error_ = "no ID3D12Device5"; return false; }
+
+    D3D12_FEATURE_DATA_D3D12_OPTIONS5 opt5{};
+    if (FAILED(d.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &opt5, sizeof(opt5))) ||
+        opt5.RaytracingTier < D3D12_RAYTRACING_TIER_1_0) {
+        last_error_ = "device lacks DXR (RaytracingTier < 1.0)";
+        return false;
+    }
+    if (SUCCEEDED(d.device.As(&d.infoQueue))) {
+        d.infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, FALSE);
+        d.infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, FALSE);
+        d.infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, FALSE);
+    }
+
+    D3D12_COMMAND_QUEUE_DESC qd{};
+    qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    if (FAILED(d.device->CreateCommandQueue(&qd, IID_PPV_ARGS(&d.queue)))) { last_error_ = "queue"; return false; }
+    if (FAILED(d.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&d.alloc)))) { last_error_ = "alloc"; return false; }
+    ComPtr<ID3D12GraphicsCommandList> list0;
+    if (FAILED(d.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, d.alloc.Get(), nullptr, IID_PPV_ARGS(&list0)))) { last_error_ = "list"; return false; }
+    list0->Close();
+    if (FAILED(list0.As(&d.list))) { last_error_ = "no GraphicsCommandList4"; return false; }
+    if (FAILED(d.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&d.fence)))) { last_error_ = "fence"; return false; }
+    d.fenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+
+    // UAV output texture (R8G8B8A8, UNORDERED_ACCESS).
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = w; td.Height = h; td.DepthOrArraySize = 1; td.MipLevels = 1;
+    td.Format = kDxrFormat; td.SampleDesc.Count = 1; td.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    td.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    const D3D12_HEAP_PROPERTIES defHeap = heap_props(D3D12_HEAP_TYPE_DEFAULT);
+    if (FAILED(d.device->CreateCommittedResource(&defHeap, D3D12_HEAP_FLAG_NONE, &td,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&d.uav)))) { last_error_ = "uav tex"; return false; }
+
+    d.device->GetCopyableFootprints(&td, 0, 1, 0, &d.footprint, &d.readbackRows, &d.readbackRowSize, &d.readbackTotal);
+    D3D12_RESOURCE_DESC bd{};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = d.readbackTotal; bd.Height = 1;
+    bd.DepthOrArraySize = 1; bd.MipLevels = 1; bd.Format = DXGI_FORMAT_UNKNOWN; bd.SampleDesc.Count = 1;
+    bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    const D3D12_HEAP_PROPERTIES rbHeap = heap_props(D3D12_HEAP_TYPE_READBACK);
+    if (FAILED(d.device->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &bd,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&d.readbackBuf)))) { last_error_ = "readback"; return false; }
+
+    // Shader-visible UAV heap + view.
+    D3D12_DESCRIPTOR_HEAP_DESC hd{};
+    hd.NumDescriptors = 1; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(d.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&d.uavHeap)))) { last_error_ = "uav heap"; return false; }
+    D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+    ud.Format = kDxrFormat; ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    d.device->CreateUnorderedAccessView(d.uav.Get(), nullptr, &ud, d.uavHeap->GetCPUDescriptorHandleForHeapStart());
+
+    // Global root signature: one UAV descriptor table (u0).
+    D3D12_DESCRIPTOR_RANGE range{};
+    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; range.NumDescriptors = 1; range.BaseShaderRegister = 0;
+    range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    D3D12_ROOT_PARAMETER rp{};
+    rp.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rp.DescriptorTable.NumDescriptorRanges = 1; rp.DescriptorTable.pDescriptorRanges = &range;
+    rp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    D3D12_ROOT_SIGNATURE_DESC rs{};
+    rs.NumParameters = 1; rs.pParameters = &rp; rs.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+    ComPtr<ID3DBlob> sig, sigErr;
+    if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &sigErr))) { last_error_ = "global RS serialize"; return false; }
+    if (FAILED(d.device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&d.globalRS)))) { last_error_ = "global RS"; return false; }
+
+    // Compile the raygen library to DXIL.
+    DxcCompiler dxc;
+    std::vector<uint8_t> dxil;
+    std::string cerr;
+    if (!dxc.available()) { last_error_ = "dxcompiler.dll unavailable"; return false; }
+    if (!dxc.compile_library(kRaygenShader, dxil, cerr)) { last_error_ = "raygen compile: " + cerr; return false; }
+
+    // Raytracing state object.
+    D3D12_EXPORT_DESC ex{};
+    ex.Name = L"RayGen"; ex.Flags = D3D12_EXPORT_FLAG_NONE;
+    D3D12_DXIL_LIBRARY_DESC lib{};
+    lib.DXILLibrary.pShaderBytecode = dxil.data(); lib.DXILLibrary.BytecodeLength = dxil.size();
+    lib.NumExports = 1; lib.pExports = &ex;
+    D3D12_RAYTRACING_SHADER_CONFIG sc{}; sc.MaxPayloadSizeInBytes = 16; sc.MaxAttributeSizeInBytes = 8;
+    D3D12_RAYTRACING_PIPELINE_CONFIG pc{}; pc.MaxTraceRecursionDepth = 1;
+    D3D12_GLOBAL_ROOT_SIGNATURE grs{}; grs.pGlobalRootSignature = d.globalRS.Get();
+    D3D12_STATE_SUBOBJECT subs[4];
+    subs[0].Type = D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY; subs[0].pDesc = &lib;
+    subs[1].Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG; subs[1].pDesc = &sc;
+    subs[2].Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG; subs[2].pDesc = &pc;
+    subs[3].Type = D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE; subs[3].pDesc = &grs;
+    D3D12_STATE_OBJECT_DESC so{};
+    so.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE; so.NumSubobjects = 4; so.pSubobjects = subs;
+    if (FAILED(d.device->CreateStateObject(&so, IID_PPV_ARGS(&d.pso)))) { last_error_ = "CreateStateObject"; return false; }
+
+    // Shader binding table: one raygen record (32-byte id) in a 64-byte buffer.
+    ComPtr<ID3D12StateObjectProperties> props;
+    if (FAILED(d.pso.As(&props))) { last_error_ = "state object props"; return false; }
+    const void* rayId = props->GetShaderIdentifier(L"RayGen");
+    if (!rayId) { last_error_ = "raygen shader id"; return false; }
+    const UINT64 sbtSize = D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT;  // 64
+    D3D12_RESOURCE_DESC sd{};
+    sd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; sd.Width = sbtSize; sd.Height = 1;
+    sd.DepthOrArraySize = 1; sd.MipLevels = 1; sd.Format = DXGI_FORMAT_UNKNOWN; sd.SampleDesc.Count = 1;
+    sd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    const D3D12_HEAP_PROPERTIES upHeap = heap_props(D3D12_HEAP_TYPE_UPLOAD);
+    if (FAILED(d.device->CreateCommittedResource(&upHeap, D3D12_HEAP_FLAG_NONE, &sd,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&d.sbt)))) { last_error_ = "sbt buffer"; return false; }
+    uint8_t* mapped = nullptr;
+    const D3D12_RANGE none{ 0, 0 };
+    if (FAILED(d.sbt->Map(0, &none, reinterpret_cast<void**>(&mapped)))) { last_error_ = "sbt map"; return false; }
+    std::memcpy(mapped, rayId, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+    d.sbt->Unmap(0, nullptr);
+    return true;
+}
+
+bool DxrRenderer::render_gradient() {
+    Impl& d = *impl_;
+    if (!d.device) { last_error_ = "not initialised"; return false; }
+    if (FAILED(d.alloc->Reset())) { last_error_ = "alloc reset"; return false; }
+    if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "list reset"; return false; }
+
+    ID3D12DescriptorHeap* heaps[] = { d.uavHeap.Get() };
+    d.list->SetDescriptorHeaps(1, heaps);
+    d.list->SetComputeRootSignature(d.globalRS.Get());
+    d.list->SetComputeRootDescriptorTable(0, d.uavHeap->GetGPUDescriptorHandleForHeapStart());
+    d.list->SetPipelineState1(d.pso.Get());
+
+    D3D12_DISPATCH_RAYS_DESC dr{};
+    dr.RayGenerationShaderRecord.StartAddress = d.sbt->GetGPUVirtualAddress();
+    dr.RayGenerationShaderRecord.SizeInBytes = D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT;
+    dr.Width = d.width; dr.Height = d.height; dr.Depth = 1;
+    d.list->DispatchRays(&dr);
+
+    const D3D12_RESOURCE_BARRIER toCopy = transition(d.uav.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    d.list->ResourceBarrier(1, &toCopy);
+    D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = d.readbackBuf.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = d.footprint;
+    D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = d.uav.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+    d.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    const D3D12_RESOURCE_BARRIER back = transition(d.uav.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    d.list->ResourceBarrier(1, &back);
+
+    if (FAILED(d.list->Close())) { last_error_ = "list close"; return false; }
+    ID3D12CommandList* lists[] = { d.list.Get() };
+    d.queue->ExecuteCommandLists(1, lists);
+    d.wait_idle();
+    return true;
+}
+
+bool DxrRenderer::readback(std::vector<uint8_t>& rgba) {
+    Impl& d = *impl_;
+    if (!d.readbackBuf) { last_error_ = "no readback buffer"; return false; }
+    void* mapped = nullptr;
+    const D3D12_RANGE rd{ 0, static_cast<SIZE_T>(d.readbackTotal) };
+    if (FAILED(d.readbackBuf->Map(0, &rd, &mapped))) { last_error_ = "readback map"; return false; }
+    rgba.resize(static_cast<size_t>(d.width) * d.height * 4u);
+    const auto* base = static_cast<const uint8_t*>(mapped) + d.footprint.Offset;
+    const SIZE_T srcPitch = d.footprint.Footprint.RowPitch;
+    for (uint32_t y = 0; y < d.height; ++y)
+        std::memcpy(&rgba[static_cast<size_t>(y) * d.width * 4u], base + static_cast<size_t>(y) * srcPitch,
+                    static_cast<size_t>(d.width) * 4u);
+    const D3D12_RANGE noWrite{ 0, 0 };
+    d.readbackBuf->Unmap(0, &noWrite);
+    return true;
+}
+
+uint32_t DxrRenderer::debug_error_count() {
+    Impl& d = *impl_;
+    if (!d.infoQueue) return 0;
+    uint32_t count = 0;
+    const UINT64 n = d.infoQueue->GetNumStoredMessages();
+    for (UINT64 i = 0; i < n; ++i) {
+        SIZE_T len = 0;
+        d.infoQueue->GetMessage(i, nullptr, &len);
+        if (len == 0) continue;
+        std::vector<uint8_t> buf(len);
+        auto* msg = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+        if (SUCCEEDED(d.infoQueue->GetMessage(i, msg, &len))) {
+            if (msg->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION ||
+                msg->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
+                msg->Severity == D3D12_MESSAGE_SEVERITY_WARNING) {
+                ++count;
+            }
+        }
+    }
+    return count;
 }
 
 }  // namespace br::render_dxr
