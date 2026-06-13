@@ -4,11 +4,28 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
-## Session 10 — M9: DXR Path-Traced Mode  🟡 IN PROGRESS (phases 1 + 2a done — DXR traces the maze)
+## Session 10 — M9: DXR Path-Traced Mode  🟡 IN PROGRESS (phases 1, 2a, 2b done — depth gate #1 GREEN)
 
-**Last green tag: `m8-green`; phases 1a/1b/2a committed on top (additive, all gates
-pass). Start at phase 2b (the depth-compare gate).** The DXR path tracer now traces
-the real streamed geometry, debug-clean.
+**Last green tag: `m8-green`; phases 1a/1b/2a/2b committed on top (additive — the M9
+gate now enforces exit gate #1, depth compare). Start at phase 3 (PT lighting +
+converged RMSE golden).** The DXR path tracer traces the real streamed geometry and
+its primary-hit depth matches the rasteriser per pixel (gate #1), debug-clean.
+
+**Done (phase 2b — cross-renderer depth compare, exit gate #1 GREEN; commit
+`15427d3`).** `DxrRenderer::render_scene` writes **NDC depth** (R32_FLOAT UAV at
+`u1`) via the *same* hyperbolic `proj_lh(near=0.05, far=500)` mapping as
+`render_d3d12`; `readback_depth()` returns it. **Key finding:** the DXR ray basis
+(fwd/right/up) already equals raster's `view_lh` exactly — fwd = (sin·cos, sin,
+cos·cos), right = cross((0,1,0),fwd), up = cross(fwd,right) — and the screen mapping
+matches, so per-pixel rays align with no basis change (the SESSION_LOG worry was
+resolved by inspection). `render_d3d12` gained `readback_depth()` (copies the
+D32_FLOAT buffer; additive — raster output byte-unchanged, M5/M4 goldens still
+bit-match). `app --dxr-depth` renders both, linearizes NDC→eye-space metres,
+compares per pixel. `Invoke-GateM9` (gate #1) = clean build + ctest + dxr-probe +
+**5-pose depth compare** + golden regression + INV-5 + inventory → **exit 0**.
+**Measured (640×360):** every pixel co-foreground, mean depth rel-err ~1e-5, max
+~1e-4, **zero mismatches** except 1 silhouette pixel at pose 4; raster+DXR
+debug/DRED clean. Gate thresholds clear the measured values ~250×.
 
 **Done (phase 2a — BLAS/TLAS + TraceRay).** `DxrRenderer::build_scene(chunks)`
 builds a BLAS per resident chunk (triangles from `ChunkVertex`, world-space) + a
@@ -20,17 +37,7 @@ with correct depth, debug/DRED clean.** Fix: AS **scratch** buffers must be crea
 in `COMMON` (D3D12 ignores `UNORDERED_ACCESS` initial state for buffers → 1 warning
 per chunk otherwise).
 
-**Remaining for M9 (start at phase 2b).**
-- **Phase 2b — depth compare (exit gate #1).** Make raster vs DXR primary-hit
-  depths comparable per pixel: pass the **same** view+proj (or invViewProj) to
-  both. Easiest: expose `render_d3d12`'s MVP / add a depth-buffer readback
-  (`readback_depth`), have the DXR raygen generate rays from `invViewProj` (not the
-  yaw/pitch basis — that may not match raster's `view_lh`/`proj_lh` exactly) and
-  write **NDC depth** = project(hitPos)·MVP. Compare within epsilon over the frame
-  (allow edge AA). Gate: `--dxr-depth` + raster `--shot` depth at the same pose.
-  NOTE: the current ray basis gives a plausible image but is NOT guaranteed to
-  match raster's convention — align it (or switch to invViewProj) for the numeric
-  compare.
+**Remaining for M9 (start at phase 3).**
 - **Phase 3 (gate #2):** closest-hit PT (emissive fluorescents as lights, shadow +
   diffuse-GI rays, seeded per-(pixel,sample) RNG), accumulation buffer; 1000+ spp
   at 3 poses; RMSE < threshold (via `soak.ps1`). Shading currently distance-only.
