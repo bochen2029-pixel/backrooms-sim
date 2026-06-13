@@ -36,10 +36,13 @@ errors to process exit codes for the gate scripts (ARCHITECTURE.md §7).
   −1: builds the approach floor + stairwell set piece + landing, walks the
   wanderer down (gravity/collision), reports drop / level reached / sublevel
   connectivity / determinism hash.
+- `--post` (M8) — adds the VHS post stack + HUD/timestamp to `--shot` (composites
+  a CPU-rasterised HUD; echoes `timestamp:` to telemetry) and to `--stream`
+  (VHS-only, for the post-pass perf measure). `app/hud.*` is the 5×7 bitmap font.
 
 **Planned.** `config.toml` + flag/config mirroring (M12), noclip intro + photo
 mode (M12), `--no-director` (M11).
 
-**Status:** M6 — adds `--render-wav`, `--footsteps`, `--audiosoak` (procedural
-audio: offline WAV + headless real-time soak) to the
-render/sim/stream/walkbot/topdown/shot CLI modes.
+**Status:** M8 — adds `--post` (VHS post + HUD/timestamp; `app/hud.*` bitmap
+font). Earlier: M7 `--biomeat`/`--descend`, M6 `--render-wav`/`--footsteps`/
+`--audiosoak`, over the M5 render/sim/stream/walkbot/topdown/shot CLI.

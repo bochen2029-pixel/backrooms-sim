@@ -781,6 +781,107 @@ function Invoke-GateM7 {
     }
 }
 
+function Invoke-GateM8 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+
+    $bin = Get-BinDir
+    $tmp = Join-Path $RepoRoot 'runs\gate-m8'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $hashdiff = Join-Path $bin 'hashdiff.exe'
+
+    Assert-Gate 'ctest green (full regression)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+
+    # Exit gates #1 (clean A/B) + #4 (seeded grain -> deterministic goldens).
+    Assert-Gate 'post ON/OFF goldens: bit-identical x2, golden-matched, clean A/B, debug-clean' {
+        $off1 = Join-Path $tmp 'off1.png'; $off2 = Join-Path $tmp 'off2.png'
+        $on1 = Join-Path $tmp 'on1.png';   $on2 = Join-Path $tmp 'on2.png'
+        $ro1 = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $off1)
+        $ro2 = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $off2)
+        $rn1 = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--post', '--width', '640', '--height', '360', '--out', $on1)
+        $rn2 = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--post', '--width', '640', '--height', '360', '--out', $on2)
+        foreach ($r in $ro1, $rn1) { if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "post shot had debug-layer messages" } }
+        if ((& $hashdiff hash $off1 | Select-Object -Last 1) -ne (& $hashdiff hash $off2 | Select-Object -Last 1)) { throw "post-OFF not bit-identical x2" }
+        if ((& $hashdiff hash $on1 | Select-Object -Last 1) -ne (& $hashdiff hash $on2 | Select-Object -Last 1)) { throw "post-ON not bit-identical x2 (seeded grain)" }
+        $doff = (& $hashdiff diff $off1 (Join-Path $RepoRoot 'goldens\m8\post_off.png') | Select-Object -Last 1)
+        if ([double]$doff -ne 0.0) { throw "post-OFF golden regressed (diff=$doff)" }
+        $don = (& $hashdiff diff $on1 (Join-Path $RepoRoot 'goldens\m8\post_on.png') | Select-Object -Last 1)
+        if ([double]$don -ne 0.0) { throw "post-ON golden regressed (diff=$don)" }
+        $dab = (& $hashdiff diff $off1 $on1 | Select-Object -Last 1)
+        if ([double]$dab -le 0.0) { throw "post ON and OFF are identical (no effect)" }
+        Write-Note "post A/B: OFF/ON bit-identical x2, golden-matched, A/B diff=$dab"
+    }
+
+    # Exit gate #2: timestamp overlay renders the correct sim time (pixels via the
+    # golden + the value echoed to telemetry — OCR-free).
+    Assert-Gate 'timestamp overlay: correct sim time (telemetry + pixel golden)' {
+        $hud = Join-Path $tmp 'hud.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1234', '--pose', '0', '--ticks', '305160', '--post', '--width', '640', '--height', '360', '--out', $hud)
+        if ($r.Exit -ne 0) { throw "hud shot exited $($r.Exit)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "hud shot had debug-layer messages" }
+        if ($r.Out -notmatch 'timestamp:\s*00:42:23') { throw "timestamp telemetry wrong (expected 00:42:23 for 305160 ticks)" }
+        $d = (& $hashdiff diff $hud (Join-Path $RepoRoot 'goldens\m8\hud_timestamp.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "timestamp HUD golden regressed (diff=$d)" }
+        Write-Note "timestamp 305160 ticks -> 00:42:23, telemetry + pixels match"
+    }
+
+    # Exit gate #3: the post pass costs < 1.5 ms at 1440p (median frame-time delta,
+    # post on vs off; best of 2 to absorb OS jitter).
+    Assert-Gate 'post pass < 1.5 ms at 1440p (median frame-time delta)' {
+        $best = 999.0
+        for ($a = 1; $a -le 2; ++$a) {
+            $coff = Join-Path $tmp "off$a.csv"; $con = Join-Path $tmp "on$a.csv"
+            $r1 = Invoke-AppCapture @('--stream', '--frames', '1500', '--width', '2560', '--height', '1440', '--seed', '7', '--csv', $coff)
+            if ($r1.Exit -ne 0) { throw "stream post-off exited $($r1.Exit)" }
+            $r2 = Invoke-AppCapture @('--stream', '--frames', '1500', '--width', '2560', '--height', '1440', '--seed', '7', '--post', '--csv', $con)
+            if ($r2.Exit -ne 0) { throw "stream post-on exited $($r2.Exit)" }
+            if ((Get-Metric $r2.Out 'debug_error_count') -ne 0) { throw "stream post-on had debug-layer messages" }
+            $delta = (Get-HitchStats $con).Median - (Get-HitchStats $coff).Median
+            Write-Note ("attempt ${a}: post pass = {0:N3} ms" -f $delta)
+            if ($delta -lt $best) { $best = $delta }
+            if ($best -lt 1.5) { break }
+        }
+        if ($best -ge 1.5) { throw "post pass is $([math]::Round($best,3)) ms at 1440p (>= 1.5 ms budget)" }
+    }
+
+    Assert-Gate 'regression: M5 lit shot + M4 top-down goldens still bit-match (post off)' {
+        $shot = Join-Path $tmp 'm5_shot.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        $d = (& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M5 lit shot golden regressed (diff=$d)" }
+        $td = Join-Path $tmp 'm4_td.png'
+        $r = Invoke-AppCapture @('--topdown', '--seed', '1', '--width', '512', '--height', '512', '--out', $td)
+        if ($r.Exit -ne 0) { throw "M4 top-down exited $($r.Exit)" }
+        $d = (& $hashdiff diff $td (Join-Path $RepoRoot 'goldens\m4\topdown_seed1.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M4 top-down golden regressed (diff=$d)" }
+    }
+
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -795,6 +896,7 @@ try {
         'M5'    { Invoke-GateM5 }
         'M6'    { Invoke-GateM6 -AudioSoakSeconds $AudioSoakSeconds }
         'M7'    { Invoke-GateM7 }
+        'M8'    { Invoke-GateM8 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

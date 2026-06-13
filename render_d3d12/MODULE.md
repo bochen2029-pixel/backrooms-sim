@@ -34,6 +34,11 @@ renderer (INV-6).
   root-constant toggle so the M4 layout goldens stay stable under M5.
 - `set_texture_seed` (M5) — selects the seed for the procedural material
   textures; the Texture2DArray upload happens lazily on the next lit draw.
+- `set_post` / `upload_hud_overlay` (M8) — the **VHS post pass**: a fullscreen
+  shader (scene RT → SRV → `postRt`) applying seeded film grain, chromatic
+  aberration, barrel distortion, scanline/interlace flicker, and vignette, then
+  compositing a CPU-rasterised HUD overlay (undistorted). Off by default (so
+  prior goldens are byte-unchanged); ~0.6 ms at 1440p (ADR-034).
 - `render_d3d12/texgen.h` (M5) — D3D12-free procedural material textures:
   `generate_texture(kind, seed, rgba)` for `TexKind`
   {Wallpaper, Carpet, CeilingTile, Fluorescent, Baseboard} + `texture_hash`.
@@ -41,13 +46,15 @@ renderer (INV-6).
 
 **Links:** `d3d12 dxgi dxguid d3dcompiler Psapi` (PRIVATE — implementation detail).
 
-**Planned.** VHS post + HUD (M8), path-traced parity via `render_dxr` (M6+).
+**Planned.** Path-traced parity via `render_dxr` (M9); in-world rendered
+stairwells (M7 follow-up).
 
 **Contracts consumed:** `contracts/world_view_v1.h` (M2+),
 `contracts/stream_events_v1.h` (M3), `contracts/chunk_gen_v1.h` (M5, material ids
 + fluorescent-grid helpers shared with `gen`). Lighting math: `core/lighting.h`.
 
-**Status:** M5 — procedural material textures + textured/lit chunk render with
-forward fluorescent lighting and deterministic flicker. Fixed-pose lit goldens
-`goldens/m5/shot_seed{1,7,42}_pose{0..4}.png` (640x360). Earlier: M1 clear-color
-golden `goldens/m1/`, M2 room `goldens/m2/`, M4 top-down `goldens/m4/`.
+**Status:** M8 — adds the **VHS post pass** (grain/aberration/distortion/scanlines/
+vignette + HUD/timestamp overlay), off by default. Goldens `goldens/m8/`
+(post on/off, HUD timestamp). Earlier: M5 lit chunk render + fluorescent lighting
+(`goldens/m5/`), M4 top-down (`goldens/m4/`), M2 room (`goldens/m2/`), M1 clear
+(`goldens/m1/`).

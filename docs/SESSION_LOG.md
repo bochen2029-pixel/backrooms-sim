@@ -4,6 +4,47 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 9 — M8: VHS Post-Processing + HUD  ✅ gate green (`m8-green`)
+
+**Status: `gate.ps1 -Milestone M8` exits 0.** The picture now has the analog-horror
+VHS treatment — film grain, chromatic aberration, lens (barrel) warp, scanline/
+interlace flicker, vignette — plus a CRT-green HUD (timestamp, seed, odometer,
+chunk, level, FPS). ADR-034.
+
+**Done.**
+- **VHS post pass** (`render_d3d12`): a depth-less fullscreen-triangle PSO samples
+  the scene RT as an SRV and composites into a second `postRt` (read back instead
+  of the scene). PS: barrel-distorted scene sampling, per-channel chromatic
+  aberration, screen-space scanlines/interlace + vignette, and **seeded film
+  grain** (`hash(px,py,seed + floor(time*60))` → fixed time = fixed grain). Params
+  via root 32-bit constants. **Off by default** (`set_post`) → all prior goldens
+  byte-unchanged.
+- **HUD** (`app/hud.{h,cpp}`): a 5×7 bitmap font + `build_hud_overlay` → a
+  transparent RGBA overlay (TIME `HH:MM:SS`, SEED, ODO, CHUNK x,z, LVL, FPS),
+  uploaded (`upload_hud_overlay`) and composited **undistorted** (crisp).
+  `hud_timestamp(ticks)` echoed to telemetry for the OCR-free gate.
+- **app `--post`** on `--shot` (HUD + timestamp) and `--stream` (VHS-only, perf).
+- **Gate `Invoke-GateM8`** (4 exit gates): post ON/OFF goldens `goldens/m8/`
+  bit-identical ×2 + golden-matched + clean A/B (diff 24.3) + debug-clean (#1, #4
+  seeded grain); timestamp 305160 ticks → `00:42:23` via telemetry + pixel golden
+  (#2); post pass **0.65 ms @1440p** < 1.5 ms (#3); + M5/M4 render-golden
+  regression + inventory.
+
+**Pending / next.** M9 — DXR path-traced mode (BLAS/TLAS per chunk, temporal
+accumulation, emissive fluorescents as real lights; raster stays default).
+
+**Gotchas.**
+- Post is OFF by default — never let it leak into the existing render goldens
+  (verified post-off bit-identical to the M5 golden).
+- Film grain MUST be seeded + time-quantised (`floor(time*60)`) or goldens flake;
+  the HUD is rasterised on the CPU (deterministic) and composited undistorted.
+- The post-pass perf measure runs VHS-only (no per-frame HUD upload) so it times
+  the shader, not a 14 MB texture upload; ~0.65 ms vs the 1.5 ms budget.
+- The HUD bitmap font only defines the glyphs actually used (digits, `:` `,` `.`
+  `-`, and the label letters) — extend `glyph_for` if new HUD text needs more.
+
+---
+
 ## Session 8 — M7: Biomes, Set Pieces, Verticality  ✅ gate green (`m7-green`)
 
 **Status: `gate.ps1 -Milestone M7` exits 0.** The world now has *character*: five

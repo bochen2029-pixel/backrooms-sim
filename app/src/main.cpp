@@ -310,6 +310,7 @@ int run_stream(const Options& o) {
         std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1;
     }
     renderer.set_texture_seed(o.seed);
+    renderer.set_post(o.post, static_cast<uint32_t>(o.seed), 0.0f, false);  // VHS post (M8), HUD off
     br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
     br::telemetry::FrameCsv csv;
     if (!o.csv.empty() && !csv.open(o.csv)) {
