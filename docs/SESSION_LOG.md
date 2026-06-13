@@ -4,29 +4,35 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
-## Session 8 — M7: Biomes, Set Pieces, Verticality  🟡 IN PROGRESS (phase 1 done)
+## Session 8 — M7: Biomes, Set Pieces, Verticality  🟡 IN PROGRESS (phases 1–2a done)
 
-**Last green tag: `m6-green`. Phase 1 committed (additive, all gates still pass).**
+**Last green tag: `m6-green`. Phases 1 + 2a committed (all gates still pass).**
 
 **Done (phase 1).** The **biome field** — `gen/biome.{h,cpp}`: a pure,
 low-frequency `biome_at(seed, level, cx, cz)` over a coarse **K=3** chunk lattice
 with a weighted CDF → contiguous regions with designed proportions. 5 biomes:
 ClassicYellow 44 %, CubicleFarm 22 %, PipeCorridors 16 %, ParkingGarage 12 %,
 Poolrooms 6 %. `BiomeParams` (carve ratio, pillar density, floor tint, wall
-darken) ready for the generation wiring. `test_biome`: determinism, low-frequency
-contiguity, and **distribution over 102,400 chunks within ±2 %** (M7 exit gate
-#2 — green). GenerateChunk NOT yet changed (no golden ripple).
+darken). `test_biome`: determinism, low-frequency contiguity, and **distribution
+over 102,400 chunks within ±2 %** (M7 exit gate #2 — green).
+
+**Done (phase 2a).** Biomes wired into generation: `generate_layout_carve(seed,
+key, carve_ratio)` (biome openness knob; connectivity holds for any ratio),
+`generate_layout` derives it from `biome_at`; `GenerateChunk` applies the biome
+floor tint + wall darken. **Edge-doorway protocol untouched** → cross-biome seams
+connect (INV-3); seam-crack / regen / doorway-agreement tests stay green.
+`test_biome`: **every biome's layout connected over 10k chunks** (exit gate #1
+connectivity — 5×10k). M4 top-down + M5 lit-shot goldens **re-captured via
+goldgen** (ADR-031; determinism + match verified, diff 0).
 
 **Remaining for M7 (start here).**
-- **Phase 2 — biome-parameterized generation.** Thread `BiomeParams` through
-  `generate_layout` (carve ratio) + `chunk.cpp` (pillars in open cells, biome
-  tint via `floor_tint`/`wall_darken`, materials). **Keep the M4 edge-doorway
-  protocol unchanged** so cross-biome seams still connect (INV-3). Then: per-biome
-  M4 validator suite (connectivity + geometry, 10k each — exit gate #1) by
-  forcing each biome; **re-capture the M4 top-down (seeds 1,7) + M5 lit-shot
-  (seeds 1,7,42 × 5 poses) goldens** via `goldgen` (legitimate generation change
-  → ADR in the same commit, Iron Rule 6); per-biome fixed-pose goldens (exit gate
-  #4).
+- **Phase 2b — pillars + set pieces + per-biome goldens.** Add pillars in open
+  cells (parking garage / pillar halls) as collision boxes; **extend
+  `ValidateChunkGeometry`** to accept square pillars (thin in BOTH axes, ≤ ~1 m)
+  as a valid category distinct from walls (+ADR). Geometry validator over 10k per
+  biome (exit gate #1 geometry). Per-biome fixed-pose goldens (exit gate #4) —
+  needs a way to render a KNOWN biome (e.g., a `--shot --biome N` that seeds the
+  spawn chunk to that biome, or pick seeds whose chunk (0,0) is each biome).
 - **Phase 3 — verticality.** Level −1 generation (`ChunkKey.level=-1`, Y-offset,
   altered params) + a **stairwell set piece** (descending step boxes) placed
   deterministically/rare, connecting level 0↔−1. A **scripted-descent replay**
