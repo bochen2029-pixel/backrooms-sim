@@ -1320,6 +1320,71 @@ function Invoke-GateM12 {
     Write-Note 'M12 gate: full ctest + one-command run + noclip intro + acceptance soak (Director ON) + doc checks. Acceptance run = soak.ps1 -Hours 12 -Director; tag v1.0 after the M0-M11 regression sweep.'
 }
 
+function Invoke-GateM13 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    # Exit gate: the windowed playable renders the streamed maze in real time,
+    # debug/DRED-clean, with bounded frame pacing (no hitches). Closes the M1
+    # clear-frame gap -- render_chunks_windowed shares the gated lit pipeline.
+    Assert-Gate 'playable --play: windowed maze render, debug-clean, frame-pacing p99 < 2x median' {
+        $csv = Join-Path $RepoRoot 'runs\gate-m13\play.csv'
+        if (Test-Path (Split-Path $csv)) { Remove-Item -Recurse -Force (Split-Path $csv) }
+        New-Item -ItemType Directory -Force -Path (Split-Path $csv) | Out-Null
+        $r = Invoke-AppCapture @('--play', '--seconds', '5', '--seed', '7', '--width', '1280', '--height', '720', '--csv', $csv)
+        if ($r.Exit -ne 0) { throw "--play exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "windowed play had debug-layer messages" }
+        $frames = Get-Metric $r.Out 'frames'
+        if ($frames -lt 60) { throw "too few frames rendered ($frames) -- window/render not running" }
+        $st = Get-HitchStats $csv
+        if ($st.P99Ratio -ge 2.0) { throw ("frame pacing p99 {0:N2}x median (>= 2x)" -f $st.P99Ratio) }
+        Write-Note ("--play: $frames frames, median {0:N2} ms, p99 {1:N2}x median (bounded)" -f $st.Median, $st.P99Ratio)
+    }
+
+    # The live --play loop drives core::tick with the SAME InputCommand the walk-bot/
+    # replay feed, so sim/replay determinism (M2) is unaffected -- the M0-M12 sweep
+    # before the tag is the proof. Here: the raster golden path is byte-unchanged.
+    Assert-Gate 'regression: M5 lit shot + M4 top-down goldens still bit-match' {
+        $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+        $tmp = Join-Path $RepoRoot 'runs\gate-m13'
+        $shot = Join-Path $tmp 'm5_shot.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        $d = (& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M5 lit shot golden regressed (diff=$d)" }
+        $td = Join-Path $tmp 'm4_td.png'
+        $r = Invoke-AppCapture @('--topdown', '--seed', '1', '--width', '512', '--height', '512', '--out', $td)
+        if ($r.Exit -ne 0) { throw "M4 top-down exited $($r.Exit)" }
+        $d = (& $hashdiff diff $td (Join-Path $RepoRoot 'goldens\m4\topdown_seed1.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M4 top-down golden regressed (diff=$d)" }
+    }
+
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M13 gate: windowed playable (maze render + pacing) + regression. The game is now walkable in a window.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -1339,6 +1404,7 @@ try {
         'M10'   { Invoke-GateM10 }
         'M11'   { Invoke-GateM11 }
         'M12'   { Invoke-GateM12 }
+        'M13'   { Invoke-GateM13 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

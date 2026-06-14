@@ -292,6 +292,9 @@ int run_play(const Options& o) {
     auto recenter = [&]() -> POINT { POINT p = ctr; ClientToScreen(hwnd, &p); SetCursorPos(p.x, p.y); return p; };
     POINT anchor = recenter();
 
+    br::telemetry::FrameCsv csv;
+    const bool csvOpen = !o.csv.empty() && csv.open(o.csv);
+
     const float tickDt = 1.0f / 120.0f;
     const auto t_start = steady_clock::now();
     auto prev = t_start;
@@ -322,6 +325,7 @@ int run_play(const Options& o) {
         anchor = recenter();
 
         const auto now = steady_clock::now();
+        const double frame_ms = duration<double, std::milli>(now - prev).count();
         accum += duration<float>(now - prev).count();
         prev = now;
         if (accum > 0.25f) accum = 0.25f;  // clamp the spiral of death
@@ -344,8 +348,12 @@ int run_play(const Options& o) {
             ShowCursor(TRUE);
             return 1;
         }
+        if (csvOpen && frames > 0) {  // skip frame 0 (includes window/stream warm-up)
+            csv.write(contracts::FrameMetrics{ frames, frame_ms, sm.resident_count(), sm.generated_total(), renderer.process_private_bytes() });
+        }
         ++frames;
     }
+    if (csvOpen) csv.close();
     ShowCursor(TRUE);
     const uint32_t dbg = renderer.debug_error_count();
     std::printf("play_seed: %llu\n", static_cast<unsigned long long>(o.seed));
