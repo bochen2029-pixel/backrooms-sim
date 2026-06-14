@@ -4,6 +4,44 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 16 — M15: Menus + game flow  ✅ COMPLETE — 🏷️ `m15-green`
+
+**`gate.ps1 -Milestone M15` exits 0; tagged `m15-green` + pushed. The game has a front
+end.** It no longer boots straight into the walk — splash → main menu → play → pause →
+settings → quit, drawn on the existing CPU bitmap font (no new dependency/framework).
+
+**Done (M15; commits `<wip>` + gate; ADR-041).**
+- **`app/menu.h`** — the game-state machine: a **pure, header-only**
+  `menu_step(MenuModel, UiAction) → UiCommand` (no rendering / wall-clock / globals). So the
+  whole front end is **unit-testable headlessly** — `tests/unit/test_menu.cpp` (7 cases) drives
+  synthetic input through every transition (the keystone exit gate). The test target adds
+  `app/src` to its include path for that one header (nothing links the shell executable).
+- **`hud.cpp build_menu_overlay`** — draws the current screen (title, item list, selection
+  highlight, settings values) on the M8 5×7 font; +8 glyphs (A/B/G/Q/R/W/X/Y) + `fill_rect`.
+- **`render_d3d12::present_overlay_windowed`** — blits the menu overlay to the swapchain via a
+  fullscreen triangle. Its **own** texture/heap/root-sig/PSO, isolated from the VHS post pass
+  (whose `rtvHeap` slot 1 collides with the 2nd back buffer windowed) → headless goldens untouched.
+- **App modes:** `--game` (windowed shell: boot → menu → New Game → walk → Esc-pause →
+  settings), `--menu-shot --screen <s> [--sel N]` (CPU-only deterministic menu golden),
+  `--menu-smoke` (every screen GPU-composited debug-clean across state changes).
+- **Goldens:** `goldens/m15/{splash,mainmenu,pause,settings}.png` via `goldgen capture` (ADR-041).
+- **`Invoke-GateM15`** — ctest (incl. `[m15]`) + state-transition tests + 4 menu goldens
+  bit-match + `--menu-smoke` debug-clean (8 composites) + `--game --seconds 4` debug-clean +
+  M5 golden regression + INV-5/inventory. **gate.ps1 M15 exits 0.**
+
+**Gotchas / notes.** Menu state machine is split from its rendering specifically so it's
+deterministic + headless-gateable. The windowed overlay present had to be a **separate**
+pipeline (not the post pass) to avoid the windowed `rtvHeap` slot-1/back-buffer collision —
+the post/readback path is byte-for-byte untouched (M5/M8 goldens unaffected). Menu overlay is
+CPU-only + deterministic → goldens need no GPU in CI. Settings (master/SFX/mouse/Director) are
+in-memory for M15; **M16 persists them**. Verified frames (`runs/m15/*.png`) shown to the
+operator: CRT-green main menu (NEW GAME highlighted, CONTINUE greyed) + settings screen.
+
+**Next: M16** — settings + config persistence (write→read round-trip) + windowing
+(fullscreen/resolution) + XInput gamepad → `InputCommand`. Then M17 portable `.zip` → `v2.0`.
+
+---
+
 ## Session 15 — M14: Sound on (real-time audio output)  ✅ COMPLETE — 🏷️ `m14-green`
 
 **`gate.ps1 -Milestone M14` exits 0; tagged `m14-green` + pushed. The game has sound.**

@@ -34,6 +34,11 @@ renderer (INV-6).
   (PRESENT→RENDER_TARGET→draw→PRESENT, fence-synced + `Present`) instead of an offscreen
   RT. Requires `init_windowed` (which now also builds the depth buffer). The gated headless
   `render_chunks` is byte-for-byte untouched; this is the real-time playable (`app --play`) path.
+- `present_overlay_windowed` (M15) — blit a CPU RGBA overlay (the menu) to the swapchain
+  back buffer via a fullscreen triangle, then `Present`. Its **own** texture + SRV heap + root
+  signature + PSO, fully separate from the VHS post pass (whose `rtvHeap` slot 1 would collide
+  with the second back buffer windowed) — so the headless post/readback goldens are untouched.
+  The game shell (`app --game`) uses it for menu screens; the reusable HUD-present primitive.
 - `render_topdown` (M4) — headless: orthographic top-down render of a chunk set
   (debug golden of the maze layout); discards ceiling/fluorescent material via a
   root-constant toggle so the M4 layout goldens stay stable under M5.

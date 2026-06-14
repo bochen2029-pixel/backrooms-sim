@@ -100,6 +100,20 @@ typed module errors to process exit codes for the gate scripts (ARCHITECTURE.md 
   **real-time audio** (M14: WASAPI mixer; `--no-audio` / `--master` / `--sfx` to control).
   `--csv` logs per-frame pacing (frame_ms + residency/mem) for the gate; `--seconds N`
   auto-exits (headless-friendly). `scripts/run.ps1 -Window` launches this.
+- `--game [--seed S] [--seconds N] [--width W --height H] [--no-audio]` (M15) — the
+  **windowed game shell**: boots to the main menu and runs the `app/menu.h` state machine
+  (splash → main menu → play → pause → settings → quit). Menu screens present a CPU overlay
+  via `render_d3d12::present_overlay_windowed`; New Game enters the live `--play` walk; Esc
+  pauses. Keyboard nav (arrows/WASD + Enter/Esc). `--seconds N` is the debug-clean gate smoke.
+- `--menu-shot --screen <splash|mainmenu|pause|settings> [--sel N] --out p.png` (M15) — render
+  one menu screen to a PNG (deterministic, CPU-only → the menu-render golden).
+- `--menu-smoke` (M15) — composite every menu screen through the GPU (post + HUD path) across
+  state changes; reports `debug_error_count` (the "no debug-layer messages across state changes" gate).
+
+**The menu / game-state machine (M15).** `app/menu.h` is a pure, header-only
+`menu_step(MenuModel, UiAction) → UiCommand` (no rendering / wall-clock / globals), so the
+front end is unit-tested headlessly with synthetic input. `hud.cpp build_menu_overlay` draws it
+on the existing 5×7 bitmap font. Settings (master/SFX/mouse/Director) are in-memory in M15; M16 persists them.
 
 **Settings & photo mode (M12).** Configuration is the **CLI flag surface** above
 (the de-facto settings interface; `scripts/run.ps1` is the one-command entry).
