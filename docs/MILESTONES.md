@@ -171,6 +171,70 @@ The harness comes before the product. Nothing else can be autonomous without it.
 
 ---
 
+# Phase II — Shippable Game (M13–M17)
+
+v1.0 is a deterministic, headless-first visualization. Phase II turns it into a
+**playable, portable game** (stop before Steam; that's a later phase). The enabling
+fact: input is already an abstracted `InputCommand` stream (the walk-bot/replay feed
+it), so real keyboard/mouse drive the *same* `InputCommand → tick → render` path —
+which keeps interactive features gate-testable by **replaying canned input through the
+live loop**. Scope target: **through M17** (playable + settings + portable zip).
+Verification: automated gates + captured-frame review (no hands-on playtest required).
+
+## M13 — Playable: real-time loop + KB/mouse (the keystone)
+**Scope:** A windowed game loop (`app --play`) that **draws the streamed maze in real
+time** (closing the clear-frame gap), a **fixed 120 Hz sim tick decoupled from render**
+(accumulator), and real input — WASD + jump/sprint + **raw mouse-look** → `InputCommand`
+→ `core::tick`. The renderer gains a windowed maze path (chunks → back buffer → present,
+depth-tested). `--window` (M1 clear-frame) stays for the M1 gate; `run.ps1 -Window` →
+`--play`.
+**Exit gates:** [ ] Replay a canned `InputCommand` stream through the LIVE loop →
+deterministic WorldState hash (live path == replay path). [ ] Windowed run (`--play
+--seconds N`) is debug-layer clean + frame-pacing telemetry bounded (p99 < 2× median).
+[ ] A maze-render golden frame from the windowed path (proves the world renders, not a
+clear screen). [ ] `--no-director`/raster default unaffected (M0–M12 regression).
+
+## M14 — Sound on: real-time audio output
+**Scope:** Wire the existing real-time `AudioEngine` (built + headless-tested in M6) to
+the speakers via **miniaudio** (the dep M6 deliberately deferred; header-only → ADR +
+vcpkg). Master/SFX volume hooks.
+**Exit gates:** [ ] Real-time playback run: **zero underruns** over N s (existing
+counters), device opens/closes clean. [ ] The offline `--render-wav` path stays
+**bit-identical** (determinism intact). [ ] miniaudio ADR + vcpkg entry.
+
+## M15 — Menus + game flow
+**Scope:** A game **state machine** (splash → main menu → play → pause → settings →
+quit) and an **immediate-mode UI on the existing CPU bitmap-font HUD** (no new
+framework — fits the no-deps rule + the CRT aesthetic). Main menu (New/seed, Continue,
+Settings, Quit), pause menu; mouse + keyboard navigation.
+**Exit gates:** [ ] State-transition tests driven by synthetic input (menu → play →
+pause → menu) — deterministic. [ ] Menu-render goldens. [ ] No debug-layer messages
+across state changes.
+
+## M16 — Settings + persistence + windowing + gamepad
+**Scope:** A settings screen (resolution, fullscreen/borderless, vsync, FOV, mouse
+sensitivity, master/SFX volume, renderer raster↔DXR, quality, Director on/off, **key
+rebinding**), a **config file** that saves/loads/applies on launch, fullscreen +
+resolution handling, and **XInput** gamepad → `InputCommand`.
+**Exit gates:** [ ] Config write→read **round-trips** identically; apply-settings
+headless checks (the renderer/sim reflect them). [ ] Resolution/fullscreen-change
+smoke (debug-clean). [ ] Synthetic-gamepad → `InputCommand` mapping tests.
+
+## M17 — Ship-ready packaging (portable)
+**Scope:** **Bundle `dxcompiler.dll`/`dxil.dll`** beside the exe so end-users need no
+Windows SDK; a **release build config** (no debug layer/DRED, optimized); app icon +
+version info + a splash + a credits/EULA screen; a **portable .zip** (self-contained
+folder). No installer (per decision).
+**Exit gates:** [ ] **Clean-env test:** unzip to a temp dir with a scrubbed PATH (no
+SDK) → `--play`/`--dxr-pt` run → uses the **bundled** DXC, debug-clean. [ ] Fresh-unzip
+→ launch smoke. [ ] Full M0–M16 regression sweep. [ ] Tag `v2.0` (playable, packaged).
+
+*(Post-M17, a later phase: Steam integration — Steamworks SDK + depot/SteamPipe upload.
+The engineering is autonomous; the partner account, $100 fee, store page, and Publish
+are operator-only.)*
+
+---
+
 ## Session protocol per milestone
 
 1. Load ARCHITECTURE.md + this milestone's section + target module context pack
