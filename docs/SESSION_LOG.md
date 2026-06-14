@@ -4,6 +4,53 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 18 — M17: Portable packaging  ✅ COMPLETE — 🏁 `v2.0` (playable + packaged)
+
+**`gate.ps1 -Milestone M17` exits 0; the full M0–M16 regression sweep is green; tagged
+`v2.0` + pushed. PHASE II IS DONE.** The v1.0 headless-first visualization is now a
+**playable, portable game** — unzip and run: an infinite procedural Backrooms with a main
+menu, persistent settings, fullscreen, gamepad support, real-time audio, and a path tracer,
+in a self-contained ~7 MB folder that needs no installer and no Windows SDK.
+
+**Done (M17; commit `<wip>` + this; ADR-043).**
+- **Release build config** — CMake `BACKROOMS_RELEASE` defines `BR_RELEASE`, which compiles
+  the D3D12 debug layer + DRED **out** of `create_device_core` (a shipped exe never trips
+  them) and builds optimized. Dev/gate builds are byte-identical to M16 (the `#ifndef` is
+  always-true there), so M17 can't regress M0–M16.
+- **Bundled DXC** — `scripts/package.ps1` copies `dxcompiler.dll` + `dxil.dll` from the SDK
+  next to the exe. The loader already does `LoadLibraryW("dxcompiler.dll")` (exe dir first),
+  so the bundled copy is used with **zero code change** — the DXR path works with no SDK.
+- **`app/version.rc`** — text-only `VERSIONINFO` (2.0; no `.ico` — an icon would be an asset
+  file). **`--credits`** prints the about text (also the package's `CREDITS.txt`).
+- **The package** — `dist/backrooms-portable.zip` (~7 MB): exe + DXC pair + README + CREDITS
+  + RUN.cmd. No installer (operator decision), no assets.
+- **`Invoke-GateM17`** — clean build + ctest + package builds + **clean-env** (unzip to temp,
+  **scrub the SDK out of PATH**, `--dxr-pt` renders via the bundled DXC, debug-clean + a
+  `--game` smoke) + fresh-unzip VERSIONINFO/credits + M5/M4/M15 golden regression +
+  INV-5/inventory. **gate.ps1 M17 exits 0.**
+- **Docs** — new [`docs/USER_GUIDE.md`](USER_GUIDE.md) (player-facing) +
+  [`docs/DESIGN.md`](DESIGN.md) (design & architecture narrative).
+
+**Full regression sweep (for the `v2.0` tag).** All gates green: M0–M3 (run 1), M4–M16
+(run 2). M4 first tripped a **transient ctest test-*discovery* lock** (the `unit_tests.exe`
+couldn't be enumerated mid-run, after M3's 11-min soak — likely an AV scan); re-running was
+clean (ctest 100%, 68 tests), and the M4 walk-bot determinism check had passed even in the
+flaked run. Not a regression — the documented "re-run a transient under-load flake in
+isolation" pattern. KEEL (`:7071`) was up, so M11/M12 ran the live Director gates.
+
+**Gotchas / notes.** The inventory checker's allowlist gained `build-release`/`dist` (M17
+packaging artifacts, gitignored, same class as `build`). The portable folder's only shipped
+non-exe binaries are Microsoft's redistributable DXC DLLs; the three third-party *libraries*
+remain Catch2 + stb + miniaudio. The clean-env gate is the real proof of self-containment.
+
+**🏁 The build is complete: 18 milestones (M0–M17), every one gate-verified and tagged,
+from an empty repo to a portable procedural game. `v1.0` was the visualization; `v2.0` is
+the game.** Post-v2.0 (operator-only / optional): Steam (Steamworks + depot upload, the
+account/$100/store/Publish steps); polish (procedural app icon, in-game credits screen,
+far-chunk camera-relative rendering).
+
+---
+
 ## Session 17 — M16: Settings, persistence, windowing, gamepad  ✅ COMPLETE — 🏷️ `m16-green`
 
 **`gate.ps1 -Milestone M16` exits 0; tagged `m16-green` + pushed. The game remembers and

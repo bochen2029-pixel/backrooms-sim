@@ -24,6 +24,7 @@ Backup remote: **https://github.com/bochen2029-pixel/backrooms-sim** (private).
 | **M14** | Sound on: real-time audio output (miniaudio, lock-free ring, WASAPI) | M14 | ✅ `m14-green` |
 | **M15** | Menus + game-state machine (splash/menu/play/pause/settings, bitmap-font UI) | M15 | ✅ `m15-green` |
 | **M16** | Settings persistence + windowing/fullscreen + XInput gamepad | M16 | ✅ `m16-green` |
+| **M17** | Portable packaging (bundled DXC, release build, clean-env zip) | M17 | ✅ `v2.0` |
 
 **🏁 v1.0 — all 13 milestones (M0–M12) green and pushed.** Each is verified by a
 machine-checkable gate (`scripts/gate.ps1 -Milestone M<N>` exits 0) and tagged; the
@@ -32,15 +33,17 @@ procedural Backrooms walking simulation with a raster + DXR path-traced renderer
 procedural audio, an 8 h-soak-hardened streaming world, and an optional local-LLM
 Director that never breaks bit-exact replay.
 
-**▶ Phase II (M13–M17) — turn the v1.0 visualization into a packaged game.** In
-progress. **M13 ✅** made it genuinely walkable in a window (real-time `--play`:
-fixed-tick accumulator, WASD + mouse-look, frame-pacing gate). **M14 ✅** gave it
-sound (real-time audio output via miniaudio: lock-free SPSC ring → WASAPI device,
-zero underruns; offline WAV stays bit-identical). **M15 ✅** gave it a front end
-(game-state machine + immediate-mode menus on the bitmap-font HUD: splash → menu →
-play → pause → settings → quit). **M16 ✅** made it remember + adapt (config
-persistence + borderless fullscreen/resolution + XInput gamepad). Next: M17 portable
-`.zip` packaging (bundle DXC, release build, clean-env test) → `v2.0`.
+**🏁 Phase II (M13–M17) — the v1.0 visualization is now a packaged game. DONE → `v2.0`.**
+**M13 ✅** walkable in a window (real-time `--play`: fixed-tick accumulator, WASD +
+mouse-look, frame-pacing gate). **M14 ✅** sound (real-time audio via miniaudio: lock-free
+SPSC ring → WASAPI, zero underruns; offline WAV stays bit-identical). **M15 ✅** a front end
+(game-state machine + immediate-mode menus on the bitmap-font HUD: splash → menu → play →
+pause → settings → quit). **M16 ✅** remembers + adapts (config persistence + borderless
+fullscreen/resolution + XInput gamepad). **M17 ✅** portable: bundled DXC + release build +
+a `.zip` that runs on a clean machine with no SDK — proven by the scrubbed-PATH clean-env
+gate. **All 18 milestones (M0–M17) gate-verified and tagged; the full M0–M16 regression
+sweep is green at `v2.0`.** See [`docs/DESIGN.md`](docs/DESIGN.md) and
+[`docs/USER_GUIDE.md`](docs/USER_GUIDE.md).
 
 All numbers below are from real gate runs on the dev machine (RTX 4070 Ti SUPER,
 VS 2022 17.14, Windows 11, vcpkg static triplet).

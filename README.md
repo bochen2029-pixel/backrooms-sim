@@ -36,8 +36,22 @@ A milestone is done only when `gate.ps1 -Milestone M<N>` exits 0.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run.ps1          # build + a lit smoke render -> runs/run-smoke.png
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run.ps1 -Window  # the windowed walking sim
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run.ps1 -Window  # build + launch the playable walk
 ```
+
+### Play the game (`v2.0`)
+
+```powershell
+backrooms --game                                                          # the windowed game: menu -> walk
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1   # build the portable .zip -> dist/
+```
+
+`--game` boots to a main menu (New Game / Continue / Settings / Quit) and runs the
+walk with WASD + mouse-look, **gamepad**, **F11 fullscreen**, and **persistent settings**.
+`scripts/package.ps1` produces a self-contained **portable folder** (exe + the bundled DXC
+DLLs + README/CREDITS) that runs on any Windows 10/11 machine with no SDK — unzip, run
+`RUN.cmd`. See the **[User Guide](docs/USER_GUIDE.md)** to play and the
+**[Design & Architecture](docs/DESIGN.md)** doc for how it all works.
 
 Everything is procedural — no asset files; geometry, materials, audio, and lighting
 are all generated from a seed at runtime. Highlights:
