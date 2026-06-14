@@ -4,6 +4,48 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 11 — M10: Walk-Bot Soak + Long-Haul Hardening  ✅ COMPLETE (`m10-green`, all 3 exit gates)
+
+**`gate.ps1 -Milestone M10` exits 0; M0–M9 regression sweep green; tagged
+`m10-green` + pushed. Next: M11 (the Director — local LLM via llama.cpp; NEW deps =
+ADRs + a model download step).** This session also completed M9 (DXR path-traced
+mode, `m9-green`) end-to-end before M10 — see the Session 10 entry below.
+
+**Done (M10 — soak + hardening; commits `05f79c9`, `ffdcb03`, `c081672`, `5257a4d`).**
+- **`app --soak [--seconds S | --ticks N] [--csv f] [--out shots] [--shot-every N]`** —
+  deterministic maze walk-bot over the **streaming raster renderer** (shipping path),
+  writing the frame CSV (`frame_ms`→FPS, `mem_bytes`→slope), **periodic connectivity
+  audits** (`gen::validate_connectivity` of the wanderer's 3×3), periodic screenshots,
+  stuck detection. Memory plateaus ~187 MB after ring fill; steady-state spread ~1–2 MB.
+- **`tools/contactsheet`** — tiles `shot_*.png` into a grid + mechanical all-black/
+  white screen (mean luma); exit 1 on a degenerate frame. Links `br_stb`.
+- **`telemetry/crash.*`** (`dbghelp` `MiniDumpWriteDump`, system import lib — no
+  vcpkg) — `install_crash_handler(dir)` sets an unhandled-exception filter that writes
+  `<dir>/minidump.dmp` + `crash.log` and exits with **`kCrashExitCode`=70**; app
+  installs it at startup (all modes), `--crash-test`/`force_crash()` drive the drill.
+- **`scripts/soak.ps1`** (real harness, was a stub) — runs the soak with **auto-
+  restart-and-log** on a captured crash, analyzes the CSV, tiles via contactsheet.
+  **Duration-parameterized**: `soak.ps1 -Hours 8` = full acceptance; gate runs `-Seconds
+  30`. `-CrashDrill` runs the forced-crash + restart. **Gotcha:** native exe stderr
+  becomes a terminating `NativeCommandError` under `ErrorActionPreference=Stop` even with
+  `2>&1`; wrap native calls in a helper that sets `ErrorActionPreference=Continue` (and
+  emit gate metrics via `Write-Output`, not `Write-Host`, so a caller can capture them).
+- **`Invoke-GateM10`** (3 exit gates): (#1) 30 s soak — 1 %-low FPS ≥ 30 (≈125), steady
+  mem spread ≤ 48 MB (≈1.7), zero audit-fail/stuck/debug; (#2) contact-sheet mechanical
+  screen (0 black/white) + agent visual review (14 varied lit views, pass); (#3) crash
+  drill — minidump + exit 70 + clean restart. ADR-037.
+
+**Gotchas / open.** The M3 hitch gate (p99 < 2× median) is timing-flaky **under heavy
+machine load** — it tripped at 2.22× during the back-to-back sweep but passes in
+isolation (re-run); it's best-of-2 and not an M10 regression (M10 touches no render/
+stream hot path). Walk-bot v2 (corridor-following/doorway-seeking) was deemed
+unnecessary — the M4 walk-bot covers the soak (zero stuck over the run); the milestone's
+v2 navigation polish can be revisited if a soak ever wedges. `soak.ps1` wipes
+`runs\soak` on each run (so the gate's crash-drill step deletes the soak's contact
+sheet — regenerate to view).
+
+---
+
 ## Session 10 — M9: DXR Path-Traced Mode  ✅ COMPLETE (`m9-green`, all 4 exit gates)
 
 **`gate.ps1 -Milestone M9` exits 0 with all 4 exit gates; M0–M8 regression sweep

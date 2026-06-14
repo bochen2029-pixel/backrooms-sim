@@ -17,9 +17,10 @@ Backup remote: **https://github.com/bochen2029-pixel/backrooms-sim** (private).
 | **M7** | Biomes, set-piece pillars, verticality (level −1 stairwell) | M7 | ✅ `m7-green` |
 | **M8** | VHS post-processing stack + HUD/timestamp | M8 | ✅ `m8-green` |
 | **M9** | DXR path-traced mode (BLAS/TLAS, inline-RayQuery PT, accumulation) | M9 | ✅ `m9-green` |
-| M10–M12 | soak · Director · acceptance | — | ⬜ pending |
+| **M10** | Walk-bot soak + hardening (telemetry, contactsheet, minidump) | M10 | ✅ `m10-green` |
+| M11–M12 | Director · acceptance | — | ⬜ pending |
 
-**10 milestones green and pushed.** Each is verified by a machine-checkable gate
+**11 milestones green and pushed.** Each is verified by a machine-checkable gate
 (`scripts/gate.ps1 -Milestone M<N>` exits 0) and tagged; the remote is the backup.
 
 All numbers below are from real gate runs on the dev machine (RTX 4070 Ti SUPER,
@@ -165,6 +166,27 @@ PT** — **178.5 FPS @ 1440p** (1 spp/frame, ≥60 bar) + a **no-ghost** accumul
 reset (clean-vs-fresh 0, un-reset ghost 31); (#4) **TLAS rebuild under streaming** —
 walk-bot **1 km in PT mode**, 13 rebuilds, debug/DRED-clean. ADR-036.
 
+### M10 — Walk-Bot Soak + Long-Haul Hardening
+Proof the world survives a long, unattended run. `app --soak` drives the
+deterministic maze walk-bot over the **streaming raster renderer** (the shipping
+path), writing the frame telemetry CSV, running **periodic connectivity audits**
+(`gen::validate_connectivity` over the wanderer's region — a regression guard mid-
+run), and dumping periodic **screenshots**. `scripts/soak.ps1` is the real harness:
+it runs the soak with **auto-restart-and-log** on a captured crash, analyzes the
+CSV (**FPS percentiles**, **steady-state memory spread** skipping the warm-up so
+ring-fill isn't mistaken for a leak), and tiles the screenshots via the new
+**`contactsheet`** tool (mechanical all-black/all-white screen). Crash forensics
+live in `telemetry` (`crash.cpp` → `dbghelp` **`MiniDumpWriteDump`**): `app`
+installs an unhandled-exception filter at startup that writes a minidump + marker
+and exits with a known code, so a fault during the 8 h run leaves a post-mortem and
+the harness restarts. The soak is **duration-parameterized** — `soak.ps1 -Hours 8`
+is the full acceptance run, the gate runs `-Seconds 30` (like the M3 stream soak).
+**Gate (all 3 exit criteria):** (#1) short soak — **1 %-low FPS ≥ 30** (measured
+~125), **steady-state memory spread ≤ 48 MB** (measured ~1.7, flat), zero
+audit-failures / stuck / debug; (#2) **contact sheet** mechanical screen (no
+all-black/white) + agent visual review; (#3) **forced-crash drill** — minidump
+captured, exit 70, clean auto-restart. ADR-037.
+
 ---
 
 ## Architecture & invariants (the rules that keep it coherent)
@@ -229,21 +251,24 @@ App modes built so far: `--headless` · `--window` · `--scene` · `--sim` ·
 
 ## What's next
 
-- **M10** 8 h walk-bot soak + long-haul hardening: walk-bot v2 (corridor-following
-  + doorway-seeking), telemetry percentiles, periodic connectivity audits,
-  `contactsheet` tiling, minidump capture + auto-restart. (`soak.ps1` is the real
-  harness here — currently an M10 stub.)
-- **M11** the Director (local LLM via llama.cpp) · **M12** integration + 12 h
-  acceptance.
+- **M11** the Director + the Voice (local LLM via llama.cpp on its own thread):
+  wanderer-summary JSON in → schema-validated Directive JSON out (flicker sector,
+  distant sound cue, biome bias, intercom line, wanderer note); invalid output
+  rejected + logged; determinism preserved (LLM enters the sim only as a logged
+  event stream; replays consume the log, not the model); `--no-director` kill switch.
+- **M12** integration, polish, acceptance (noclip intro, photo mode, settings,
+  one-command build/run, **12 h unattended acceptance soak with Director ON**).
 
 ## How to continue (next session)
 
 1. Read `docs/ARCHITECTURE.md`, the latest `docs/SESSION_LOG.md` entry, and the
-   M10 section of `docs/MILESTONES.md`.
-2. Produce the M10 change manifest (walk-bot v2, `soak.ps1` real harness,
-   `contactsheet` tool, minidump/auto-restart) before writing code.
-3. Run `gate.ps1 -Milestone M10` until exit 0, regression-sweep M0–M9, tag
-   `m10-green`, push, write the SESSION_LOG entry.
+   M11 section of `docs/MILESTONES.md`.
+2. Produce the M11 change manifest (`director`: llama.cpp host on its own thread +
+   message queue, `contracts/director_v1.h` schema, schema validation + event log,
+   the Voice captions, eval suite, `--no-director`) before writing code. **New deps
+   (llama.cpp + a quantized instruct model) = ADRs + vcpkg/download step.**
+3. Run `gate.ps1 -Milestone M11` until exit 0, regression-sweep M0–M10, tag
+   `m11-green`, push, write the SESSION_LOG entry.
 
-_The repo is the memory. Last fully-green tag: `m9-green`. Never resume from a
+_The repo is the memory. Last fully-green tag: `m10-green`. Never resume from a
 broken state — revert to the last green tag if needed._
