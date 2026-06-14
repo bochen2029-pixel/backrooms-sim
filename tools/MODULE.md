@@ -14,5 +14,7 @@
 (stb_image/stb_image_write) for image I/O. `wavcheck` links `audio` for the
 header-only `audio/wav.h` reader; its FFT is self-contained.
 
-**Status:** M6 — `hashdiff`, `goldgen`, `wavcheck` implemented; `contactsheet`
-arrives at M10.
+**Status:** M10 — `hashdiff`, `goldgen`, `wavcheck`, `contactsheet` implemented
+(`contactsheet <shots_dir> <out.png>`: tiles `shot_*.png` into a grid + flags
+all-black/all-white frames by mean luma; exit 1 on a degenerate frame). The
+`walkbot` wanderer lives inline in `app` (`--walkbot`/`--soak`), not a separate tool.

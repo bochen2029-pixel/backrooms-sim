@@ -18,3 +18,7 @@ target_link_libraries(goldgen PRIVATE backrooms_flags br_stb core)
 # wavcheck (M6): WAV spectral gate. Uses the header-only audio/wav.h reader.
 add_executable(wavcheck wavcheck/main.cpp)
 target_link_libraries(wavcheck PRIVATE backrooms_flags audio)
+
+# contactsheet (M10): tile soak screenshots + mechanical all-black/white screen.
+add_executable(contactsheet contactsheet/main.cpp)
+target_link_libraries(contactsheet PRIVATE backrooms_flags br_stb)
