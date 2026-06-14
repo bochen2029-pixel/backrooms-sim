@@ -39,6 +39,7 @@
 #include "render_dxr/dxr.h"
 #include "director/director.h"
 #include "director/keel_client.h"
+#include "director/host.h"
 #include "audio/synth.h"
 #include "audio/room_probe.h"
 #include "audio/wav.h"
@@ -59,11 +60,12 @@ struct Options {
     bool biomeat = false, descend = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
     bool soak = false, crash_test = false, director_probe = false;
+    bool director_record = false, director_replay = false;
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
     uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0, spp = 256;
     uint32_t shot_every = 600;   // soak: write a screenshot every N rendered frames
     uint64_t seed = 1u;
-    std::string out, record, replay, hashlog, csv, audiolog, crash_dir, director_url;
+    std::string out, record, replay, hashlog, csv, audiolog, crash_dir, director_url, director_log;
 };
 
 int usage() {
@@ -116,7 +118,10 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--crash-test") == 0) o.crash_test = true;
         else if (std::strcmp(a, "--crash-dir") == 0) { if (!str(o.crash_dir)) return false; }
         else if (std::strcmp(a, "--director-probe") == 0) o.director_probe = true;
+        else if (std::strcmp(a, "--director-record") == 0) o.director_record = true;
+        else if (std::strcmp(a, "--director-replay") == 0) o.director_replay = true;
         else if (std::strcmp(a, "--director-url") == 0) { if (!str(o.director_url)) return false; }
+        else if (std::strcmp(a, "--director-log") == 0) { if (!str(o.director_log)) return false; }
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -887,6 +892,120 @@ struct MazeWalker {
     }
 };
 
+// ----- M11 Director record/replay: prove Gate 4 (replay bit-identical, model off) -
+namespace {
+
+// Deterministic 64-bit fold (integer-only -> reproducible across record + replay).
+uint64_t fold_u64(uint64_t h, uint64_t x) {
+    x *= 0xff51afd7ed558ccdull;
+    x ^= x >> 33;
+    h ^= x + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    return h;
+}
+uint64_t fold_bytes(uint64_t h, const void* p, size_t n) {
+    const uint8_t* b = static_cast<const uint8_t*>(p);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) { uint64_t w; std::memcpy(&w, b + i, 8); h = fold_u64(h, w); }
+    if (i < n) { uint64_t tail = 0; for (size_t j = 0; i < n; ++i, ++j) tail |= static_cast<uint64_t>(b[i]) << (8 * j); h = fold_u64(h, tail); }
+    return h;
+}
+
+void parse_host_port(const std::string& url, std::string& host, int& port) {
+    host = "127.0.0.1"; port = 7071;
+    if (url.empty()) return;
+    const size_t colon = url.rfind(':');
+    if (colon != std::string::npos) { host = url.substr(0, colon); port = std::atoi(url.c_str() + colon + 1); }
+    else { host = url; }
+}
+
+// Deterministic WandererSummary from the (already-hashed) WorldState (the sim is the
+// oracle). The summary feeds only the Director prompt — it never re-enters the sim.
+contracts::WandererSummary build_summary(const br::core::WorldState& s, uint64_t seed) {
+    contracts::WandererSummary sum{};
+    sum.tick = s.tick;
+    sum.world_seed = seed;
+    sum.level = 0;
+    const contracts::ChunkKey k = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+    sum.chunk_cx = k.cx; sum.chunk_cz = k.cz;
+    sum.biome = static_cast<int32_t>(br::gen::biome_at(seed, 0, k.cx, k.cz));
+    sum.distance_m = s.odometer;
+    sum.dwell_seconds = 0.0f;
+    sum.route_loops = 0;
+    sum.location_hash = static_cast<uint64_t>(k.cx) * 0x9E3779B97F4A7C15ull ^ static_cast<uint64_t>(k.cz);
+    return sum;
+}
+
+}  // namespace
+
+// Record: walk the maze with the Director ON (live KEEL), capturing each validated
+// directive into the event log at its sim tick. Prints the combined run hash =
+// per-tick world_state_hash folded with the applied director-event bytes.
+int run_director_record(const Options& o) {
+    std::string host; int port; parse_host_port(o.director_url, host, port);
+    const uint64_t N = (o.ticks > 0) ? o.ticks : 600u;
+    const uint64_t kSubmitEvery = 120u;  // ~1 s of sim between summaries
+
+    MazeWalker w(o.seed);
+    std::vector<contracts::DirectorEvent> events;
+    uint64_t H = 1469598103934665603ull;  // FNV-1a offset basis
+    uint64_t submits = 0;
+    for (uint64_t t = 0; t < N; ++t) {
+        w.step();
+        H = fold_u64(H, br::core::world_state_hash(w.s));
+        if (w.s.tick % kSubmitEvery == 0) {
+            ++submits;
+            const contracts::WandererSummary sum = build_summary(w.s, o.seed);
+            const std::optional<contracts::Directive> d = br::director::request_directive(host, port, sum);
+            if (d) {
+                contracts::DirectorEvent ev{};
+                ev.effective_tick = w.s.tick;
+                ev.directive = *d;
+                events.push_back(ev);
+                H = fold_bytes(H, &events.back(), sizeof(contracts::DirectorEvent));  // fold the exact bytes written
+            }
+        }
+    }
+    if (o.director_log.empty()) { std::fprintf(stderr, "record: --director-log <path> required\n"); return 2; }
+    if (!br::director::write_director_log(o.director_log, o.seed, N, events)) {
+        std::fprintf(stderr, "record: failed to write %s\n", o.director_log.c_str()); return 1;
+    }
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("ticks: %llu\n", static_cast<unsigned long long>(N));
+    std::printf("submits: %llu\n", static_cast<unsigned long long>(submits));
+    std::printf("director_events: %llu\n", static_cast<unsigned long long>(events.size()));
+    std::printf("combined_hash: %016llx\n", static_cast<unsigned long long>(H));
+    return 0;
+}
+
+// Replay: re-walk the SAME maze (seed + tick count from the log), applying the
+// recorded directives at their logged ticks with KEEL never contacted. The combined
+// run hash must equal the recorded run's -> the model lives only in the log (Gate 4).
+int run_director_replay(const Options& o) {
+    if (o.director_log.empty()) { std::fprintf(stderr, "replay: --director-log <path> required\n"); return 2; }
+    uint64_t seed = 0, N = 0;
+    std::vector<contracts::DirectorEvent> events;
+    if (!br::director::read_director_log(o.director_log, seed, N, events)) {
+        std::fprintf(stderr, "replay: failed to read %s\n", o.director_log.c_str()); return 1;
+    }
+    MazeWalker w(seed);
+    uint64_t H = 1469598103934665603ull;
+    size_t i = 0;
+    for (uint64_t t = 0; t < N; ++t) {
+        w.step();
+        H = fold_u64(H, br::core::world_state_hash(w.s));
+        while (i < events.size() && events[i].effective_tick == w.s.tick) {
+            H = fold_bytes(H, &events[i], sizeof(contracts::DirectorEvent));
+            ++i;
+        }
+    }
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(seed));
+    std::printf("ticks: %llu\n", static_cast<unsigned long long>(N));
+    std::printf("director_events: %llu\n", static_cast<unsigned long long>(events.size()));
+    std::printf("events_applied: %llu\n", static_cast<unsigned long long>(i));
+    std::printf("combined_hash: %016llx\n", static_cast<unsigned long long>(H));
+    return 0;
+}
+
 // ----- M6 offline audio: replay the maze walk, synth the mix, write WAV -------
 int run_render_wav(const Options& o) {
     const uint32_t sr = contracts::kAudioSampleRate;
@@ -1510,6 +1629,8 @@ int main(int argc, char** argv) {
     if (o.dxr_walk)   return run_dxr_walk(o);
     if (o.dxr)        return run_dxr(o);
     if (o.director_probe) return run_director_probe(o);
+    if (o.director_record) return run_director_record(o);
+    if (o.director_replay) return run_director_replay(o);
     if (o.soak)       return run_soak(o);
     if (o.sim)     return run_sim(o);
     if (o.walkbot) return run_walkbot(o);

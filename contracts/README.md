@@ -22,4 +22,7 @@ Headers are consumed via the `contracts` INTERFACE target as
 `ChunkVertex` carries `uv` + `material` (kMat* ids), and the fluorescent ceiling
 grid is shared via `is_fluorescent_cell` / `fluorescent_light_pos` so `gen`'s
 tiles and the renderer's forward lights agree without a separate lights channel.
-`replay_v1` gains the Event Log layer later.
+`replay_v1` gained the **Director Event Log** in M11 (additive within v1): a
+`DirectorLogHeader` + `DirectorEvent` records recorded live and consumed on replay
+with the model offline — the channel through which a stochastic LLM stays INV-1
+bit-exact (proven: record vs replay combined-hash identical).

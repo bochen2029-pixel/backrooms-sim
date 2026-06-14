@@ -20,13 +20,20 @@ dependency-free JSON reader. The sim's only third-party deps stay **Catch2 + stb
 - `director/keel_client.h` (M11) — `keel_complete(host, port, prompt)` → `KeelResponse`
   (WinHTTP POST to the KEEL sidecar's OpenAI egress, forcing local tier; never throws,
   graceful no-op on failure).
+- `director/host.h` (M11) — `request_directive(host, port, summary)` (sync:
+  render_prompt → keel_complete → validate; nullopt on unreachable/off-schema) +
+  `write_director_log` / `read_director_log` (the recorded directive stream).
 - `director/json.h` — minimal dependency-free JSON reader + `escape` (directive +
   KEEL envelope).
 
 **Contracts:** `contracts/director_v1.h` (`WandererSummary` + `Directive` +
-`DirectorEvent`).
+`DirectorEvent`); `replay_v1.h`'s Director Event Log (`DirectorLogHeader`).
 
-**Status:** M11 phase b — contract + validator + JSON reader (10 unit tests) + the
-**live KEEL client**. `app --director-probe` validated end-to-end against the sidecar:
-WandererSummary → local Qwen3.5-9B → schema-valid Directive (e.g. `{"type":"sound",
-…}`), tier local, $0. Async sim host + The Voice + note cache + eval suite next.
+**Status:** M11 phase c1 — contract + validator + live KEEL client + the **Director
+Event Log + record/replay determinism (Gate 4, PROVEN)**. `app --director-record`
+walks with the Director ON (live KEEL) and logs each validated directive at its tick;
+`--director-replay` re-walks with the model OFFLINE and reproduces the run **bit-
+identically** (combined per-tick world_state_hash ⊕ director-event bytes — measured
+identical across seeds; a 0-event run differs, proving the stream folds in; an
+unreachable KEEL is a graceful no-op). Async sim host + The Voice + note cache +
+`--no-director` + eval suite next.

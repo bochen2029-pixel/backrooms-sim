@@ -70,6 +70,12 @@ errors to process exit codes for the gate scripts (ARCHITECTURE.md §7).
   representative WandererSummary → KEEL sidecar (default `127.0.0.1:7071`) → prints
   the KEEL routing (tier/cost/route), the raw directive JSON, and the validator
   verdict. The end-to-end Director wire; live-validates the sidecar.
+- `--director-record --director-log f [--seed S] [--ticks N] [--director-url u]`
+  (M11) — walks the maze with the Director ON (live KEEL), recording each validated
+  directive into the event log at its tick; prints the combined run hash.
+- `--director-replay --director-log f` (M11) — re-walks the SAME run (seed + ticks
+  from the log) with KEEL offline, applying the recorded directives; prints the
+  combined run hash. Record == replay proves Gate 4 (replay bit-identical, model off).
 
 **Planned.** `--no-director` + the in-loop async Director (M11c), `config.toml` +
 flag/config mirroring (M12), noclip intro + photo mode (M12).

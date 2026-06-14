@@ -35,4 +35,24 @@ struct ReplayHeader {
     uint64_t tick_count;   // number of InputCommand records that follow
 };
 
+// --- Event Log: the Director event stream (M11) ----------------------------
+// The mechanism that lets a stochastic LLM live inside a bit-exact engine. During
+// a live run the Director's validated Directives are RECORDED here with the sim
+// tick at which each became active; a replay consumes this log with the model
+// fully offline and reproduces the run bit-identically (INV-1). The directives are
+// presentation-layer only, so they never perturb the WorldState hash — the model's
+// output reaches the sim ONLY as these logged events. Additive within replay v1: a
+// separate on-disk record (DirectorLogHeader + `event_count` `DirectorEvent`
+// records from director_v1.h, POD host-endian), written alongside the input replay.
+constexpr uint32_t kDirectorLogMagic = 0x4C444252u;   // 'RBDL' (Backrooms Director Log)
+constexpr uint32_t kDirectorLogVersion = 1u;
+
+struct DirectorLogHeader {
+    uint32_t magic;        // kDirectorLogMagic
+    uint32_t version;      // kDirectorLogVersion
+    uint64_t world_seed;   // WorldSeed the run was recorded against
+    uint64_t run_ticks;    // total sim ticks the recorded run covered
+    uint64_t event_count;  // number of DirectorEvent records that follow
+};
+
 }  // namespace br::contracts
