@@ -4,6 +4,66 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 12 — M11: The Director (via KEEL sidecar)  🟡 IN PROGRESS (phases 11a + 11b done — live end-to-end)
+
+**Last green tag: `m10-green`; phases 11a + 11b committed on top (additive, ctest
+51/51). Start at phase 11c (async in-loop host + event log + The Voice + note cache
++ `--no-director`).** **Decision (ADR-038): the Director routes through the KEEL
+sidecar's OpenAI HTTP egress, NOT embedded llama.cpp** — a dependency *removal*
+(Catch2 + stb stay the only third-party libs; winhttp is a system lib). KEEL is the
+operator's sovereign LLM substrate and names Backrooms as its first cell.
+
+**The wire (verified live).** `POST http://127.0.0.1:7071/v1/chat/completions` with
+`{"messages":[{"role":"user","content":"<prompt>"}],"sovereign":true,"kind":
+"scaffolding","think":false}` → KEEL forces local Qwen3.5-9B ($0, no cloud egress,
+no escalation, single-shot). Directive JSON = `choices[0].message.content`; routing
+under `"keel":{tier,cost,route,...}`. **Endpoint is a sidecar at `C:\keel-sidecar-
+7071\`** (relaunch: `start.cmd`) — a local-only copy of `keel-serve` reusing the
+running llama-server. **Use :7071, NEVER :7070** (KEEL's own dev endpoint, volatile).
+**Do not touch `C:\KEEL` (read-only).**
+
+**Done (phase 11a — contract + validator; commit `5ebe664`).** `contracts/
+director_v1.h` (WandererSummary, Directive + DirectiveKind + bounds, DirectorEvent).
+**Directives are presentation-layer only in M11** — they reach the sim solely as
+recorded Event-Log entries at a deterministic `effective_tick` (INV-5) and never
+touch the WorldState hash or generation, so INV-1/INV-2 stay provably intact;
+replays consume the recorded log with the model offline → bit-identical. `director/
+json.{h,cpp}` minimal dependency-free JSON reader (+`escape`). `validate_directive`
+(schema + lint: bounded enums/ranges, sanitised printable-ASCII captions; pure/
+total). 10 unit tests.
+
+**Done (phase 11b — live KEEL client; commit `17fdd04`).** `director/keel_client.
+{h,cpp}` (WinHTTP POST, RAII handles, never throws → graceful no-op on failure).
+`render_prompt(summary)` (the directive-schema instruction). `app --director-probe
+[--director-url host:port]`. **Live-validated: 5/5 sampled seeds → schema-valid,
+on-theme directives** (e.g. `{"type":"sound","intensity":0.4,"detail":"hum of
+fluorescent lights flickering in unison"}`; biome_bias with correct numeric biome),
+tier local, $0.
+
+**Remaining for M11 (start at phase 11c).**
+- **11c — async in-loop host + event log + The Voice + kill switch.** A Director
+  thread + queue; derive WandererSummary deterministically from sim state (odometer,
+  biome, dwell, route loops, location hash); validated directives append to a
+  recorded **director event log** (extend `replay_v1`) with a deterministic
+  `effective_tick`; presentation layers (render/audio/HUD) consume `DirectorState`;
+  **The Voice** = intercom/note captions via the M8 HUD; **note cache** per
+  `location_hash`; **`--no-director`** (no thread, empty stream). The Director NEVER
+  writes WorldState.
+- **11d — eval suite + gates + tag.** Eval (100+ scenarios → schema-valid %, lint,
+  tone rubric — likely an LLM-judge via KEEL frontier OR heuristic); gates: replay
+  bit-identical with model OFFLINE (record+replay incl. director stream); frame-time
+  identical gen-on vs `--no-director` (async isolation); p95 directive latency < 5 s;
+  `--no-director` passes the M10 soak. `Invoke-GateM11` + tag `m11-green`.
+
+**Gotchas.** GBNF constrained decode is NOT exposed over KEEL's HTTP egress yet
+(`grammar:None` in keel-serve) → validate **post-hoc** (reject+log invalid), which
+is already the design. KEEL is mid-Stage-2; its `:7070` cycles — the `:7071` sidecar
+is independent. The Director's HTTP call is record-time only; the determinism gate
+hinges on the **event-log replay** (11c), so design `replay_v1`'s director-log
+extension carefully (logged `{effective_tick, Directive}`, consumed on replay).
+
+---
+
 ## Session 11 — M10: Walk-Bot Soak + Long-Haul Hardening  ✅ COMPLETE (`m10-green`, all 3 exit gates)
 
 **`gate.ps1 -Milestone M10` exits 0; M0–M9 regression sweep green; tagged
