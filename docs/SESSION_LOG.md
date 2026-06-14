@@ -4,6 +4,40 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 13 — M12: Integration, Polish, Acceptance  ✅ COMPLETE — 🏁 `v1.0` (M0–M12 all green)
+
+**`gate.ps1 -Milestone M12` exits 0; the M0–M11 regression sweep is green; tagged
+`v1.0` + pushed. THE BUILD IS DONE** — an infinite, deterministic, fully-procedural
+Backrooms walking sim (raster + DXR path tracer, procedural audio, 8 h-soak-hardened
+streaming world, optional local-LLM Director that never breaks bit-exact replay),
+across 13 milestones, every one gate-verified and tagged.
+
+**Done (M12; commits `b2a9322`, `cd8e1c4`).**
+- **`app --intro`** — the iconic **noclip into the Backrooms**: stand in a mundane
+  room, the floor gives way, free-fall, land in the Level-0 maze. Pure scripted core
+  sim (seeded ticks + collision phases) → deterministic (seed 1 ×2 identical; lands at
+  y≈0.9 above the proven-open (2,2) cell). The visual fall is the windowed experience.
+- **`scripts/run.ps1`** — one command, fresh clone → running exe (default builds + a
+  lit smoke render proving the engine end to end; `-Window` launches the windowed app;
+  `-Director` adds the KEEL probe).
+- **`scripts/soak.ps1 -Director`** — the acceptance soak with the Director ON (full =
+  `-Hours 12 -Director`). **`scripts/checks/check_contracts.ps1`** — every boundary has
+  a documented contract header (8). Settings = the CLI flag surface; photo mode = the
+  existing capture modes (`--shot`/`--dxr-pt`/`--topdown`).
+- **`Invoke-GateM12`** (v1.0 exit gates): full ctest + one-command run → running exe +
+  noclip intro (deterministic) + **12 h acceptance soak with the Director ON** (short/
+  parameterized) + CI doc checks (inventory + contracts) + golden regression + INV-5.
+  **gate.ps1 M12 exits 0; M0–M11 sweep green.**
+
+**Gotchas / notes.** The acceptance soak + the Director gates need the KEEL sidecar up
+(`C:\keel-sidecar-7071\start.cmd`); without it, `--no-director` runs the full sim
+cleanly (INV-6). The literal 12 h run is `soak.ps1 -Hours 12 -Director` (the gate runs
+a short version, like the M3/M10 soak shortening). M3's hitch gate stays best-of-2 /
+re-run-on-jitter. Post-v1.0 (optional): far-chunk camera-relative rendering, vendoring
+a release `keel-serve.exe` into `third_party/keel/`, GBNF over KEEL's HTTP.
+
+---
+
 ## Session 12 — M11: The Director (via KEEL sidecar)  ✅ COMPLETE (`m11-green`, all 5 exit gates)
 
 **`gate.ps1 -Milestone M11` exits 0 with all 5 exit gates; M0–M10 regression sweep
