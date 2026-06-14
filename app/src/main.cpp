@@ -34,6 +34,7 @@
 #include "gen/layout.h"
 #include "stream/stream_manager.h"
 #include "telemetry/csv.h"
+#include "telemetry/crash.h"
 #include "render_d3d12/renderer.h"
 #include "render_dxr/dxr.h"
 #include "audio/synth.h"
@@ -55,12 +56,12 @@ struct Options {
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
     bool biomeat = false, descend = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
-    bool soak = false;
+    bool soak = false, crash_test = false;
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
     uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0, spp = 256;
     uint32_t shot_every = 600;   // soak: write a screenshot every N rendered frames
     uint64_t seed = 1u;
-    std::string out, record, replay, hashlog, csv, audiolog;
+    std::string out, record, replay, hashlog, csv, audiolog, crash_dir;
 };
 
 int usage() {
@@ -110,6 +111,8 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--dxr-ghost") == 0) o.dxr_ghost = true;
         else if (std::strcmp(a, "--dxr-walk") == 0) o.dxr_walk = true;
         else if (std::strcmp(a, "--soak") == 0) o.soak = true;
+        else if (std::strcmp(a, "--crash-test") == 0) o.crash_test = true;
+        else if (std::strcmp(a, "--crash-dir") == 0) { if (!str(o.crash_dir)) return false; }
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -1429,6 +1432,15 @@ int main(int argc, char** argv) {
     TimerPeriodGuard timer_period;
     Options o;
     if (!parse(argc, argv, o)) return usage();
+
+    // M10: any fatal fault leaves a post-mortem minidump the soak harness detects.
+    br::telemetry::install_crash_handler(o.crash_dir);
+    if (o.crash_test) {
+        std::fprintf(stderr, "crash-test: forcing a fault (minidump -> %s)\n",
+                     o.crash_dir.empty() ? "runs\\crash" : o.crash_dir.c_str());
+        std::fflush(stderr);
+        br::telemetry::force_crash();  // [[noreturn]]
+    }
 
     if (o.version) { std::printf("%s\n", br::core::core_version()); return 0; }
     if (o.render_wav) return run_render_wav(o);
