@@ -4,12 +4,29 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
-## Session 10 — M9: DXR Path-Traced Mode  🟡 IN PROGRESS (phases 1, 2a, 2b done — depth gate #1 GREEN)
+## Session 10 — M9: DXR Path-Traced Mode  🟡 IN PROGRESS (phases 1–3 done — gates #1 + #2 GREEN)
 
-**Last green tag: `m8-green`; phases 1a/1b/2a/2b committed on top (additive — the M9
-gate now enforces exit gate #1, depth compare). Start at phase 3 (PT lighting +
-converged RMSE golden).** The DXR path tracer traces the real streamed geometry and
-its primary-hit depth matches the rasteriser per pixel (gate #1), debug-clean.
+**Last green tag: `m8-green`; phases 1a/1b/2a/2b/3a/3b committed on top (additive —
+the M9 gate now enforces exit gates #1 depth-compare + #2 converged PT golden).
+Start at phase 4 (interactive PT accum-reset + ≥60 FPS = gate #3; TLAS rebuild under
+streaming + walk-bot 1 km PT = gate #4).** Raster stays default + fallback (INV-6).
+
+**Done (phase 3 — path-traced lighting + converged golden, gates #1 + #2 GREEN;
+commits `f358f7d`, `91276d0`).** Inline DXR 1.1 **`RayQuery`** (SM 6.5) path tracer:
+`build_scene` concatenates resident chunk verts into one `StructuredBuffer` (shadeVb)
+and tags each TLAS instance's start vertex offset in **InstanceID**, so the shader
+reads per-hit normal/material via `(InstanceID + 3·PrimitiveIndex)`. `render_pt(cam,
+samples, seed)` accumulates spp in **RGBA32F** across batched dispatches (≤64
+spp/dispatch, under the GPU watchdog) → Reinhard resolve to RGBA + NDC depth.
+Lighting = emissive fluorescent grid as area lights (analytic **NEE + shadow rays**
+from the `is_fluorescent_cell` formula, no light list), one cosine **diffuse-GI
+bounce**, small **ambient floor**, seeded per-(pixel,sample) PCG RNG. `dxc` gained a
+target-profile param (default `lib_6_3`; PT uses `lib_6_5`). `app --dxr-pt --pose P
+--spp N`. Recursive `render_scene` (gate #1) untouched. **Goldens** `goldens/m9/
+pt_pose{1,3,4}.png` (1024 spp, goldgen). **Gate #2:** 1024 spp × 3 poses,
+deterministic ×2, mean-abs-diff vs golden < 1.0, luma band, debug-clean. ADR-036.
+**Measured: deterministic (bit-identical ×2, single + multi-batch), ~1.06 s/pose,
+diff 0.0, debug/DRED clean.**
 
 **Done (phase 2b — cross-renderer depth compare, exit gate #1 GREEN; commit
 `15427d3`).** `DxrRenderer::render_scene` writes **NDC depth** (R32_FLOAT UAV at
