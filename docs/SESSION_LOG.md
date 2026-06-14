@@ -4,6 +4,44 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 17 — M16: Settings, persistence, windowing, gamepad  ✅ COMPLETE — 🏷️ `m16-green`
+
+**`gate.ps1 -Milestone M16` exits 0; tagged `m16-green` + pushed. The game remembers and
+adapts.** Settings now persist across launches, resolution/fullscreen actually change, and a
+controller works. One milestone (M17, packaging) from `v2.0`.
+
+**Done (M16; commit `<wip>` + gate; ADR-042).**
+- **`app/config.h`** — a `key=value` config with **pure** `serialize`/`parse`/`sanitize`
+  (header-only), so the write→read round-trip is a unit test (`test_config.cpp`, 4 cases).
+  Unknown keys ignored, missing keys keep defaults (forward-compatible); `sanitize` clamps a
+  hand-edited file. File I/O is a thin inline wrapper. Saved next to the exe (`backrooms.cfg`).
+- **`app/gamepad.h`** — **pure** `gamepad_to_input(GamepadState, look_scale) → InputCommand`
+  with a radial dead zone (`test_gamepad.cpp`, 4 cases). The live Win32 XInput poll just fills
+  `GamepadState`, so a pad drives the **identical deterministic tick path** as keyboard/replay.
+  XInput is a Windows **system import lib** (added to the app link line, no vcpkg).
+- **`render_d3d12::resize(w,h)`** — waits GPU idle, `ResizeBuffers`, rebuilds RTVs + depth +
+  (lazily) the overlay pipeline. Fullscreen is **borderless** (WS_POPUP cover-the-monitor +
+  swapchain resize) — no DXGI exclusive mode, so no mode-set glitches.
+- **`--game` (M16):** loads/saves the config (resolution, fullscreen, volumes, mouse-sens,
+  seed all persist), **F11** toggles fullscreen, **XInput** drives the walk, mouse sensitivity
+  comes from settings. **`--config-check`** (write→read→apply at the config resolution) and
+  **`--resize-smoke`** (resolutions + borderless-fullscreen toggle) are the headless gate modes.
+- **`Invoke-GateM16`** — ctest (`[m16]`) + `--config-check` (round-trips + renders at config
+  res, debug-clean) + `--resize-smoke` (6 changes debug-clean) + `--game --config` (persists,
+  debug-clean) + M5/M15 golden regression + INV-5/inventory. **gate.ps1 M16 exits 0.**
+
+**Gotchas / notes.** Determinism untouched — config/gamepad/windowing are presentation/input
+mapping; a gamepad emits the same `InputCommand` a key would. Borderless (not exclusive)
+fullscreen keeps alt-tab clean + avoids mode-set debug-layer noise. `--game` writes
+`backrooms.cfg` in the cwd by default → added to `.gitignore`; gate `--game` calls pass an
+explicit `--config` under `runs/`. The renderer `resize` drops the overlay texture (sized to the
+old resolution) so it rebuilds at the new size on the next present.
+
+**Next: M17** — bundle `dxcompiler.dll`/`dxil.dll` beside the exe (no SDK needed), a release
+build config, app icon/version/splash/credits, a portable **`.zip`**, clean-env test → tag `v2.0`.
+
+---
+
 ## Session 16 — M15: Menus + game flow  ✅ COMPLETE — 🏷️ `m15-green`
 
 **`gate.ps1 -Milestone M15` exits 0; tagged `m15-green` + pushed. The game has a front

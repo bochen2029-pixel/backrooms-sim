@@ -39,6 +39,9 @@ renderer (INV-6).
   signature + PSO, fully separate from the VHS post pass (whose `rtvHeap` slot 1 would collide
   with the second back buffer windowed) — so the headless post/readback goldens are untouched.
   The game shell (`app --game`) uses it for menu screens; the reusable HUD-present primitive.
+- `resize` (M16) — windowed: waits the GPU idle, releases the back buffers, `ResizeBuffers`,
+  rebuilds the RTVs + depth + (lazily) the overlay pipeline, for resolution changes and
+  borderless-fullscreen toggles. The HWND style/placement is the app's; this owns the GPU side.
 - `render_topdown` (M4) — headless: orthographic top-down render of a chunk set
   (debug golden of the maze layout); discards ceiling/fluorescent material via a
   root-constant toggle so the M4 layout goldens stay stable under M5.

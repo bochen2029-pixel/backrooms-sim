@@ -100,20 +100,33 @@ typed module errors to process exit codes for the gate scripts (ARCHITECTURE.md 
   **real-time audio** (M14: WASAPI mixer; `--no-audio` / `--master` / `--sfx` to control).
   `--csv` logs per-frame pacing (frame_ms + residency/mem) for the gate; `--seconds N`
   auto-exits (headless-friendly). `scripts/run.ps1 -Window` launches this.
-- `--game [--seed S] [--seconds N] [--width W --height H] [--no-audio]` (M15) — the
-  **windowed game shell**: boots to the main menu and runs the `app/menu.h` state machine
+- `--game [--seed S] [--seconds N] [--width W --height H] [--no-audio] [--config f]` (M15/M16)
+  — the **windowed game shell**: boots to the main menu and runs the `app/menu.h` state machine
   (splash → main menu → play → pause → settings → quit). Menu screens present a CPU overlay
   via `render_d3d12::present_overlay_windowed`; New Game enters the live `--play` walk; Esc
-  pauses. Keyboard nav (arrows/WASD + Enter/Esc). `--seconds N` is the debug-clean gate smoke.
+  pauses. Keyboard nav (arrows/WASD + Enter/Esc), **XInput gamepad**, **F11 fullscreen**. M16:
+  loads/saves a **config** (`--config`, default `backrooms.cfg`) — resolution, fullscreen,
+  volumes, mouse sensitivity, seed all persist. `--seconds N` is the debug-clean gate smoke.
 - `--menu-shot --screen <splash|mainmenu|pause|settings> [--sel N] --out p.png` (M15) — render
   one menu screen to a PNG (deterministic, CPU-only → the menu-render golden).
 - `--menu-smoke` (M15) — composite every menu screen through the GPU (post + HUD path) across
   state changes; reports `debug_error_count` (the "no debug-layer messages across state changes" gate).
+- `--config-check --config f [--width W --height H --master V --sfx V --seed S]` (M16) — write a
+  config from the flags, read it back, and **apply** it to a headless render; prints the
+  round-tripped values + `rendered_width/height` (proves the config drives the engine).
+- `--resize-smoke` (M16) — resize the swapchain across resolutions + a borderless-fullscreen
+  toggle, presenting each; reports `debug_error_count` (the windowing-change smoke).
 
 **The menu / game-state machine (M15).** `app/menu.h` is a pure, header-only
 `menu_step(MenuModel, UiAction) → UiCommand` (no rendering / wall-clock / globals), so the
 front end is unit-tested headlessly with synthetic input. `hud.cpp build_menu_overlay` draws it
-on the existing 5×7 bitmap font. Settings (master/SFX/mouse/Director) are in-memory in M15; M16 persists them.
+on the existing 5×7 bitmap font.
+
+**Settings persistence + input (M16).** `app/config.h` (pure `serialize`/`parse`/`sanitize`,
+header-only) is a `key=value` config saved/loaded next to the exe; `app/gamepad.h` (pure
+`gamepad_to_input`) maps an XInput pad to the same `InputCommand` as keyboard/replay. Both are
+unit-tested; XInput is a Windows system import lib (no vcpkg). Fullscreen is borderless (no
+exclusive mode); `render_d3d12::resize` handles the swapchain.
 
 **Settings & photo mode (M12).** Configuration is the **CLI flag surface** above
 (the de-facto settings interface; `scripts/run.ps1` is the one-command entry).
