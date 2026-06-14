@@ -60,6 +60,11 @@ errors to process exit codes for the gate scripts (ARCHITECTURE.md §7).
 - `--dxr-walk --km K [--seed S]` (M9) — walk-bot covers K km in PT mode, rebuilding
   the BLAS/TLAS as chunks stream; prints distance, TLAS rebuilds, PT frames, and
   the debug count (exit gate #4).
+- `--soak [--seconds S | --ticks N] [--csv f] [--out dir] [--shot-every N]` (M10) —
+  long-haul walk-bot soak over the streaming raster renderer: writes the frame
+  telemetry CSV (FPS percentiles + memory slope), runs periodic connectivity
+  audits, and dumps periodic screenshots for `contactsheet`. Prints frames, audits,
+  audit_failures, stuck_events, screenshots, mem first/last, debug count.
 
 **Planned.** `config.toml` + flag/config mirroring (M12), noclip intro + photo
 mode (M12), `--no-director` (M11).

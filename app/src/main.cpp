@@ -55,8 +55,10 @@ struct Options {
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
     bool biomeat = false, descend = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
+    bool soak = false;
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
     uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0, spp = 256;
+    uint32_t shot_every = 600;   // soak: write a screenshot every N rendered frames
     uint64_t seed = 1u;
     std::string out, record, replay, hashlog, csv, audiolog;
 };
@@ -107,6 +109,8 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--dxr-fps") == 0) o.dxr_fps = true;
         else if (std::strcmp(a, "--dxr-ghost") == 0) o.dxr_ghost = true;
         else if (std::strcmp(a, "--dxr-walk") == 0) o.dxr_walk = true;
+        else if (std::strcmp(a, "--soak") == 0) o.soak = true;
+        else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
         else if (std::strcmp(a, "--version") == 0) o.version = true;
@@ -620,6 +624,127 @@ int run_walkbot(const Options& o) {
     std::printf("stuck_events: %llu\n", static_cast<unsigned long long>(stuck_events));
     std::printf("final_hash: %016llx\n", static_cast<unsigned long long>(world_state_hash(s)));
     return (s.odometer >= target_m && stuck_events == 0) ? 0 : 4;
+}
+
+// ----- M10 walk-bot soak: long-haul walk + render + telemetry + audits --------
+// Deterministic maze walk with the streaming raster renderer (the shipping path).
+// Writes a frame-telemetry CSV (frame_ms -> FPS percentiles, mem_bytes -> slope),
+// runs periodic connectivity audits, and dumps periodic screenshots for the
+// contactsheet tool. Runs for --seconds S (wall clock) or --ticks N.
+int run_soak(const Options& o) {
+    using namespace std::chrono;
+    using namespace br::core;
+    Renderer renderer;
+    if (!renderer.init_headless(o.width, o.height)) { std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1; }
+    renderer.set_texture_seed(o.seed);
+    renderer.set_post(o.post, static_cast<uint32_t>(o.seed), 0.0f, false);
+
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    br::telemetry::FrameCsv csv;
+    bool csvOpen = false;
+    if (!o.csv.empty()) {
+        if (!csv.open(o.csv)) { std::fprintf(stderr, "csv open failed: %s\n", o.csv.c_str()); return 1; }
+        csvOpen = true;
+    }
+
+    WorldState s(o.seed);
+    s.wanderer.pos = Vec3{ 16.0f, kWandererHalfHeight + 0.02f, 16.0f };
+    WalkBot bot(o.seed ^ 0x9e3779b97f4a7c15ULL, s.wanderer.pos);
+    const float aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+
+    std::vector<Aabb> collision;
+    contracts::ChunkKey cached{ 0, static_cast<int64_t>(1) << 40, 0 };
+    auto rebuild_collision = [&](contracts::ChunkKey c) {
+        collision.clear();
+        collision.push_back(Aabb{ {-1.0e6f, -1.0f, -1.0e6f}, {1.0e6f, 0.0f, 1.0e6f} });
+        for (int64_t dx = -1; dx <= 1; ++dx)
+            for (int64_t dz = -1; dz <= 1; ++dz) {
+                const contracts::ChunkData cd = contracts::GenerateChunk(o.seed, contracts::ChunkKey{ 0, c.cx + dx, c.cz + dz });
+                for (const auto& b : cd.collision) collision.push_back(Aabb{ {b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]} });
+            }
+        cached = c;
+    };
+
+    contracts::ChunkKey c0 = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+    rebuild_collision(c0);
+    sm.update(c0); sm.wait_idle(); sm.update(c0);
+
+    const bool wall = (o.seconds > 0);
+    const uint64_t tick_target = (o.ticks > 0) ? o.ticks : 600000u;
+    const auto start = steady_clock::now();
+    const auto wall_end = start + seconds(static_cast<long long>(o.seconds));
+    const uint32_t tpf = (o.ticks_per_frame > 0) ? o.ticks_per_frame : 4u;
+    const uint64_t kAuditEvery = 200u;
+    const uint64_t shotEvery = (o.shot_every > 0) ? o.shot_every : 600u;
+
+    uint64_t frame = 0, audits = 0, audit_fail = 0, shots = 0, stuck = 0, mem_first = 0, mem_last = 0;
+    float minx = s.wanderer.pos.x, maxx = minx, minz = s.wanderer.pos.z, maxz = minz;
+    uint64_t window_tick = 0;
+
+    for (;;) {
+        if (wall) { if ((frame & 63u) == 0 && steady_clock::now() >= wall_end) break; }
+        else if (s.tick >= tick_target) break;
+
+        for (uint32_t k = 0; k < tpf; ++k) {
+            const contracts::ChunkKey here = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+            if (here != cached) rebuild_collision(here);
+            tick(s, bot.step(s), collision);
+        }
+        const float px = s.wanderer.pos.x, pz = s.wanderer.pos.z;
+        if (px < minx) minx = px; if (px > maxx) maxx = px;
+        if (pz < minz) minz = pz; if (pz > maxz) maxz = pz;
+        if (s.tick - window_tick >= 1200) {
+            if ((maxx - minx) < 0.5f && (maxz - minz) < 0.5f) ++stuck;
+            minx = maxx = px; minz = maxz = pz; window_tick = s.tick;
+        }
+
+        const contracts::ChunkKey center = contracts::chunk_key_at(0, px, pz);
+        sm.update(center);
+        const contracts::CameraPose cam = wanderer_camera(s, aspect);
+        uint32_t drawn = 0;
+        const auto t0 = steady_clock::now();
+        if (!renderer.render_chunks(cam, sm.resident(), 16u, s.tick, &drawn)) { std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); return 1; }
+        const auto t1 = steady_clock::now();
+        const double frame_ms = duration<double, std::milli>(t1 - t0).count();
+        const uint64_t mem = renderer.process_private_bytes();
+        if (frame == 0) mem_first = mem;
+        mem_last = mem;
+        if (csvOpen) csv.write(contracts::FrameMetrics{ frame, frame_ms, sm.resident_count(), sm.generated_total(), mem });
+
+        if (frame % kAuditEvery == 0) {
+            ++audits;
+            for (int64_t dx = -1; dx <= 1; ++dx)
+                for (int64_t dz = -1; dz <= 1; ++dz) {
+                    const contracts::ChunkKey k{ 0, center.cx + dx, center.cz + dz };
+                    if (!br::gen::validate_connectivity(br::gen::generate_layout(o.seed, k))) ++audit_fail;
+                }
+        }
+        if (!o.out.empty() && (frame % shotEvery == 0)) {
+            FrameImage img;
+            if (renderer.readback(img)) {
+                char path[600];
+                std::snprintf(path, sizeof(path), "%s/shot_%05llu.png", o.out.c_str(), static_cast<unsigned long long>(shots));
+                if (stbi_write_png(path, static_cast<int>(img.width), static_cast<int>(img.height), 4, img.rgba.data(), static_cast<int>(img.width) * 4)) ++shots;
+            }
+        }
+        ++frame;
+    }
+    if (csvOpen) csv.close();
+
+    const uint32_t dbg = renderer.debug_error_count();
+    std::printf("soak_seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("frames: %llu\n", static_cast<unsigned long long>(frame));
+    std::printf("ticks: %llu\n", static_cast<unsigned long long>(s.tick));
+    std::printf("distance_m: %.1f\n", static_cast<double>(s.odometer));
+    std::printf("audits: %llu\n", static_cast<unsigned long long>(audits));
+    std::printf("audit_failures: %llu\n", static_cast<unsigned long long>(audit_fail));
+    std::printf("stuck_events: %llu\n", static_cast<unsigned long long>(stuck));
+    std::printf("screenshots: %llu\n", static_cast<unsigned long long>(shots));
+    std::printf("mem_first_bytes: %llu\n", static_cast<unsigned long long>(mem_first));
+    std::printf("mem_last_bytes: %llu\n", static_cast<unsigned long long>(mem_last));
+    std::printf("debug_error_count: %u\n", dbg);
+    const bool ok = (dbg == 0) && (audit_fail == 0) && (stuck == 0);
+    return ok ? 0 : 4;
 }
 
 // ----- M4 top-down debug render of a 3x3 chunk block -> PNG -------------------
@@ -1319,6 +1444,7 @@ int main(int argc, char** argv) {
     if (o.dxr_ghost)  return run_dxr_ghost(o);
     if (o.dxr_walk)   return run_dxr_walk(o);
     if (o.dxr)        return run_dxr(o);
+    if (o.soak)       return run_soak(o);
     if (o.sim)     return run_sim(o);
     if (o.walkbot) return run_walkbot(o);
     if (o.topdown) return run_topdown(o);
