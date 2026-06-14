@@ -76,6 +76,10 @@ errors to process exit codes for the gate scripts (ARCHITECTURE.md §7).
 - `--director-replay --director-log f` (M11) — re-walks the SAME run (seed + ticks
   from the log) with KEEL offline, applying the recorded directives; prints the
   combined run hash. Record == replay proves Gate 4 (replay bit-identical, model off).
+- `--soak --director` (M11) — runs the async `DirectorHost` during the soak
+  (generation off the frame thread); prints director request/produced/applied counts,
+  notes cached, and the latest Voice line. `--no-director` is the explicit kill switch
+  (INV-6; off by default, so the M10 soak path is byte-unchanged).
 
 **Planned.** `--no-director` + the in-loop async Director (M11c), `config.toml` +
 flag/config mirroring (M12), noclip intro + photo mode (M12).

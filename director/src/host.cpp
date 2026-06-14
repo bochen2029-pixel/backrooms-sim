@@ -6,6 +6,7 @@
 #include "contracts/replay_v1.h"
 
 #include <cstdio>
+#include <utility>
 
 namespace br::director {
 
@@ -55,6 +56,56 @@ bool read_director_log(const std::string& path, uint64_t& world_seed, uint64_t& 
     }
     std::fclose(f);
     return ok;
+}
+
+DirectorHost::DirectorHost(std::string host, int port, uint32_t timeout_ms)
+    : host_(std::move(host)), port_(port), timeout_ms_(timeout_ms) {
+    thread_ = std::thread(&DirectorHost::worker_loop, this);
+}
+
+DirectorHost::~DirectorHost() {
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        stop_ = true;
+    }
+    cv_.notify_one();
+    if (thread_.joinable()) thread_.join();
+}
+
+void DirectorHost::submit(const contracts::WandererSummary& summary) {
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        pending_ = summary;     // latest-wins: a newer summary supersedes a queued one
+        have_pending_ = true;
+    }
+    cv_.notify_one();
+}
+
+std::vector<contracts::Directive> DirectorHost::poll() {
+    std::vector<contracts::Directive> out;
+    std::lock_guard<std::mutex> lk(mtx_);
+    out.swap(ready_);
+    return out;
+}
+
+void DirectorHost::worker_loop() {
+    for (;;) {
+        contracts::WandererSummary s;
+        {
+            std::unique_lock<std::mutex> lk(mtx_);
+            cv_.wait(lk, [&] { return stop_ || have_pending_; });
+            if (stop_) return;
+            s = pending_;
+            have_pending_ = false;
+        }
+        requests_.fetch_add(1);
+        const std::optional<contracts::Directive> d = request_directive(host_, port_, s, timeout_ms_);
+        if (d) {
+            produced_.fetch_add(1);
+            std::lock_guard<std::mutex> lk(mtx_);
+            ready_.push_back(*d);
+        }
+    }
 }
 
 }  // namespace br::director

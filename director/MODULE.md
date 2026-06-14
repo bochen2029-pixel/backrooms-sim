@@ -22,7 +22,9 @@ dependency-free JSON reader. The sim's only third-party deps stay **Catch2 + stb
   graceful no-op on failure).
 - `director/host.h` (M11) — `request_directive(host, port, summary)` (sync:
   render_prompt → keel_complete → validate; nullopt on unreachable/off-schema) +
-  `write_director_log` / `read_director_log` (the recorded directive stream).
+  `write_director_log` / `read_director_log` (the recorded directive stream) +
+  `DirectorHost` (async worker thread; non-blocking `submit`/`poll`, latest-wins,
+  one request in flight — generation never touches the frame thread).
 - `director/json.h` — minimal dependency-free JSON reader + `escape` (directive +
   KEEL envelope).
 

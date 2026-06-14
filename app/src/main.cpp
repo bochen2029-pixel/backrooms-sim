@@ -16,6 +16,8 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <map>
+#include <memory>
 #include <cstdlib>
 #include <cstring>
 #include <span>
@@ -61,6 +63,7 @@ struct Options {
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
     bool soak = false, crash_test = false, director_probe = false;
     bool director_record = false, director_replay = false;
+    bool director = false, no_director = false;   // --director enables; --no-director forces off (INV-6 kill switch)
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
     uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0, spp = 256;
     uint32_t shot_every = 600;   // soak: write a screenshot every N rendered frames
@@ -122,6 +125,8 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--director-replay") == 0) o.director_replay = true;
         else if (std::strcmp(a, "--director-url") == 0) { if (!str(o.director_url)) return false; }
         else if (std::strcmp(a, "--director-log") == 0) { if (!str(o.director_log)) return false; }
+        else if (std::strcmp(a, "--director") == 0) o.director = true;
+        else if (std::strcmp(a, "--no-director") == 0) o.no_director = true;
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -687,6 +692,51 @@ int run_director_probe(const Options& o) {
     return resp.ok ? 0 : 1;
 }
 
+// ----- M11 Director helpers (shared by the soak + record/replay) --------------
+namespace {
+
+// Deterministic 64-bit fold (integer-only -> reproducible across record + replay).
+uint64_t fold_u64(uint64_t h, uint64_t x) {
+    x *= 0xff51afd7ed558ccdull;
+    x ^= x >> 33;
+    h ^= x + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    return h;
+}
+uint64_t fold_bytes(uint64_t h, const void* p, size_t n) {
+    const uint8_t* b = static_cast<const uint8_t*>(p);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) { uint64_t w; std::memcpy(&w, b + i, 8); h = fold_u64(h, w); }
+    if (i < n) { uint64_t tail = 0; for (size_t j = 0; i < n; ++i, ++j) tail |= static_cast<uint64_t>(b[i]) << (8 * j); h = fold_u64(h, tail); }
+    return h;
+}
+
+void parse_host_port(const std::string& url, std::string& host, int& port) {
+    host = "127.0.0.1"; port = 7071;
+    if (url.empty()) return;
+    const size_t colon = url.rfind(':');
+    if (colon != std::string::npos) { host = url.substr(0, colon); port = std::atoi(url.c_str() + colon + 1); }
+    else { host = url; }
+}
+
+// Deterministic WandererSummary from the (already-hashed) WorldState (the sim is the
+// oracle). The summary feeds only the Director prompt -- it never re-enters the sim.
+contracts::WandererSummary build_summary(const br::core::WorldState& s, uint64_t seed) {
+    contracts::WandererSummary sum{};
+    sum.tick = s.tick;
+    sum.world_seed = seed;
+    sum.level = 0;
+    const contracts::ChunkKey k = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+    sum.chunk_cx = k.cx; sum.chunk_cz = k.cz;
+    sum.biome = static_cast<int32_t>(br::gen::biome_at(seed, 0, k.cx, k.cz));
+    sum.distance_m = s.odometer;
+    sum.dwell_seconds = 0.0f;
+    sum.route_loops = 0;
+    sum.location_hash = static_cast<uint64_t>(k.cx) * 0x9E3779B97F4A7C15ull ^ static_cast<uint64_t>(k.cz);
+    return sum;
+}
+
+}  // namespace
+
 // ----- M10 walk-bot soak: long-haul walk + render + telemetry + audits --------
 // Deterministic maze walk with the streaming raster renderer (the shipping path).
 // Writes a frame-telemetry CSV (frame_ms -> FPS percentiles, mem_bytes -> slope),
@@ -742,6 +792,20 @@ int run_soak(const Options& o) {
     float minx = s.wanderer.pos.x, maxx = minx, minz = s.wanderer.pos.z, maxz = minz;
     uint64_t window_tick = 0;
 
+    // Optional async Director (enhancement-only, INV-6): generation runs on its own
+    // thread so it can't touch frame time (the async-isolation invariant, Gate 2).
+    // Off by default; --director enables, --no-director force-disables (kill switch).
+    std::unique_ptr<br::director::DirectorHost> director;
+    if (o.director && !o.no_director) {
+        std::string dh; int dp = 7071;
+        parse_host_port(o.director_url, dh, dp);
+        director = std::make_unique<br::director::DirectorHost>(dh, dp);
+    }
+    std::map<uint64_t, contracts::Directive> note_cache;  // Wanderer Notes per location hash
+    uint64_t dir_applied = 0, last_submit = 0;
+    std::string last_caption;
+    const uint64_t kDirSubmitEvery = 240u;  // ~2 s of sim between summaries
+
     for (;;) {
         if (wall) { if ((frame & 63u) == 0 && steady_clock::now() >= wall_end) break; }
         else if (s.tick >= tick_target) break;
@@ -788,12 +852,30 @@ int run_soak(const Options& o) {
                 if (stbi_write_png(path, static_cast<int>(img.width), static_cast<int>(img.height), 4, img.rgba.data(), static_cast<int>(img.width) * 4)) ++shots;
             }
         }
+        if (director) {
+            if (s.tick - last_submit >= kDirSubmitEvery) { director->submit(build_summary(s, o.seed)); last_submit = s.tick; }
+            for (const contracts::Directive& d : director->poll()) {
+                ++dir_applied;
+                if (d.caption[0] != '\0') last_caption = d.caption;   // The Voice: the latest line
+                if (d.kind == contracts::DirectiveKind::WandererNote) {
+                    note_cache[build_summary(s, o.seed).location_hash] = d;  // notes cached per location
+                }
+            }
+        }
         ++frame;
     }
     if (csvOpen) csv.close();
+    uint64_t dir_requests = 0, dir_produced = 0;
+    if (director) { dir_requests = director->requests(); dir_produced = director->produced(); director.reset(); }  // join the worker
 
     const uint32_t dbg = renderer.debug_error_count();
     std::printf("soak_seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("director: %d\n", (o.director && !o.no_director) ? 1 : 0);
+    std::printf("director_requests: %llu\n", static_cast<unsigned long long>(dir_requests));
+    std::printf("director_produced: %llu\n", static_cast<unsigned long long>(dir_produced));
+    std::printf("director_applied: %llu\n", static_cast<unsigned long long>(dir_applied));
+    std::printf("notes_cached: %llu\n", static_cast<unsigned long long>(note_cache.size()));
+    if (!last_caption.empty()) std::printf("director_last_line: %s\n", last_caption.c_str());
     std::printf("frames: %llu\n", static_cast<unsigned long long>(frame));
     std::printf("ticks: %llu\n", static_cast<unsigned long long>(s.tick));
     std::printf("distance_m: %.1f\n", static_cast<double>(s.odometer));
@@ -893,49 +975,7 @@ struct MazeWalker {
 };
 
 // ----- M11 Director record/replay: prove Gate 4 (replay bit-identical, model off) -
-namespace {
-
-// Deterministic 64-bit fold (integer-only -> reproducible across record + replay).
-uint64_t fold_u64(uint64_t h, uint64_t x) {
-    x *= 0xff51afd7ed558ccdull;
-    x ^= x >> 33;
-    h ^= x + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
-    return h;
-}
-uint64_t fold_bytes(uint64_t h, const void* p, size_t n) {
-    const uint8_t* b = static_cast<const uint8_t*>(p);
-    size_t i = 0;
-    for (; i + 8 <= n; i += 8) { uint64_t w; std::memcpy(&w, b + i, 8); h = fold_u64(h, w); }
-    if (i < n) { uint64_t tail = 0; for (size_t j = 0; i < n; ++i, ++j) tail |= static_cast<uint64_t>(b[i]) << (8 * j); h = fold_u64(h, tail); }
-    return h;
-}
-
-void parse_host_port(const std::string& url, std::string& host, int& port) {
-    host = "127.0.0.1"; port = 7071;
-    if (url.empty()) return;
-    const size_t colon = url.rfind(':');
-    if (colon != std::string::npos) { host = url.substr(0, colon); port = std::atoi(url.c_str() + colon + 1); }
-    else { host = url; }
-}
-
-// Deterministic WandererSummary from the (already-hashed) WorldState (the sim is the
-// oracle). The summary feeds only the Director prompt — it never re-enters the sim.
-contracts::WandererSummary build_summary(const br::core::WorldState& s, uint64_t seed) {
-    contracts::WandererSummary sum{};
-    sum.tick = s.tick;
-    sum.world_seed = seed;
-    sum.level = 0;
-    const contracts::ChunkKey k = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
-    sum.chunk_cx = k.cx; sum.chunk_cz = k.cz;
-    sum.biome = static_cast<int32_t>(br::gen::biome_at(seed, 0, k.cx, k.cz));
-    sum.distance_m = s.odometer;
-    sum.dwell_seconds = 0.0f;
-    sum.route_loops = 0;
-    sum.location_hash = static_cast<uint64_t>(k.cx) * 0x9E3779B97F4A7C15ull ^ static_cast<uint64_t>(k.cz);
-    return sum;
-}
-
-}  // namespace
+// (fold/summary helpers are defined above run_soak so the soak can share them.)
 
 // Record: walk the maze with the Director ON (live KEEL), capturing each validated
 // directive into the event log at its sim tick. Prints the combined run hash =
