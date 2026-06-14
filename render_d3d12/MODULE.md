@@ -29,6 +29,11 @@ renderer (INV-6).
   lighting exactly (INV-2). A highlight knee keeps the wallpaper's hue under
   stacked lights instead of clipping to white (ADR-026). Takes a `tick` for the
   flicker phase.
+- `render_chunks_windowed` (M13) — windowed twin of `render_chunks`: the **same**
+  geometry + forward fluorescent lighting, but targets the swapchain back buffer
+  (PRESENT→RENDER_TARGET→draw→PRESENT, fence-synced + `Present`) instead of an offscreen
+  RT. Requires `init_windowed` (which now also builds the depth buffer). The gated headless
+  `render_chunks` is byte-for-byte untouched; this is the real-time playable (`app --play`) path.
 - `render_topdown` (M4) — headless: orthographic top-down render of a chunk set
   (debug golden of the maze layout); discards ceiling/fluorescent material via a
   root-constant toggle so the M4 layout goldens stay stable under M5.

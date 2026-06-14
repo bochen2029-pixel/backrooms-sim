@@ -89,6 +89,12 @@ typed module errors to process exit codes for the gate scripts (ARCHITECTURE.md 
   the floor gives way, free-fall, land in the Level-0 maze (pure scripted core sim →
   deterministic; prints noclipped/landed/final_y/final_hash). The visual fall is the
   windowed experience; the headless run is the determinism check.
+- `--play [--seed S] [--seconds N] [--width W --height H] [--csv f] [--director]` (M13) —
+  the **real-time playable windowed walk**: a fixed-120 Hz tick accumulator decoupled from
+  render, WASD + jump + mouse-look, 3×3 collision rebuild as you cross chunks, Esc/close to
+  exit (spawns at the proven-open (2,2) cell). Renders via `render_chunks_windowed`. `--csv`
+  logs per-frame pacing (frame_ms + residency/mem) for the gate; `--seconds N` auto-exits
+  (headless-friendly). `scripts/run.ps1 -Window` launches this.
 
 **Settings & photo mode (M12).** Configuration is the **CLI flag surface** above
 (the de-facto settings interface; `scripts/run.ps1` is the one-command entry).

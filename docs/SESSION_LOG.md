@@ -4,6 +4,40 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 14 — M13: Playable windowed walk (Phase II begins)  ✅ COMPLETE — 🏷️ `m13-green`
+
+**`gate.ps1 -Milestone M13` exits 0; tagged `m13-green` + pushed.** Phase II (turn the
+v1.0 visualization into a packaged game, M13→M17) is underway. **The sim is now genuinely
+walkable in a window** — closing the M1 clear-frame gap.
+
+**Done (M13; commits `7643b38` phase a, `c952d46` phase b, `5bdc51d` gate).**
+- **`render_chunks_windowed()`** (render_d3d12) — a faithful twin of the M3-gated
+  `render_chunks`: same geometry + forward lighting, targeting the swapchain back buffer
+  (PRESENT→RT→draw→PRESENT, fence-synced) instead of an offscreen RT. The gated headless
+  `render_chunks` is untouched. `init_windowed` now also builds the depth buffer.
+- **`app --play`** — the real-time windowed walk: fixed-120 Hz tick accumulator decoupled
+  from render, WASD + jump + mouse-look (recentered cursor), 3×3 collision rebuild as you
+  cross chunks, Esc/close to exit. Spawns at the proven-open (2,2) cell. `--csv` writes
+  per-frame pacing telemetry (frame_ms + residency/mem) via the existing `FrameCsv` contract.
+- **`scripts/run.ps1 -Window`** now launches `--play` (was the `--window` clear frame).
+- **`Invoke-GateM13`** — clean build + warnings + full ctest + **windowed `--play`
+  (debug-clean + frame-pacing p99 < 2× median, best of 2)** + M5/M4 golden regression +
+  INV-5 + inventory. **gate.ps1 M13 exits 0.**
+
+**Gotchas / notes.** Frame pacing uses **best-of-2 at the same 2.0× threshold as the M3
+walk gate (ADR-021)** — a single run trips ~2.7× right after a clean build + 52 tests
+(peak load); in isolation the windowed path paces ~1.3–1.8×. Threshold NOT softened; both
+attempts ≥2× would be a real regression. `--play` reads `GetAsyncKeyState`, so a headless
+no-focus run drifts (env artifact, not a gate concern — debug-clean is what matters).
+Spawn must be above a proven-open cell (reused the (2,2) cell from `--intro`).
+
+**Next: M14** — real-time audio output (miniaudio, the M6-deferred dep; ADR + vcpkg.json;
+zero underruns at runtime; offline `--render-wav` stays bit-identical). Then M15 (menus +
+game-state machine, immediate-mode UI on the bitmap-font HUD), M16 (settings/config
+persistence + fullscreen/resolution + XInput), M17 (portable .zip + clean-env test → v2.0).
+
+---
+
 ## Session 13 — M12: Integration, Polish, Acceptance  ✅ COMPLETE — 🏁 `v1.0` (M0–M12 all green)
 
 **`gate.ps1 -Milestone M12` exits 0; the M0–M11 regression sweep is green; tagged
