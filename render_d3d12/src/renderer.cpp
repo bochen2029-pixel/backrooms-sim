@@ -162,6 +162,17 @@ struct Renderer::Impl {
     bool postEnabled = false;
     PostParams postParams;
 
+    // Windowed overlay present (M15 menus): a CPU RGBA overlay blitted to the back
+    // buffer by a fullscreen triangle. Fully separate from the post/readback path so
+    // the headless goldens are untouched (and it never collides with the RTV heap).
+    ComPtr<ID3D12Resource> ovlTex;
+    ComPtr<ID3D12Resource> ovlUpload;
+    ComPtr<ID3D12DescriptorHeap> ovlSrvHeap;          // shader-visible (1 SRV = overlay)
+    ComPtr<ID3D12RootSignature> ovlRoot;
+    ComPtr<ID3D12PipelineState> ovlPso;
+    UINT ovlW = 0, ovlH = 0;
+    bool ovlReady = false;
+
     HANDLE fenceEvent = nullptr;
     UINT64 fenceValue = 0;
     UINT rtvDescSize = 0;
@@ -1554,6 +1565,191 @@ bool Renderer::upload_hud_overlay(const uint8_t* rgba, uint32_t width, uint32_t 
     if (!ensure_post_pipeline(d, last_error_)) return false;
     if (width != d.hudW || height != d.hudH) { last_error_ = "hud overlay size mismatch"; return false; }
     return upload_hud(d, rgba, last_error_);
+}
+
+// --- Windowed overlay present (M15 menus) ------------------------------------
+// A CPU-rasterised RGBA overlay (the menu) blitted to the back buffer by a single
+// fullscreen triangle. Its own texture/heap/root-sig/PSO — independent of the post
+// pass (which would collide with the windowed RTV heap), so headless goldens are
+// untouched. The menu overlay fills the frame, so the PS just writes its RGB opaque.
+static const char* kOverlayHlsl = R"(
+Texture2D    gOvl  : register(t0);
+SamplerState gSamp : register(s0);
+struct VOut { float4 pos:SV_POSITION; float2 uv:TEXCOORD0; };
+VOut VSMain(uint id : SV_VertexID) {
+    VOut o;
+    float2 t = float2((id << 1) & 2, id & 2);
+    o.uv = t;
+    o.pos = float4(t * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+    return o;
+}
+float4 PSMain(VOut i) : SV_TARGET {
+    float4 c = gOvl.Sample(gSamp, i.uv);
+    return float4(c.rgb, 1.0);
+}
+)";
+
+bool upload_overlay(Renderer::Impl& d, const uint8_t* rgba, std::string& err) {
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
+    UINT rows = 0; UINT64 rowSize = 0, total = 0;
+    D3D12_RESOURCE_DESC td = d.ovlTex->GetDesc();
+    d.device->GetCopyableFootprints(&td, 0, 1, 0, &fp, &rows, &rowSize, &total);
+    if (!d.ovlUpload) {
+        D3D12_RESOURCE_DESC bd = {};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = total; bd.Height = 1;
+        bd.DepthOrArraySize = 1; bd.MipLevels = 1; bd.Format = DXGI_FORMAT_UNKNOWN;
+        bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        const D3D12_HEAP_PROPERTIES up = heap_props(D3D12_HEAP_TYPE_UPLOAD);
+        if (FAILED(d.device->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &bd,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&d.ovlUpload)))) {
+            err = "overlay upload buffer"; return false;
+        }
+    }
+    uint8_t* mapped = nullptr;
+    const D3D12_RANGE none = { 0, 0 };
+    if (FAILED(d.ovlUpload->Map(0, &none, reinterpret_cast<void**>(&mapped)))) { err = "overlay map"; return false; }
+    for (UINT y = 0; y < d.ovlH; ++y)
+        std::memcpy(mapped + fp.Offset + static_cast<size_t>(y) * fp.Footprint.RowPitch,
+                    rgba + static_cast<size_t>(y) * d.ovlW * 4u, static_cast<size_t>(d.ovlW) * 4u);
+    d.ovlUpload->Unmap(0, nullptr);
+
+    if (FAILED(d.alloc->Reset())) { err = "overlay alloc reset"; return false; }
+    if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { err = "overlay list reset"; return false; }
+    const D3D12_RESOURCE_BARRIER toCopy = transition(
+        d.ovlTex.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    d.list->ResourceBarrier(1, &toCopy);
+    D3D12_TEXTURE_COPY_LOCATION dst = {}; dst.pResource = d.ovlTex.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = 0;
+    D3D12_TEXTURE_COPY_LOCATION src = {}; src.pResource = d.ovlUpload.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; src.PlacedFootprint = fp;
+    d.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    const D3D12_RESOURCE_BARRIER toSrv = transition(
+        d.ovlTex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    d.list->ResourceBarrier(1, &toSrv);
+    if (FAILED(d.list->Close())) { err = "overlay list close"; return false; }
+    ID3D12CommandList* lists[] = { d.list.Get() };
+    d.queue->ExecuteCommandLists(1, lists);
+    const UINT64 v = ++d.fenceValue;
+    d.queue->Signal(d.fence.Get(), v);
+    if (d.fence->GetCompletedValue() < v) {
+        d.fence->SetEventOnCompletion(v, d.fenceEvent);
+        WaitForSingleObject(d.fenceEvent, 5000);
+    }
+    return true;
+}
+
+bool ensure_overlay_pipeline(Renderer::Impl& d, std::string& err) {
+    if (d.ovlReady) return true;
+    d.ovlW = d.width; d.ovlH = d.height;
+    const D3D12_HEAP_PROPERTIES defHeap = heap_props(D3D12_HEAP_TYPE_DEFAULT);
+    D3D12_RESOURCE_DESC hd = {};
+    hd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    hd.Width = d.ovlW; hd.Height = d.ovlH; hd.DepthOrArraySize = 1; hd.MipLevels = 1;
+    hd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; hd.SampleDesc.Count = 1; hd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    if (FAILED(d.device->CreateCommittedResource(&defHeap, D3D12_HEAP_FLAG_NONE, &hd,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&d.ovlTex)))) {
+        err = "overlay tex create"; return false;
+    }
+    D3D12_DESCRIPTOR_HEAP_DESC sh = {};
+    sh.NumDescriptors = 1; sh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    sh.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(d.device->CreateDescriptorHeap(&sh, IID_PPV_ARGS(&d.ovlSrvHeap)))) { err = "overlay srv heap"; return false; }
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Texture2D.MipLevels = 1;
+    d.device->CreateShaderResourceView(d.ovlTex.Get(), &sd, d.ovlSrvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    D3D12_DESCRIPTOR_RANGE range = {};
+    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; range.NumDescriptors = 1;
+    range.BaseShaderRegister = 0; range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    D3D12_ROOT_PARAMETER params[1] = {};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[0].DescriptorTable.NumDescriptorRanges = 1; params[0].DescriptorTable.pDescriptorRanges = &range;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_STATIC_SAMPLER_DESC samp = {};
+    samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samp.ShaderRegister = 0; samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL; samp.MaxLOD = D3D12_FLOAT32_MAX;
+    D3D12_ROOT_SIGNATURE_DESC rs = {};
+    rs.NumParameters = 1; rs.pParameters = params; rs.NumStaticSamplers = 1; rs.pStaticSamplers = &samp;
+    ComPtr<ID3DBlob> sig, sigErr;
+    if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &sigErr))) { err = "overlay root serialize"; return false; }
+    if (FAILED(d.device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&d.ovlRoot)))) { err = "overlay root create"; return false; }
+
+    ComPtr<ID3DBlob> vs, ps;
+    if (!compile_shader(kOverlayHlsl, "VSMain", "vs_5_0", vs, err)) return false;
+    if (!compile_shader(kOverlayHlsl, "PSMain", "ps_5_0", ps, err)) return false;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso = {};
+    pso.pRootSignature = d.ovlRoot.Get();
+    pso.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
+    pso.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+    pso.SampleMask = UINT_MAX;
+    pso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+    pso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
+    pso.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    pso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    pso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+    pso.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    pso.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pso.DepthStencilState.DepthEnable = FALSE;
+    pso.DepthStencilState.StencilEnable = FALSE;
+    pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pso.NumRenderTargets = 1; pso.RTVFormats[0] = kFormat;
+    pso.DSVFormat = DXGI_FORMAT_UNKNOWN; pso.SampleDesc.Count = 1;
+    if (FAILED(d.device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&d.ovlPso)))) { err = "overlay pso"; return false; }
+    d.ovlReady = true;
+    return true;
+}
+
+bool Renderer::present_overlay_windowed(const uint8_t* rgba, uint32_t width, uint32_t height) {
+    Impl& d = *impl_;
+    if (!d.windowed || !d.swapchain) { last_error_ = "present_overlay_windowed needs a window"; return false; }
+    if (width != d.width || height != d.height) { last_error_ = "overlay size mismatch"; return false; }
+    if (!ensure_overlay_pipeline(d, last_error_)) return false;
+    if (!upload_overlay(d, rgba, last_error_)) return false;
+
+    if (FAILED(d.alloc->Reset())) { last_error_ = "allocator reset failed"; return false; }
+    if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "command list reset failed"; return false; }
+
+    const UINT bbIndex = d.swapchain->GetCurrentBackBufferIndex();
+    ID3D12Resource* bb = d.backbuffers[bbIndex].Get();
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = d.rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    rtv.ptr += static_cast<SIZE_T>(bbIndex) * d.rtvDescSize;
+
+    const D3D12_RESOURCE_BARRIER toRT = transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    d.list->ResourceBarrier(1, &toRT);
+    d.list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    const float black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    d.list->ClearRenderTargetView(rtv, black, 0, nullptr);
+
+    D3D12_VIEWPORT vp = { 0.0f, 0.0f, static_cast<float>(d.width), static_cast<float>(d.height), 0.0f, 1.0f };
+    D3D12_RECT scissor = { 0, 0, static_cast<LONG>(d.width), static_cast<LONG>(d.height) };
+    d.list->RSSetViewports(1, &vp);
+    d.list->RSSetScissorRects(1, &scissor);
+    ID3D12DescriptorHeap* heaps[] = { d.ovlSrvHeap.Get() };
+    d.list->SetDescriptorHeaps(1, heaps);
+    d.list->SetGraphicsRootSignature(d.ovlRoot.Get());
+    d.list->SetPipelineState(d.ovlPso.Get());
+    d.list->SetGraphicsRootDescriptorTable(0, d.ovlSrvHeap->GetGPUDescriptorHandleForHeapStart());
+    d.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    d.list->DrawInstanced(3, 1, 0, 0);
+
+    const D3D12_RESOURCE_BARRIER toPresent = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+    d.list->ResourceBarrier(1, &toPresent);
+    if (FAILED(d.list->Close())) { last_error_ = "command list close failed"; return false; }
+    ID3D12CommandList* wlists[] = { d.list.Get() };
+    d.queue->ExecuteCommandLists(1, wlists);
+    if (FAILED(d.swapchain->Present(1, 0))) { last_error_ = "Present failed"; return false; }
+    const UINT64 wv = ++d.fenceValue;
+    if (FAILED(d.queue->Signal(d.fence.Get(), wv))) { last_error_ = "fence Signal failed"; return false; }
+    if (d.fence->GetCompletedValue() < wv) {
+        if (FAILED(d.fence->SetEventOnCompletion(wv, d.fenceEvent))) { last_error_ = "SetEventOnCompletion failed"; return false; }
+        if (WaitForSingleObject(d.fenceEvent, 5000) != WAIT_OBJECT_0) { last_error_ = "fence wait timed out"; return false; }
+    }
+    return true;
 }
 
 bool Renderer::render_chunks_windowed(const contracts::CameraPose& camera,

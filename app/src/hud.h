@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "menu.h"
+
 namespace br::app {
 
 struct HudValues {
@@ -26,5 +28,11 @@ void build_hud_overlay(std::vector<uint8_t>& rgba, uint32_t width, uint32_t heig
 
 // "HH:MM:SS" for a 120 Hz tick count (also written to telemetry for the gate).
 std::string hud_timestamp(uint64_t sim_ticks);
+
+// Render the current menu screen into `rgba` (M15): a near-opaque dark backdrop,
+// the title, the item list with the selected row highlighted, and (Settings) the
+// live setting values. Deterministic for a fixed model -> menu-render goldens.
+void build_menu_overlay(std::vector<uint8_t>& rgba, uint32_t width, uint32_t height,
+                        const MenuModel& m);
 
 }  // namespace br::app

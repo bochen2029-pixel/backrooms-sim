@@ -84,6 +84,12 @@ public:
                                 const std::vector<contracts::ResidentChunk>& resident,
                                 uint32_t upload_budget, uint64_t tick, uint32_t* out_drawn);
 
+    // Windowed (M15, menus): blit a CPU RGBA overlay (width*height, must match the
+    // window size) to the swapchain back buffer via a fullscreen triangle, and
+    // Present. Independent of the post pass; used by the game shell's menu screens.
+    // Requires init_windowed(). Blocks on the frame fence (GPU idle on return).
+    bool present_overlay_windowed(const uint8_t* rgba, uint32_t width, uint32_t height);
+
     // Headless: orthographic top-down render of the given chunks over the world
     // region [cx-half, cx+half] x [cz-half, cz+half] (a debug-render golden).
     bool render_topdown(const std::vector<contracts::ResidentChunk>& chunks,

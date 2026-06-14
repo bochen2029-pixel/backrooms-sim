@@ -1489,6 +1489,89 @@ function Invoke-GateM14 {
     Write-Note 'M14 gate: real-time audio output (miniaudio) + offline WAV untouched. The game has sound.'
 }
 
+function Invoke-GateM15 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green (incl. the menu state-machine tests)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m15'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+
+    # Exit gate #1 — the game-state machine transitions deterministically under
+    # synthetic input (splash -> menu -> play -> pause -> settings -> quit).
+    Assert-Gate 'game-state machine: synthetic-input transition tests pass ([m15])' {
+        $ut = Join-Path (Get-BinDir) 'unit_tests.exe'
+        if (-not (Test-Path $ut)) { throw "unit_tests.exe not built" }
+        & $ut '[m15]' | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "menu state-machine tests failed (exit $LASTEXITCODE)" }
+    }
+
+    # Exit gate #2 — menu-render goldens. The menu overlay is deterministic + CPU-only,
+    # so a fresh render is byte-identical to the captured golden (goldgen/INV-8).
+    Assert-Gate 'menu-render goldens bit-match (splash/mainmenu/pause/settings)' {
+        foreach ($sc in @('splash', 'mainmenu', 'pause', 'settings')) {
+            $png = Join-Path $tmp "$sc.png"
+            $r = Invoke-AppCapture @('--menu-shot', '--screen', $sc, '--sel', '0', '--width', '1280', '--height', '720', '--out', $png)
+            if ($r.Exit -ne 0) { throw "menu-shot $sc exited $($r.Exit)" }
+            $g = Join-Path $RepoRoot "goldens\m15\$sc.png"
+            if (-not (Test-Path $g)) { throw "golden missing: $g" }
+            $d = (& $hashdiff diff $png $g | Select-Object -Last 1)
+            if ([double]$d -ne 0.0) { throw "menu golden '$sc' regressed (diff=$d)" }
+        }
+        Write-Note 'all 4 menu screens bit-match their goldens'
+    }
+
+    # Exit gate #3 — no debug-layer messages across state changes: the headless GPU
+    # composite of every screen, and the windowed shell booting through the menu.
+    Assert-Gate 'menu compositing debug-clean across all screens (--menu-smoke)' {
+        $r = Invoke-AppCapture @('--menu-smoke', '--width', '1280', '--height', '720', '--seed', '1')
+        if ($r.Exit -ne 0) { throw "--menu-smoke exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "menu compositing produced debug-layer messages" }
+        $n = Get-Metric $r.Out 'screens_composited'
+        if ($n -lt 8) { throw "expected >= 8 screen composites, got $n" }
+        Write-Note "$n menu screens composited on the GPU, debug-clean"
+    }
+    Assert-Gate 'windowed game shell boots debug-clean (--game --seconds 4)' {
+        $r = Invoke-AppCapture @('--game', '--seconds', '4', '--seed', '1', '--width', '1280', '--height', '720')
+        if ($r.Exit -ne 0) { throw "--game exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "windowed game shell had debug-layer messages" }
+        if ((Get-Metric $r.Out 'frames') -lt 30) { throw "too few frames -- the shell is not running" }
+    }
+
+    Assert-Gate 'regression: M5 lit shot golden still bit-matches' {
+        $shot = Join-Path $tmp 'm5_shot.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        $d = (& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M5 lit shot golden regressed (diff=$d)" }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M15 gate: menus + game-state machine (state tests + render goldens + debug-clean shell). The game has a front end.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -1510,6 +1593,7 @@ try {
         'M12'   { Invoke-GateM12 }
         'M13'   { Invoke-GateM13 }
         'M14'   { Invoke-GateM14 }
+        'M15'   { Invoke-GateM15 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

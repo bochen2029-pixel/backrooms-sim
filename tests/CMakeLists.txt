@@ -14,11 +14,15 @@ add_executable(unit_tests
   unit/test_texgen.cpp
   unit/test_audio.cpp
   unit/test_biome.cpp
-  unit/test_director.cpp)
+  unit/test_director.cpp
+  unit/test_menu.cpp)
 target_link_libraries(unit_tests PRIVATE
   backrooms_flags
   core gen stream telemetry audio render_d3d12 render_dxr director
   Catch2::Catch2WithMain)
+# test_menu.cpp includes the header-only game-state machine (app/src/menu.h); the
+# app shell is an executable, so expose just its source dir for that one header.
+target_include_directories(unit_tests PRIVATE ${CMAKE_SOURCE_DIR}/app/src)
 catch_discover_tests(unit_tests DISCOVERY_MODE PRE_TEST)
 
 # --- Gate canary: deliberately failing, DISABLED so it never runs in the

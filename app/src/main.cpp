@@ -50,6 +50,7 @@
 
 namespace contracts = br::contracts;
 namespace audio = br::audio;
+namespace app = br::app;
 using br::render_d3d12::Renderer;
 using br::render_d3d12::FrameImage;
 
@@ -67,6 +68,9 @@ struct Options {
     bool director_eval = false, intro = false, play = false;
     bool audiodev = false, null_backend = false, no_audio = false;  // M14 real-time audio output
     float master = 1.0f, sfx = 1.0f;    // M14 playback mix (master + SFX volume, 0..1)
+    bool game = false, menu_shot = false, menu_smoke = false;  // M15 menus + game-state shell
+    std::string screen;                 // --menu-shot: which screen to render
+    uint32_t sel = 0;                   // --menu-shot: selected item index
     uint32_t eval_count = 100;          // --director-eval: scenario count
     uint32_t director_interval_s = 15;  // --soak --director: ambient seconds between summaries (wall clock)
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
@@ -147,6 +151,11 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--no-audio") == 0) o.no_audio = true;
         else if (std::strcmp(a, "--master") == 0) { if (!flt(o.master)) return false; }
         else if (std::strcmp(a, "--sfx") == 0) { if (!flt(o.sfx)) return false; }
+        else if (std::strcmp(a, "--game") == 0) o.game = true;
+        else if (std::strcmp(a, "--menu-shot") == 0) o.menu_shot = true;
+        else if (std::strcmp(a, "--menu-smoke") == 0) o.menu_smoke = true;
+        else if (std::strcmp(a, "--screen") == 0) { if (!str(o.screen)) return false; }
+        else if (std::strcmp(a, "--sel") == 0) { if (!u32(o.sel)) return false; }
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -393,6 +402,250 @@ int run_play(const Options& o) {
     std::printf("frames: %llu\n", static_cast<unsigned long long>(frames));
     std::printf("ticks: %llu\n", static_cast<unsigned long long>(s.tick));
     std::printf("distance_m: %.1f\n", static_cast<double>(s.odometer));
+    std::printf("audio_underruns: %llu\n", underruns);
+    std::printf("debug_error_count: %u\n", dbg);
+    return dbg == 0 ? 0 : 3;
+}
+
+// ----- M15 menus + game-state shell -----------------------------------------
+app::Screen screen_from_name(const std::string& n) {
+    if (n == "splash") return app::Screen::Splash;
+    if (n == "pause") return app::Screen::Pause;
+    if (n == "settings") return app::Screen::Settings;
+    return app::Screen::MainMenu;
+}
+
+// Render one menu screen to a PNG (deterministic, CPU-only -> the menu golden).
+int run_menu_shot(const Options& o) {
+    app::MenuModel m;
+    m.screen = screen_from_name(o.screen);
+    m.has_session = (m.screen == app::Screen::Pause);  // pause implies a live session
+    switch (m.screen) {
+        case app::Screen::MainMenu: m.main_sel = static_cast<int>(o.sel); break;
+        case app::Screen::Pause:    m.pause_sel = static_cast<int>(o.sel); break;
+        case app::Screen::Settings: m.settings_sel = static_cast<int>(o.sel); break;
+        default: break;
+    }
+    std::vector<uint8_t> rgba;
+    app::build_menu_overlay(rgba, o.width, o.height, m);
+    const std::string out = o.out.empty() ? std::string("runs/menu.png") : o.out;
+    if (!stbi_write_png(out.c_str(), static_cast<int>(o.width), static_cast<int>(o.height), 4,
+                        rgba.data(), static_cast<int>(o.width) * 4)) {
+        std::fprintf(stderr, "menu-shot: write failed\n"); return 1;
+    }
+    std::printf("menu_screen: %s\n", o.screen.empty() ? "mainmenu" : o.screen.c_str());
+    std::printf("menu_sel: %u\n", o.sel);
+    std::printf("out: %s\n", out.c_str());
+    return 0;
+}
+
+// Composite every menu screen through the GPU (post + HUD path) across state
+// changes; assert the debug layer stays silent (M15 exit gate #3).
+int run_menu_smoke(const Options& o) {
+    Renderer renderer;
+    if (!renderer.init_headless(o.width, o.height)) {
+        std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1;
+    }
+    renderer.set_texture_seed(o.seed);
+    renderer.set_post(true, static_cast<uint32_t>(o.seed), 0.0f, true);  // VHS post + HUD composite
+
+    contracts::CameraPose cam{};
+    cam.fov_y = 1.2217305f;
+    cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+    const std::vector<contracts::ResidentChunk> none;
+    const char* names[4] = {"splash", "mainmenu", "pause", "settings"};
+
+    int composited = 0;
+    for (int i = 0; i < 8; ++i) {  // two full cycles -> exercises the state changes
+        app::MenuModel m;
+        m.screen = screen_from_name(names[i % 4]);
+        m.has_session = true;
+        m.main_sel = i % app::kMainItems;
+        m.settings_sel = i % app::kSettingsItems;
+        std::vector<uint8_t> hud;
+        app::build_menu_overlay(hud, o.width, o.height, m);
+        if (!renderer.upload_hud_overlay(hud.data(), o.width, o.height)) {
+            std::fprintf(stderr, "hud: %s\n", renderer.last_error().c_str()); return 1;
+        }
+        uint32_t drawn = 0;
+        if (!renderer.render_chunks(cam, none, 0u, 0u, &drawn)) {
+            std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); return 1;
+        }
+        FrameImage img;
+        if (!renderer.readback(img)) {  // triggers the post + HUD composite
+            std::fprintf(stderr, "readback: %s\n", renderer.last_error().c_str()); return 1;
+        }
+        ++composited;
+    }
+    const uint32_t dbg = renderer.debug_error_count();
+    std::printf("screens_composited: %d\n", composited);
+    std::printf("debug_error_count: %u\n", dbg);
+    return dbg == 0 ? 0 : 3;
+}
+
+// The windowed game shell: boot to the main menu, New Game -> the live walk, Esc ->
+// pause, Settings, Quit. Menu screens present the overlay; Play runs the M13 walk +
+// M14 audio. Synthetic-input transitions are covered by the headless menu tests; this
+// is the interactive shell. `--seconds N` auto-exits (debug-clean smoke for the gate).
+int run_game(const Options& o) {
+    using namespace br::core;
+    using namespace std::chrono;
+    HWND hwnd = create_window(o.width, o.height);
+    if (!hwnd) { std::fprintf(stderr, "window creation failed\n"); return 1; }
+    SetForegroundWindow(hwnd); SetFocus(hwnd);
+    Renderer renderer;
+    if (!renderer.init_windowed(hwnd, o.width, o.height)) {
+        std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1;
+    }
+
+    app::MenuModel model;
+    model.seed = o.seed;
+
+    std::unique_ptr<br::stream::StreamManager> sm;
+    WorldState s(o.seed);
+    std::vector<Aabb> collision;
+    contracts::ChunkKey cached{ 0, static_cast<int64_t>(1) << 40, 0 };
+    uint64_t texSeed = o.seed;
+    auto rebuild = [&](contracts::ChunkKey c) {
+        collision.clear();
+        collision.push_back(Aabb{ {-1.0e6f, -1.0f, -1.0e6f}, {1.0e6f, 0.0f, 1.0e6f} });
+        for (int64_t dx = -1; dx <= 1; ++dx)
+            for (int64_t dz = -1; dz <= 1; ++dz) {
+                const contracts::ChunkData cd = contracts::GenerateChunk(texSeed, contracts::ChunkKey{ 0, c.cx + dx, c.cz + dz });
+                for (const auto& b : cd.collision) collision.push_back(Aabb{ {b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]} });
+            }
+        cached = c;
+    };
+    uint64_t prevSteps = 0;
+    auto start_session = [&](uint64_t seed) {
+        texSeed = seed;
+        renderer.set_texture_seed(seed);
+        sm = std::make_unique<br::stream::StreamManager>(seed, static_cast<int>(o.radius), o.workers);
+        s = WorldState(seed);
+        s.wanderer.pos = Vec3{ 2.0f, kWandererHalfHeight + 0.02f, 2.0f };
+        const contracts::ChunkKey c0 = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+        rebuild(c0);
+        sm->update(c0); sm->wait_idle(); sm->update(c0);
+        prevSteps = footstep_count(s);
+    };
+
+    audio::AudioEngine eng(o.seed, contracts::kAudioSampleRate);
+    bool audioOn = o.no_audio ? false : eng.start_device(false);
+
+    const float aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+    const float tickDt = 1.0f / 120.0f;
+    const float kSens = 0.0022f;
+    const POINT ctr{ static_cast<LONG>(o.width / 2), static_cast<LONG>(o.height / 2) };
+    auto recenter = [&]() -> POINT { POINT p = ctr; ClientToScreen(hwnd, &p); SetCursorPos(p.x, p.y); return p; };
+    POINT anchor = ctr;
+    bool cursorHidden = false;
+
+    struct Keys { bool up=false, down=false, left=false, right=false, enter=false, esc=false; } prev;
+    auto edge = [](bool now, bool& p) { const bool e = now && !p; p = now; return e; };
+
+    const auto t_start = steady_clock::now();
+    auto prevt = t_start;
+    float accum = 0.0f;
+    const bool timed = (o.seconds > 0);
+    uint64_t frames = 0;
+    bool running = true;
+    while (running) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) running = false;
+            TranslateMessage(&msg); DispatchMessageW(&msg);
+        }
+        if (!running) break;
+        if (timed && steady_clock::now() >= t_start + seconds(static_cast<long long>(o.seconds))) break;
+
+        const bool inPlay = (model.screen == app::Screen::Play);
+        if (inPlay && !cursorHidden) { ShowCursor(FALSE); anchor = recenter(); cursorHidden = true; }
+        if (!inPlay && cursorHidden) { ShowCursor(TRUE); cursorHidden = false; }
+
+        // Edge-detected menu navigation (arrows; WASD doubles as nav outside Play).
+        const bool kUp = (GetAsyncKeyState(VK_UP) & 0x8000) || (!inPlay && (GetAsyncKeyState('W') & 0x8000));
+        const bool kDn = (GetAsyncKeyState(VK_DOWN) & 0x8000) || (!inPlay && (GetAsyncKeyState('S') & 0x8000));
+        const bool kLf = (GetAsyncKeyState(VK_LEFT) & 0x8000) || (!inPlay && (GetAsyncKeyState('A') & 0x8000));
+        const bool kRt = (GetAsyncKeyState(VK_RIGHT) & 0x8000) || (!inPlay && (GetAsyncKeyState('D') & 0x8000));
+        const bool kEn = (GetAsyncKeyState(VK_RETURN) & 0x8000) || (!inPlay && (GetAsyncKeyState(VK_SPACE) & 0x8000));
+        const bool kEs = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+        const bool eUp = edge(kUp, prev.up), eDn = edge(kDn, prev.down), eLf = edge(kLf, prev.left);
+        const bool eRt = edge(kRt, prev.right), eEn = edge(kEn, prev.enter), eEs = edge(kEs, prev.esc);
+        app::UiAction act = app::UiAction::None;
+        if (eEs) act = app::UiAction::Back;
+        else if (eEn) act = app::UiAction::Activate;
+        else if (eUp) act = app::UiAction::Up;
+        else if (eDn) act = app::UiAction::Down;
+        else if (eLf) act = app::UiAction::Left;
+        else if (eRt) act = app::UiAction::Right;
+
+        if (act != app::UiAction::None) {
+            const app::UiCommand cmd = app::menu_step(model, act);
+            if (cmd == app::UiCommand::StartGame) start_session(model.seed);
+            else if (cmd == app::UiCommand::QuitApp) running = false;
+            // ResumeGame keeps the existing session as-is.
+        }
+        if (audioOn) {
+            eng.set_master_volume(static_cast<float>(model.settings.master_pct) / 100.0f);
+            eng.set_sfx_volume(static_cast<float>(model.settings.sfx_pct) / 100.0f);
+        }
+        if (!running) break;
+
+        const auto now = steady_clock::now();
+        accum += duration<float>(now - prevt).count();
+        prevt = now;
+        if (accum > 0.25f) accum = 0.25f;
+
+        if (model.screen == app::Screen::Play && sm) {
+            POINT cur; GetCursorPos(&cur);
+            const float look_yaw = static_cast<float>(cur.x - anchor.x) * kSens;
+            const float look_pitch = -static_cast<float>(cur.y - anchor.y) * kSens;
+            anchor = recenter();
+            contracts::InputCommand in{};
+            if (GetAsyncKeyState('W') & 0x8000) in.move_z += 1.0f;
+            if (GetAsyncKeyState('S') & 0x8000) in.move_z -= 1.0f;
+            if (GetAsyncKeyState('D') & 0x8000) in.move_x += 1.0f;
+            if (GetAsyncKeyState('A') & 0x8000) in.move_x -= 1.0f;
+            if (GetAsyncKeyState(VK_SPACE) & 0x8000) in.buttons |= contracts::kButtonJump;
+            bool firstTick = true;
+            while (accum >= tickDt) {
+                const contracts::ChunkKey here = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+                if (here != cached) rebuild(here);
+                contracts::InputCommand step = in;
+                if (firstTick) { step.look_yaw = look_yaw; step.look_pitch = look_pitch; firstTick = false; }
+                tick(s, step, collision);
+                accum -= tickDt;
+            }
+            if (audioOn) {
+                const uint64_t steps = footstep_count(s);
+                eng.post(audio_listener(s), 1.2f, static_cast<uint32_t>(steps - prevSteps));
+                prevSteps = steps;
+            }
+            const contracts::ChunkKey center = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+            sm->update(center);
+            const contracts::CameraPose cam = wanderer_camera(s, aspect);
+            uint32_t drawn = 0;
+            if (!renderer.render_chunks_windowed(cam, sm->resident(), 8u, s.tick, &drawn)) {
+                std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); ShowCursor(TRUE); return 1;
+            }
+        } else {
+            accum = 0.0f;  // sim time doesn't advance in menus
+            std::vector<uint8_t> ovl;
+            app::build_menu_overlay(ovl, o.width, o.height, model);
+            if (!renderer.present_overlay_windowed(ovl.data(), o.width, o.height)) {
+                std::fprintf(stderr, "overlay: %s\n", renderer.last_error().c_str()); ShowCursor(TRUE); return 1;
+            }
+            if (model.screen == app::Screen::Quit) running = false;
+        }
+        ++frames;
+    }
+    if (cursorHidden) ShowCursor(TRUE);
+    const uint32_t dbg = renderer.debug_error_count();
+    const unsigned long long underruns = static_cast<unsigned long long>(audioOn ? eng.underruns() : 0ull);
+    eng.stop();
+    std::printf("game_seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("frames: %llu\n", static_cast<unsigned long long>(frames));
+    std::printf("final_screen: %d\n", static_cast<int>(model.screen));
     std::printf("audio_underruns: %llu\n", underruns);
     std::printf("debug_error_count: %u\n", dbg);
     return dbg == 0 ? 0 : 3;
@@ -1996,6 +2249,9 @@ int main(int argc, char** argv) {
     if (o.director_replay) return run_director_replay(o);
     if (o.intro)      return run_intro(o);
     if (o.play)       return run_play(o);
+    if (o.menu_shot)  return run_menu_shot(o);
+    if (o.menu_smoke) return run_menu_smoke(o);
+    if (o.game)       return run_game(o);
     if (o.soak)       return run_soak(o);
     if (o.sim)     return run_sim(o);
     if (o.walkbot) return run_walkbot(o);
