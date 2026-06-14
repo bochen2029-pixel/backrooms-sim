@@ -18,9 +18,10 @@ Backup remote: **https://github.com/bochen2029-pixel/backrooms-sim** (private).
 | **M8** | VHS post-processing stack + HUD/timestamp | M8 | ✅ `m8-green` |
 | **M9** | DXR path-traced mode (BLAS/TLAS, inline-RayQuery PT, accumulation) | M9 | ✅ `m9-green` |
 | **M10** | Walk-bot soak + hardening (telemetry, contactsheet, minidump) | M10 | ✅ `m10-green` |
-| M11–M12 | Director · acceptance | — | ⬜ pending |
+| **M11** | The Director + The Voice (local LLM via the KEEL sidecar) | M11 | ✅ `m11-green` |
+| M12 | Integration · polish · 12 h acceptance | — | ⬜ pending |
 
-**11 milestones green and pushed.** Each is verified by a machine-checkable gate
+**12 milestones green and pushed.** Each is verified by a machine-checkable gate
 (`scripts/gate.ps1 -Milestone M<N>` exits 0) and tagged; the remote is the backup.
 
 All numbers below are from real gate runs on the dev machine (RTX 4070 Ti SUPER,
@@ -187,6 +188,30 @@ audit-failures / stuck / debug; (#2) **contact sheet** mechanical screen (no
 all-black/white) + agent visual review; (#3) **forced-crash drill** — minidump
 captured, exit 70, clean auto-restart. ADR-037.
 
+### M11 — The Director + The Voice (local LLM)
+The world gets a mind — without surrendering determinism. An ambient game-master
+reads a deterministic **WandererSummary** and emits a schema-validated **Directive**
+(flicker a light sector, a distant sound, a biome lean, an intercom line, a wanderer
+note). **The model runs in a separate process:** the Director routes to a local
+**KEEL sidecar** (OpenAI-compatible HTTP, Qwen-9B, $0/local/sovereign) instead of an
+embedded llama.cpp — a dependency *removal* (Catch2 + stb stay the only third-party
+libs; WinHTTP is a system lib), and Backrooms is KEEL's first proof-of-cell (ADR-038).
+Raw model text never crosses into the sim: a dependency-free JSON reader + a schema
+validator reject anything off-schema; valid directives enter only as recorded
+Event-Log entries (`replay_v1`) at a deterministic `effective_tick`, and they're
+**presentation-layer only** so they never perturb the WorldState hash. The Voice
+renders captions; notes cache per location hash; `--no-director` is the kill switch.
+**Gate (all 5 exit criteria):** (#4, the sacred one) **replay bit-identical with the
+model fully offline** — record a run with the Director live, replay it with KEEL
+unreachable → identical combined hash (proven from every angle: WorldState folds in,
+the director stream folds in, replay contacts KEEL zero times, unreachable → graceful
+no-op); (#1) **100% schema-valid** directives + lint over 100 scenarios; (#3) **p95
+latency ~0.5 s** (< 5 s); (#2) **async isolation** — the Director thread never stalls
+the sim (integration overhead ~0; no new hitches; ambient-pacing frame-time within a
+stated band of OFF — the live-inference baseline shift is shared-GPU contention, not a
+stall, honestly reformulated in ADR-039); (#5) **`--no-director`** runs a clean soak.
+ADR-038, ADR-039.
+
 ---
 
 ## Architecture & invariants (the rules that keep it coherent)
@@ -251,24 +276,20 @@ App modes built so far: `--headless` · `--window` · `--scene` · `--sim` ·
 
 ## What's next
 
-- **M11** the Director + the Voice (local LLM via llama.cpp on its own thread):
-  wanderer-summary JSON in → schema-validated Directive JSON out (flicker sector,
-  distant sound cue, biome bias, intercom line, wanderer note); invalid output
-  rejected + logged; determinism preserved (LLM enters the sim only as a logged
-  event stream; replays consume the log, not the model); `--no-director` kill switch.
-- **M12** integration, polish, acceptance (noclip intro, photo mode, settings,
-  one-command build/run, **12 h unattended acceptance soak with Director ON**).
+- **M12** integration, polish, acceptance: noclip intro sequence, photo mode, a
+  settings file, README with one-command build/run, final spec-reconciliation audit,
+  and the **12 h unattended acceptance soak with the Director ON** (M10 soak gates +
+  the KEEL sidecar). The Director's M12 packaging: vendor a clean release
+  `keel-serve.exe` + a tuned `keel.lock` into `third_party/keel/` (config, not a fork).
 
 ## How to continue (next session)
 
 1. Read `docs/ARCHITECTURE.md`, the latest `docs/SESSION_LOG.md` entry, and the
-   M11 section of `docs/MILESTONES.md`.
-2. Produce the M11 change manifest (`director`: llama.cpp host on its own thread +
-   message queue, `contracts/director_v1.h` schema, schema validation + event log,
-   the Voice captions, eval suite, `--no-director`) before writing code. **New deps
-   (llama.cpp + a quantized instruct model) = ADRs + vcpkg/download step.**
-3. Run `gate.ps1 -Milestone M11` until exit 0, regression-sweep M0–M10, tag
-   `m11-green`, push, write the SESSION_LOG entry.
+   M12 section of `docs/MILESTONES.md`.
+2. Produce the M12 change manifest (noclip intro, photo mode, `config.toml`, README
+   one-command run, KEEL release-vendor, the 12 h acceptance harness) before code.
+3. Run `gate.ps1 -Milestone M12` until exit 0, regression-sweep M0–M11, tag
+   `v1.0`, push, write the SESSION_LOG entry.
 
-_The repo is the memory. Last fully-green tag: `m10-green`. Never resume from a
+_The repo is the memory. Last fully-green tag: `m11-green`. Never resume from a
 broken state — revert to the last green tag if needed._

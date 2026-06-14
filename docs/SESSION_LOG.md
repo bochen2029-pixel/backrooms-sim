@@ -4,14 +4,46 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
-## Session 12 — M11: The Director (via KEEL sidecar)  🟡 IN PROGRESS (phases 11a + 11b done — live end-to-end)
+## Session 12 — M11: The Director (via KEEL sidecar)  ✅ COMPLETE (`m11-green`, all 5 exit gates)
 
-**Last green tag: `m10-green`; phases 11a + 11b committed on top (additive, ctest
-51/51). Start at phase 11c (async in-loop host + event log + The Voice + note cache
-+ `--no-director`).** **Decision (ADR-038): the Director routes through the KEEL
-sidecar's OpenAI HTTP egress, NOT embedded llama.cpp** — a dependency *removal*
-(Catch2 + stb stay the only third-party libs; winhttp is a system lib). KEEL is the
-operator's sovereign LLM substrate and names Backrooms as its first cell.
+**`gate.ps1 -Milestone M11` exits 0 with all 5 exit gates; M0–M10 regression sweep
+green; tagged `m11-green` + pushed. Next: M12 (integration, polish, 12 h acceptance).**
+**Decision (ADR-038): the Director routes through the KEEL sidecar's OpenAI HTTP
+egress, NOT embedded llama.cpp** — a dependency *removal* (Catch2 + stb stay the only
+third-party libs; winhttp is a system lib). KEEL is the operator's sovereign LLM
+substrate and Backrooms is its first proof-of-cell.
+
+**Done (phases 11c + 11d — sim wiring, async host, eval, all 5 gates; commits
+`ade4802`, `034e0bc`, `991faac`).**
+- **Gate 4 (THE sacred one) — replay bit-identical with the model OFFLINE.** Director
+  event log (`replay_v1` extension: `DirectorLogHeader` + `DirectorEvent` records).
+  `--director-record` walks (reusing `MazeWalker`) with the Director ON (live KEEL),
+  folding a combined run hash = per-tick `world_state_hash` ⊕ applied director-event
+  bytes, logging each validated directive at its tick; `--director-replay` re-walks
+  the SAME run with KEEL never contacted → **identical hash**. Proven from every
+  angle: WorldState folds in (seeds differ), the director stream folds in (5-event ≠
+  0-event), replay = 0 KEEL calls (structural), unreachable KEEL = graceful no-op.
+- **Async `DirectorHost`** (worker thread; non-blocking submit/poll, latest-wins) +
+  `--soak --director` (ambient wall-clock pacing) + `--no-director` kill switch (off
+  by default → M10 soak byte-unchanged). The Voice (latest caption) + note cache.
+- **`--director-eval`** (N scenarios → schema-valid % + p95 latency + samples).
+- **Gate 2 reformulated honestly (ADR-039):** the async-isolation INVARIANT is
+  unchanged; the "frame-time identical" metric was confounded by the KEEL sidecar's
+  **shared-GPU reality** (Qwen-9B inference + renderer on one RTX). Gate 2 = A
+  (integration overhead ~0 via dead-url; no new hitches via p99/median) + B (ambient
+  median within a stated band of OFF). A recorded, reasoned redefinition — not a
+  softening; surfaced to the operator, who ratified A+B / skip C.
+- **`Invoke-GateM11`** (5 gates): #1 schema-valid (100% / 100), #2 async isolation
+  (deadurl 1.00× / live 1.03× / hitch 1.06× off), #3 p95 ~0.5 s (< 5 s), #4 replay
+  determinism (bit-identical), #5 `--no-director` clean. + golden regression + INV-5
+  + inventory. **gate.ps1 M11 exits 0; M0–M10 sweep green.**
+
+**Gotchas.** KEEL sidecar must be live at `:7071` (`C:\keel-sidecar-7071\start.cmd`);
+use :7071 NOT :7070 (KEEL's own dev endpoint, volatile); do NOT touch `C:\KEEL`. GBNF
+constrained decode is not exposed over KEEL's HTTP yet → the post-hoc validator is the
+schema guarantee (100% in practice anyway). Director captions are sanitised to printable
+ASCII (the HUD font). Sample Voice lines: *"Room 66 is unoccupied. Please do not linger
+near the ventilation intake."*
 
 **The wire (verified live).** `POST http://127.0.0.1:7071/v1/chat/completions` with
 `{"messages":[{"role":"user","content":"<prompt>"}],"sovereign":true,"kind":
@@ -39,28 +71,6 @@ total). 10 unit tests.
 on-theme directives** (e.g. `{"type":"sound","intensity":0.4,"detail":"hum of
 fluorescent lights flickering in unison"}`; biome_bias with correct numeric biome),
 tier local, $0.
-
-**Remaining for M11 (start at phase 11c).**
-- **11c — async in-loop host + event log + The Voice + kill switch.** A Director
-  thread + queue; derive WandererSummary deterministically from sim state (odometer,
-  biome, dwell, route loops, location hash); validated directives append to a
-  recorded **director event log** (extend `replay_v1`) with a deterministic
-  `effective_tick`; presentation layers (render/audio/HUD) consume `DirectorState`;
-  **The Voice** = intercom/note captions via the M8 HUD; **note cache** per
-  `location_hash`; **`--no-director`** (no thread, empty stream). The Director NEVER
-  writes WorldState.
-- **11d — eval suite + gates + tag.** Eval (100+ scenarios → schema-valid %, lint,
-  tone rubric — likely an LLM-judge via KEEL frontier OR heuristic); gates: replay
-  bit-identical with model OFFLINE (record+replay incl. director stream); frame-time
-  identical gen-on vs `--no-director` (async isolation); p95 directive latency < 5 s;
-  `--no-director` passes the M10 soak. `Invoke-GateM11` + tag `m11-green`.
-
-**Gotchas.** GBNF constrained decode is NOT exposed over KEEL's HTTP egress yet
-(`grammar:None` in keel-serve) → validate **post-hoc** (reject+log invalid), which
-is already the design. KEEL is mid-Stage-2; its `:7070` cycles — the `:7071` sidecar
-is independent. The Director's HTTP call is record-time only; the determinism gate
-hinges on the **event-log replay** (11c), so design `replay_v1`'s director-log
-extension carefully (logged `{effective_tick, Directive}`, consumed on replay).
 
 ---
 
