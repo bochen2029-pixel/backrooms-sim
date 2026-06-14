@@ -184,4 +184,29 @@ bool parse(const std::string& text, Value& out, std::string& err) {
     return true;
 }
 
+std::string escape(const std::string& s) {
+    std::string o;
+    o.reserve(s.size() + 8);
+    for (char c : s) {
+        switch (c) {
+            case '"':  o += "\\\""; break;
+            case '\\': o += "\\\\"; break;
+            case '\n': o += "\\n"; break;
+            case '\r': o += "\\r"; break;
+            case '\t': o += "\\t"; break;
+            case '\b': o += "\\b"; break;
+            case '\f': o += "\\f"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(static_cast<unsigned char>(c)));
+                    o += buf;
+                } else {
+                    o += c;
+                }
+        }
+    }
+    return o;
+}
+
 }  // namespace br::director::json

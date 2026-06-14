@@ -51,4 +51,8 @@ struct Value {
 // trailing garbage, unterminated strings/containers, and bad escapes.
 bool parse(const std::string& text, Value& out, std::string& err);
 
+// Escape `s` as the body of a JSON string (WITHOUT surrounding quotes): handles
+// " \ and control bytes; other bytes pass through. For building request bodies.
+std::string escape(const std::string& s);
+
 }  // namespace br::director::json

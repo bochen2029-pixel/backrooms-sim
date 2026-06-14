@@ -66,8 +66,13 @@ errors to process exit codes for the gate scripts (ARCHITECTURE.md §7).
   audits, and dumps periodic screenshots for `contactsheet`. Prints frames, audits,
   audit_failures, stuck_events, screenshots, mem first/last, debug count.
 
-**Planned.** `config.toml` + flag/config mirroring (M12), noclip intro + photo
-mode (M12), `--no-director` (M11).
+- `--director-probe [--seed S] [--director-url host:port]` (M11) — renders a
+  representative WandererSummary → KEEL sidecar (default `127.0.0.1:7071`) → prints
+  the KEEL routing (tier/cost/route), the raw directive JSON, and the validator
+  verdict. The end-to-end Director wire; live-validates the sidecar.
+
+**Planned.** `--no-director` + the in-loop async Director (M11c), `config.toml` +
+flag/config mirroring (M12), noclip intro + photo mode (M12).
 
 **Status:** M8 — adds `--post` (VHS post + HUD/timestamp; `app/hud.*` bitmap
 font). Earlier: M7 `--biomeat`/`--descend`, M6 `--render-wav`/`--footsteps`/

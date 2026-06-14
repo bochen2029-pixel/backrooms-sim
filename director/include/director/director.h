@@ -32,4 +32,8 @@ struct DirectiveResult {
 // fields; sanitises captions to bounded printable ASCII. Pure + total (no I/O).
 DirectiveResult validate_directive(const std::string& json_content);
 
+// Render a WandererSummary into the Director's instruction prompt (the exact
+// directive schema + the situation). Record-time only; never touches the sim.
+std::string render_prompt(const contracts::WandererSummary& s);
+
 }  // namespace br::director

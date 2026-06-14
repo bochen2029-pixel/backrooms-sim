@@ -37,6 +37,8 @@
 #include "telemetry/crash.h"
 #include "render_d3d12/renderer.h"
 #include "render_dxr/dxr.h"
+#include "director/director.h"
+#include "director/keel_client.h"
 #include "audio/synth.h"
 #include "audio/room_probe.h"
 #include "audio/wav.h"
@@ -56,12 +58,12 @@ struct Options {
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
     bool biomeat = false, descend = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
-    bool soak = false, crash_test = false;
+    bool soak = false, crash_test = false, director_probe = false;
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
     uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0, spp = 256;
     uint32_t shot_every = 600;   // soak: write a screenshot every N rendered frames
     uint64_t seed = 1u;
-    std::string out, record, replay, hashlog, csv, audiolog, crash_dir;
+    std::string out, record, replay, hashlog, csv, audiolog, crash_dir, director_url;
 };
 
 int usage() {
@@ -113,6 +115,8 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--soak") == 0) o.soak = true;
         else if (std::strcmp(a, "--crash-test") == 0) o.crash_test = true;
         else if (std::strcmp(a, "--crash-dir") == 0) { if (!str(o.crash_dir)) return false; }
+        else if (std::strcmp(a, "--director-probe") == 0) o.director_probe = true;
+        else if (std::strcmp(a, "--director-url") == 0) { if (!str(o.director_url)) return false; }
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -627,6 +631,55 @@ int run_walkbot(const Options& o) {
     std::printf("stuck_events: %llu\n", static_cast<unsigned long long>(stuck_events));
     std::printf("final_hash: %016llx\n", static_cast<unsigned long long>(world_state_hash(s)));
     return (s.odometer >= target_m && stuck_events == 0) ? 0 : 4;
+}
+
+// ----- M11 Director probe: WandererSummary -> KEEL sidecar -> validated Directive -
+int run_director_probe(const Options& o) {
+    std::string host = "127.0.0.1";
+    int port = 7071;
+    if (!o.director_url.empty()) {
+        const std::string& u = o.director_url;
+        const size_t colon = u.rfind(':');
+        if (colon != std::string::npos) { host = u.substr(0, colon); port = std::atoi(u.c_str() + colon + 1); }
+        else { host = u; }
+    }
+
+    // A representative wanderer summary (the real sim-derived summary lands in 11c).
+    contracts::WandererSummary sum{};
+    sum.tick = (o.ticks > 0) ? o.ticks : 130000u;   // ~18 min @ 120 Hz
+    sum.world_seed = o.seed;
+    sum.level = 0;
+    sum.chunk_cx = 7; sum.chunk_cz = -2;
+    sum.biome = static_cast<int32_t>(o.seed % static_cast<uint64_t>(contracts::kDirectorBiomeCount));
+    sum.distance_m = 1240.0f;
+    sum.dwell_seconds = 95.0f;
+    sum.route_loops = 3;
+    sum.location_hash = o.seed * 0x9E3779B97F4A7C15ull + 7u;
+
+    const std::string prompt = br::director::render_prompt(sum);
+    std::printf("director_url: %s:%d\n", host.c_str(), port);
+    const br::director::KeelResponse resp = br::director::keel_complete(host, port, prompt, 15000);
+    if (!resp.ok) {
+        std::fprintf(stderr, "keel: %s\n", resp.error.c_str());
+        std::printf("keel_ok: 0\n");
+        return 1;
+    }
+    std::printf("keel_ok: 1\n");
+    std::printf("keel_http: %d\n", resp.http_status);
+    std::printf("keel_tier: %s\n", resp.tier.c_str());
+    std::printf("keel_cost: %.6f\n", resp.cost);
+    std::printf("keel_route: %s\n", resp.route.c_str());
+    std::printf("content: %s\n", resp.content.c_str());
+
+    const br::director::DirectiveResult vr = br::director::validate_directive(resp.content);
+    std::printf("directive_valid: %d\n", vr.ok ? 1 : 0);
+    if (vr.ok) {
+        std::printf("directive_kind: %d\n", static_cast<int>(vr.directive.kind));
+        if (vr.directive.caption[0] != '\0') std::printf("directive_caption: %s\n", vr.directive.caption);
+    } else {
+        std::printf("reject_reason: %s\n", vr.reject_reason.c_str());
+    }
+    return resp.ok ? 0 : 1;
 }
 
 // ----- M10 walk-bot soak: long-haul walk + render + telemetry + audits --------
@@ -1456,6 +1509,7 @@ int main(int argc, char** argv) {
     if (o.dxr_ghost)  return run_dxr_ghost(o);
     if (o.dxr_walk)   return run_dxr_walk(o);
     if (o.dxr)        return run_dxr(o);
+    if (o.director_probe) return run_director_probe(o);
     if (o.soak)       return run_soak(o);
     if (o.sim)     return run_sim(o);
     if (o.walkbot) return run_walkbot(o);

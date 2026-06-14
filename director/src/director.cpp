@@ -3,6 +3,7 @@
 #include "director/json.h"
 
 #include <cstddef>
+#include <cstdio>
 #include <string>
 
 namespace br::director {
@@ -94,6 +95,32 @@ DirectiveResult validate_directive(const std::string& json_content) {
     r.ok = true;
     r.directive = d;
     return r;
+}
+
+std::string render_prompt(const contracts::WandererSummary& s) {
+    static const char* kBiomes[contracts::kDirectorBiomeCount] = {
+        "classic yellow rooms", "cubicle farm", "pipe corridors", "parking garage", "poolrooms",
+    };
+    const int bi = (s.biome >= 0 && s.biome < contracts::kDirectorBiomeCount) ? s.biome : 0;
+    const double minutes = static_cast<double>(s.tick) / (120.0 * 60.0);
+    char buf[1024];
+    std::snprintf(buf, sizeof(buf),
+        "You are the Director of an infinite Backrooms walking simulation - an ambient, "
+        "unsettling game-master. Given the wanderer summary, emit EXACTLY ONE directive as a "
+        "single compact JSON object and NOTHING else, matching one of:\n"
+        "{\"type\":\"flicker\",\"sector\":<integer 0-63>,\"intensity\":<0.0-1.0>}\n"
+        "{\"type\":\"sound\",\"intensity\":<0.0-1.0>,\"detail\":\"<caption>\"}\n"
+        "{\"type\":\"biome_bias\",\"biome\":<integer 0-4>,\"detail\":\"<caption>\"}\n"
+        "{\"type\":\"intercom\",\"detail\":\"<caption>\"}\n"
+        "{\"type\":\"note\",\"detail\":\"<caption>\"}\n"
+        "Captions: under 100 chars, liminal and eerie, printable ASCII only. Output ONLY the JSON.\n\n"
+        "Wanderer summary: walked %.0f m over %.1f min; biome '%s' (id %d); %u route loops; "
+        "dwelling %.0f s near chunk (%lld,%lld); level %d.",
+        static_cast<double>(s.distance_m), minutes, kBiomes[bi], bi,
+        static_cast<unsigned>(s.route_loops), static_cast<double>(s.dwell_seconds),
+        static_cast<long long>(s.chunk_cx), static_cast<long long>(s.chunk_cz),
+        static_cast<int>(s.level));
+    return std::string(buf);
 }
 
 }  // namespace br::director
