@@ -1,3 +1,5 @@
 # director — L4 intelligence. Contract-only link to core; uses telemetry.
-# llama.cpp dependency is introduced in M11 (future ADR per Iron Rule 8).
+# M11: WandererSummary -> KEEL sidecar (OpenAI HTTP) -> Directive, schema-validated
+# (ADR-038 — no embedded llama.cpp; the JSON reader is dependency-free).
 backrooms_module(director DEPS core telemetry)
+target_sources(director PRIVATE src/json.cpp)

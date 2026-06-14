@@ -15,7 +15,7 @@ every change to one reconciles ARCHITECTURE.md §5 in the same commit
 | `stream_events_v1.h` | stream → renderers | **present (M3)** |
 | `audio_events_v1.h` | core → audio | **present (M6)** |
 | `telemetry_v1.h` | all → telemetry | **present (M3)** |
-| `director_v1/` | core ⇄ director (JSON Schemas) | M11 |
+| `director_v1.h` | sim ⇄ director (WandererSummary + Directive + DirectorEvent) | **present (M11)** |
 
 Headers are consumed via the `contracts` INTERFACE target as
 `#include "contracts/<name>.h"`. `chunk_gen_v1` grew additively in M5 — each
