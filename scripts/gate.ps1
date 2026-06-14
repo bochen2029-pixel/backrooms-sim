@@ -1397,6 +1397,98 @@ function Invoke-GateM13 {
     Write-Note 'M13 gate: windowed playable (maze render + pacing) + regression. The game is now walkable in a window.'
 }
 
+function Invoke-GateM14 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log (incl. the miniaudio TU)' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green (incl. the SPSC ring tests)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m14'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $wavcheck = Join-Path (Get-BinDir) 'wavcheck.exe'
+
+    # Exit gate #1 — real-time audio OUTPUT. The null backend (hardware-free, CI-safe)
+    # runs the exact open -> data-callback -> ring-drain -> close path at real-time
+    # cadence; zero underruns proves the mixer keeps the device fed.
+    Assert-Gate 'real-time audio out (--audiodev --null): device opens, zero underruns, clean close' {
+        $r = Invoke-AppCapture @('--audiodev', '--null', '--seed', '9', '--seconds', '6')
+        if ($r.Exit -ne 0) { throw "--audiodev --null exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'device_open') -ne 1) { throw "null playback device did not open" }
+        $u = Get-Metric $r.Out 'underruns'
+        if ($u -ne 0) { throw "$u underruns over the null-backend playback run" }
+        $blocks = Get-Metric $r.Out 'audio_blocks'
+        if ($blocks -lt 50) { throw "implausibly few audio blocks ($blocks) -- mixer not feeding the device" }
+        Write-Note ("null device: opened ({0}), {1} blocks, 0 underruns" -f (Get-MetricStr $r.Out 'backend'), $blocks)
+    }
+
+    # Soft: the real default endpoint on the dev box (skipped, never fails, if a
+    # headless host has no device -- the null backend above covers the path).
+    Assert-Gate 'real default playback device opens clean (soft: skipped if no endpoint)' {
+        $r = Invoke-AppCapture @('--audiodev', '--seed', '9', '--seconds', '3')
+        if ($r.Exit -ne 0) { throw "--audiodev (real) exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'device_open') -eq 1) {
+            $u = Get-Metric $r.Out 'underruns'
+            if ($u -ne 0) { throw "$u underruns on the real device" }
+            Write-Note ("real device: {0}, 0 underruns" -f (Get-MetricStr $r.Out 'backend'))
+        } else {
+            Write-Note 'no default playback endpoint on this host -- real-device check skipped'
+        }
+    }
+
+    # Exit gate #2 — the offline render must be byte-for-byte what it was pre-M14
+    # (INV-1). Bit-identical across two fresh processes + 60 Hz spectrum intact.
+    Assert-Gate 'offline --render-wav bit-identical x2 + 60 Hz fundamental/harmonics (determinism intact)' {
+        if (-not (Test-Path $wavcheck)) { throw "wavcheck.exe not built" }
+        $w1 = Join-Path $tmp 'a.wav'; $w2 = Join-Path $tmp 'b.wav'
+        $r1 = Invoke-AppCapture @('--render-wav', '--seed', '7', '--ticks', '3600', '--out', $w1)
+        if ($r1.Exit -ne 0) { throw "render-wav run1 exited $($r1.Exit)" }
+        $r2 = Invoke-AppCapture @('--render-wav', '--seed', '7', '--ticks', '3600', '--out', $w2)
+        if ($r2.Exit -ne 0) { throw "render-wav run2 exited $($r2.Exit)" }
+        if ((Get-FileHash $w1).Hash -ne (Get-FileHash $w2).Hash) { throw "WAV not bit-identical across runs (M14 perturbed the offline render)" }
+        & $wavcheck assert $w1 --min-rms 0.02 --fund-ratio 8 --harm-ratio 3 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "wavcheck assert failed (exit $LASTEXITCODE)" }
+        Write-Note 'offline WAV bit-identical x2; 60 Hz fundamental + harmonics intact'
+    }
+
+    Assert-Gate 'miniaudio dependency declared: vcpkg.json + ADR-040 (Iron Rule 8)' {
+        $vj = Get-Content (Join-Path $RepoRoot 'vcpkg.json') -Raw
+        if ($vj -notmatch '"miniaudio"') { throw "miniaudio missing from vcpkg.json" }
+        $dec = Get-Content (Join-Path $RepoRoot 'docs\DECISIONS.md') -Raw
+        if ($dec -notmatch 'ADR-040') { throw "ADR-040 (miniaudio) missing from DECISIONS.md" }
+    }
+
+    Assert-Gate 'regression: M6 headless audio soak still zero-underrun (virtual-cursor path intact)' {
+        $on = Invoke-AppCapture @('--audiosoak', '--seed', '9', '--seconds', '4', '--audio')
+        if ($on.Exit -ne 0) { throw "audio soak exited $($on.Exit)" }
+        $u = Get-Metric $on.Out 'underruns'
+        if ($u -ne 0) { throw "$u underruns in the M6 headless soak (regression)" }
+    }
+
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M14 gate: real-time audio output (miniaudio) + offline WAV untouched. The game has sound.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -1417,6 +1509,7 @@ try {
         'M11'   { Invoke-GateM11 }
         'M12'   { Invoke-GateM12 }
         'M13'   { Invoke-GateM13 }
+        'M14'   { Invoke-GateM14 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

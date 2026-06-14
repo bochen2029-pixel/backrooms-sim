@@ -31,6 +31,10 @@ typed module errors to process exit codes for the gate scripts (ARCHITECTURE.md 
 - `--audiosoak [--audio] [--seconds S | --ticks N] [--seed S]` (M6) — drive the
   sim flat-out while the real-time mixer thread runs; reports mean tick time +
   `underruns` (proves the audio thread never blocks the sim).
+- `--audiodev [--null] [--seconds S] [--seed S] [--master V] [--sfx V]` (M14) —
+  real-time audio **output**: the mixer feeds a real miniaudio playback device (or
+  the hardware-free null backend with `--null`, the gated path) through a lock-free
+  ring. Reports `device_open` / `backend` / `audio_blocks` / `underruns` (must be 0).
 - `--biomeat [--seed S]` (M7) — print the biome at the spawn chunk (0,0); used to
   target a known biome for per-biome goldens / gate captures.
 - `--descend [--seed S] [--ticks N]` (M7) — scripted stairwell descent to level
@@ -92,9 +96,10 @@ typed module errors to process exit codes for the gate scripts (ARCHITECTURE.md 
 - `--play [--seed S] [--seconds N] [--width W --height H] [--csv f] [--director]` (M13) —
   the **real-time playable windowed walk**: a fixed-120 Hz tick accumulator decoupled from
   render, WASD + jump + mouse-look, 3×3 collision rebuild as you cross chunks, Esc/close to
-  exit (spawns at the proven-open (2,2) cell). Renders via `render_chunks_windowed`. `--csv`
-  logs per-frame pacing (frame_ms + residency/mem) for the gate; `--seconds N` auto-exits
-  (headless-friendly). `scripts/run.ps1 -Window` launches this.
+  exit (spawns at the proven-open (2,2) cell). Renders via `render_chunks_windowed`, with
+  **real-time audio** (M14: WASAPI mixer; `--no-audio` / `--master` / `--sfx` to control).
+  `--csv` logs per-frame pacing (frame_ms + residency/mem) for the gate; `--seconds N`
+  auto-exits (headless-friendly). `scripts/run.ps1 -Window` launches this.
 
 **Settings & photo mode (M12).** Configuration is the **CLI flag surface** above
 (the de-facto settings interface; `scripts/run.ps1` is the one-command entry).

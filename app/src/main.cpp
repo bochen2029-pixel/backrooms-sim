@@ -65,6 +65,8 @@ struct Options {
     bool director_record = false, director_replay = false;
     bool director = false, no_director = false;   // --director enables; --no-director forces off (INV-6 kill switch)
     bool director_eval = false, intro = false, play = false;
+    bool audiodev = false, null_backend = false, no_audio = false;  // M14 real-time audio output
+    float master = 1.0f, sfx = 1.0f;    // M14 playback mix (master + SFX volume, 0..1)
     uint32_t eval_count = 100;          // --director-eval: scenario count
     uint32_t director_interval_s = 15;  // --soak --director: ambient seconds between summaries (wall clock)
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
@@ -93,6 +95,11 @@ bool parse(int argc, char** argv, Options& o) {
         auto str = [&](std::string& dst) {
             if (i + 1 >= argc) return false;
             dst = argv[++i];
+            return true;
+        };
+        auto flt = [&](float& dst) {
+            if (i + 1 >= argc) return false;
+            dst = std::strtof(argv[++i], nullptr);
             return true;
         };
         if (std::strcmp(a, "--headless") == 0) o.headless = true;
@@ -135,6 +142,11 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--director-interval") == 0) { if (!u32(o.director_interval_s)) return false; }
         else if (std::strcmp(a, "--intro") == 0) o.intro = true;
         else if (std::strcmp(a, "--play") == 0) o.play = true;
+        else if (std::strcmp(a, "--audiodev") == 0) o.audiodev = true;
+        else if (std::strcmp(a, "--null") == 0) o.null_backend = true;
+        else if (std::strcmp(a, "--no-audio") == 0) o.no_audio = true;
+        else if (std::strcmp(a, "--master") == 0) { if (!flt(o.master)) return false; }
+        else if (std::strcmp(a, "--sfx") == 0) { if (!flt(o.sfx)) return false; }
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -295,6 +307,18 @@ int run_play(const Options& o) {
     br::telemetry::FrameCsv csv;
     const bool csvOpen = !o.csv.empty() && csv.open(o.csv);
 
+    // M14: real-time audio output. The mixer runs on its own thread + device
+    // callback, fed lock-free via post(); a failed device open just means silence
+    // (never blocks the walk). Determinism is untouched — this is presentation only.
+    audio::AudioEngine eng(o.seed, contracts::kAudioSampleRate);
+    bool audioOn = false;
+    if (!o.no_audio) {
+        eng.set_master_volume(o.master);
+        eng.set_sfx_volume(o.sfx);
+        audioOn = eng.start_device(false);
+    }
+    uint64_t prevSteps = footstep_count(s);
+
     const float tickDt = 1.0f / 120.0f;
     const auto t_start = steady_clock::now();
     auto prev = t_start;
@@ -339,6 +363,12 @@ int run_play(const Options& o) {
             accum -= tickDt;
         }
 
+        if (audioOn) {  // hand the mixer the latest ear pose + footfalls this frame
+            const uint64_t steps = footstep_count(s);
+            eng.post(audio_listener(s), 1.2f, static_cast<uint32_t>(steps - prevSteps));
+            prevSteps = steps;
+        }
+
         const contracts::ChunkKey center = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
         sm.update(center);
         const contracts::CameraPose cam = wanderer_camera(s, aspect);
@@ -356,10 +386,14 @@ int run_play(const Options& o) {
     if (csvOpen) csv.close();
     ShowCursor(TRUE);
     const uint32_t dbg = renderer.debug_error_count();
+    const unsigned long long underruns = static_cast<unsigned long long>(eng.underruns());
+    std::printf("audio_backend: %s\n", audioOn ? eng.backend() : "off");
+    eng.stop();
     std::printf("play_seed: %llu\n", static_cast<unsigned long long>(o.seed));
     std::printf("frames: %llu\n", static_cast<unsigned long long>(frames));
     std::printf("ticks: %llu\n", static_cast<unsigned long long>(s.tick));
     std::printf("distance_m: %.1f\n", static_cast<double>(s.odometer));
+    std::printf("audio_underruns: %llu\n", underruns);
     std::printf("debug_error_count: %u\n", dbg);
     return dbg == 0 ? 0 : 3;
 }
@@ -1413,6 +1447,65 @@ int run_audiosoak(const Options& o) {
     return (underruns == 0) ? 0 : 5;
 }
 
+// ----- M14 real-time audio OUTPUT (to the speakers, via miniaudio) ------------
+// Same deterministic sim drive as --audiosoak, but the AudioEngine renders into a
+// real miniaudio playback device through a lock-free ring (--null forces the
+// hardware-free null backend — the gated, CI-safe path). Reports whether the device
+// opened, its backend, blocks rendered, and underruns (must be 0). Audible payoff
+// is wired into --play; this mode is the headless gate for the output path.
+int run_audiodev(const Options& o) {
+    using namespace std::chrono;
+    using namespace br::core;
+    WorldState s(o.seed);
+    s.wanderer.pos = Vec3{16.0f, kWandererHalfHeight + 0.02f, 16.0f};
+    const std::vector<Aabb>& ground = open_ground();
+
+    audio::AudioEngine eng(o.seed, contracts::kAudioSampleRate);
+    eng.set_master_volume(o.master);
+    eng.set_sfx_volume(o.sfx);
+    if (!eng.start_device(o.null_backend)) {
+        std::printf("device_open: 0\n");
+        std::printf("backend: none\n");
+        // A real device may be absent on a headless host; that is a soft outcome.
+        // The null backend, exercised by the gate, always opens — so a failure
+        // there is a hard error (exit 6).
+        return o.null_backend ? 6 : 0;
+    }
+
+    uint64_t prev_steps = footstep_count(s), footsteps = 0, nticks = 0;
+    const bool wall = (o.seconds > 0);
+    const uint64_t tick_target = (o.ticks > 0) ? o.ticks : 2000000u;
+    const auto start = steady_clock::now();
+    const auto wall_end = start + seconds(static_cast<long long>(o.seconds));
+    for (;;) {
+        if (wall) { if ((nticks & 8191u) == 0 && steady_clock::now() >= wall_end) break; }
+        else if (nticks >= tick_target) break;
+        contracts::InputCommand in{};
+        in.move_z = 1.0f;
+        in.look_yaw = 0.00008f;  // gentle loop -> stays local
+        tick(s, in, ground);
+        ++nticks;
+        const uint64_t steps = footstep_count(s);
+        const uint32_t newf = static_cast<uint32_t>(steps - prev_steps);
+        prev_steps = steps;
+        footsteps += newf;
+        eng.post(audio_listener(s), 1.2f, newf);
+    }
+
+    const unsigned long long underruns = static_cast<unsigned long long>(eng.underruns());
+    const unsigned long long blocks = static_cast<unsigned long long>(eng.blocks_rendered());
+    std::string backend = eng.backend();
+    eng.stop();
+
+    std::printf("device_open: 1\n");
+    std::printf("backend: %s\n", backend.c_str());
+    std::printf("ticks: %llu\n", static_cast<unsigned long long>(nticks));
+    std::printf("footsteps: %llu\n", static_cast<unsigned long long>(footsteps));
+    std::printf("audio_blocks: %llu\n", blocks);
+    std::printf("underruns: %llu\n", underruns);
+    return (underruns == 0) ? 0 : 5;
+}
+
 // ----- M7 verticality: scripted descent of a stairwell to level -1 ------------
 // Builds a level-0 approach floor, a stairwell set piece, and a level -1 landing,
 // then walks the wanderer forward. Gravity + capsule collision carry it down the
@@ -1886,6 +1979,7 @@ int main(int argc, char** argv) {
     if (o.render_wav) return run_render_wav(o);
     if (o.footsteps)  return run_footsteps(o);
     if (o.audiosoak)  return run_audiosoak(o);
+    if (o.audiodev)   return run_audiodev(o);
     if (o.biomeat)    return run_biomeat(o);
     if (o.descend)    return run_descend(o);
     if (o.dxr_probe)  return run_dxr_probe(o);

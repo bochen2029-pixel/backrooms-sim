@@ -5,8 +5,10 @@
 
 #include <cmath>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "audio/ring.h"
 #include "audio/room_probe.h"
 #include "audio/synth.h"
 #include "audio/wav.h"
@@ -117,4 +119,71 @@ TEST_CASE("footstep count is a pure floor of the odometer", "[m6][audio]") {
         REQUIRE(c >= prev);
         prev = c;
     }
+}
+
+// --- M14: the SPSC float ring (the real mixer -> device hand-off) -------------
+
+TEST_CASE("float ring: empty, fill, wrap, and data integrity", "[m14][audio]") {
+    audio::FloatRing ring;
+    ring.reset(4, 2);  // 4 frames usable, stereo
+    REQUIRE(ring.capacity_frames() == 4u);
+    REQUIRE(ring.readable_frames() == 0u);
+    REQUIRE(ring.writable_frames() == 4u);
+
+    float out[8] = {0};
+    REQUIRE(ring.pop(out, 4) == 0u);  // nothing to read yet
+
+    // Frame i carries {i, i+100} so we can verify exact round-trip + channel order.
+    auto frame = [](size_t i, float* f) { f[0] = static_cast<float>(i); f[1] = static_cast<float>(i) + 100.0f; };
+    float in[8];
+    for (size_t i = 0; i < 4; ++i) frame(i, in + i * 2);
+    REQUIRE(ring.push(in, 4) == 4u);
+    REQUIRE(ring.writable_frames() == 0u);
+    REQUIRE(ring.push(in, 1) == 0u);  // full: rejects further frames
+
+    // Drain 2, push 2 more -> forces a wrap across the capacity boundary.
+    REQUIRE(ring.pop(out, 2) == 2u);
+    REQUIRE(out[0] == 0.0f);  REQUIRE(out[1] == 100.0f);
+    REQUIRE(out[2] == 1.0f);  REQUIRE(out[3] == 101.0f);
+    float in2[4]; frame(4, in2); frame(5, in2 + 2);
+    REQUIRE(ring.push(in2, 2) == 2u);
+
+    // Remaining order must be frames 2,3,4,5 (FIFO across the wrap).
+    float all[8];
+    REQUIRE(ring.pop(all, 4) == 4u);
+    for (size_t i = 0; i < 4; ++i) {
+        REQUIRE(all[i * 2] == static_cast<float>(i + 2));
+        REQUIRE(all[i * 2 + 1] == static_cast<float>(i + 2) + 100.0f);
+    }
+    REQUIRE(ring.readable_frames() == 0u);
+}
+
+TEST_CASE("float ring: single-producer single-consumer loses no frames", "[m14][audio]") {
+    audio::FloatRing ring;
+    ring.reset(256, 2);
+    constexpr size_t kTotal = 200000;
+
+    std::thread producer([&] {
+        size_t sent = 0;
+        float f[2];
+        while (sent < kTotal) {
+            f[0] = static_cast<float>(sent & 0xFFFFu);
+            f[1] = -f[0];
+            if (ring.push(f, 1) == 1u) ++sent;  // spin until space (consumer drains)
+        }
+    });
+
+    size_t got = 0;
+    bool ok = true;
+    float f[2];
+    while (got < kTotal) {
+        if (ring.pop(f, 1) == 1u) {
+            const float expect = static_cast<float>(got & 0xFFFFu);
+            if (f[0] != expect || f[1] != -expect) ok = false;
+            ++got;
+        }
+    }
+    producer.join();
+    REQUIRE(ok);            // every frame arrived in order, uncorrupted
+    REQUIRE(got == kTotal);
 }
