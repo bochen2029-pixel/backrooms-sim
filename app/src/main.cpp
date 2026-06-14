@@ -64,6 +64,9 @@ struct Options {
     bool soak = false, crash_test = false, director_probe = false;
     bool director_record = false, director_replay = false;
     bool director = false, no_director = false;   // --director enables; --no-director forces off (INV-6 kill switch)
+    bool director_eval = false;
+    uint32_t eval_count = 100;          // --director-eval: scenario count
+    uint32_t director_interval_s = 15;  // --soak --director: ambient seconds between summaries (wall clock)
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
     uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0, spp = 256;
     uint32_t shot_every = 600;   // soak: write a screenshot every N rendered frames
@@ -127,6 +130,9 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--director-log") == 0) { if (!str(o.director_log)) return false; }
         else if (std::strcmp(a, "--director") == 0) o.director = true;
         else if (std::strcmp(a, "--no-director") == 0) o.no_director = true;
+        else if (std::strcmp(a, "--director-eval") == 0) o.director_eval = true;
+        else if (std::strcmp(a, "--eval-count") == 0) { if (!u32(o.eval_count)) return false; }
+        else if (std::strcmp(a, "--director-interval") == 0) { if (!u32(o.director_interval_s)) return false; }
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -692,6 +698,67 @@ int run_director_probe(const Options& o) {
     return resp.ok ? 0 : 1;
 }
 
+// ----- M11 Director eval: schema-valid rate + p95 latency over N scenarios -----
+// Gate 1 (schema-valid + lint) and Gate 3 (p95 directive latency < 5 s), measured
+// over a real N of varied WandererSummaries against the live KEEL tier.
+int run_director_eval(const Options& o) {
+    std::string host = "127.0.0.1"; int port = 7071;
+    if (!o.director_url.empty()) {
+        const size_t colon = o.director_url.rfind(':');
+        if (colon != std::string::npos) { host = o.director_url.substr(0, colon); port = std::atoi(o.director_url.c_str() + colon + 1); }
+        else host = o.director_url;
+    }
+    const uint32_t N = (o.eval_count > 0) ? o.eval_count : 100u;
+    static const char* kBiomes[5] = { "classic yellow", "cubicle farm", "pipe corridors", "parking garage", "poolrooms" };
+
+    uint32_t valid = 0, unreachable = 0;
+    std::vector<double> lat;
+    std::vector<std::string> samples;
+    for (uint32_t i = 0; i < N; ++i) {
+        contracts::WandererSummary sum{};
+        sum.tick = 1000u + i * 517u;
+        sum.world_seed = o.seed + i;
+        sum.level = (i % 9u == 0u) ? -1 : 0;
+        sum.chunk_cx = static_cast<int64_t>(i * 13u % 60u) - 30;
+        sum.chunk_cz = static_cast<int64_t>(i * 29u % 60u) - 30;
+        sum.biome = static_cast<int32_t>(i % 5u);
+        sum.distance_m = 80.0f + static_cast<float>(i * 37u % 2400u);
+        sum.dwell_seconds = static_cast<float>(i * 11u % 180u);
+        sum.route_loops = i % 6u;
+        sum.location_hash = static_cast<uint64_t>(sum.chunk_cx) * 0x9E3779B97F4A7C15ull ^ static_cast<uint64_t>(sum.chunk_cz);
+
+        const std::string prompt = br::director::render_prompt(sum);
+        const auto t0 = std::chrono::steady_clock::now();
+        const br::director::KeelResponse resp = br::director::keel_complete(host, port, prompt, 20000);
+        const auto t1 = std::chrono::steady_clock::now();
+        if (!resp.ok) { ++unreachable; continue; }
+        lat.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        const br::director::DirectiveResult vr = br::director::validate_directive(resp.content);
+        if (vr.ok) {
+            ++valid;
+            if (samples.size() < 6 && vr.directive.caption[0] != '\0')
+                samples.push_back(std::string(kBiomes[sum.biome % 5]) + " -> " + vr.directive.caption);
+        }
+    }
+    const uint32_t answered = N - unreachable;
+    std::sort(lat.begin(), lat.end());
+    auto pct = [&](double p) -> double {
+        if (lat.empty()) return 0.0;
+        return lat[static_cast<size_t>(p * static_cast<double>(lat.size() - 1))];
+    };
+
+    std::printf("eval_count: %u\n", N);
+    std::printf("answered: %u\n", answered);
+    std::printf("unreachable: %u\n", unreachable);
+    std::printf("schema_valid: %u\n", valid);
+    std::printf("schema_valid_rate: %.4f\n", answered > 0 ? static_cast<double>(valid) / answered : 0.0);
+    std::printf("latency_p50_ms: %.1f\n", pct(0.50));
+    std::printf("latency_p95_ms: %.1f\n", pct(0.95));
+    std::printf("latency_max_ms: %.1f\n", lat.empty() ? 0.0 : lat.back());
+    for (size_t i = 0; i < samples.size(); ++i) std::printf("sample_%zu: %s\n", i, samples[i].c_str());
+    return (unreachable == 0) ? 0 : 1;
+}
+
 // ----- M11 Director helpers (shared by the soak + record/replay) --------------
 namespace {
 
@@ -802,9 +869,10 @@ int run_soak(const Options& o) {
         director = std::make_unique<br::director::DirectorHost>(dh, dp);
     }
     std::map<uint64_t, contracts::Directive> note_cache;  // Wanderer Notes per location hash
-    uint64_t dir_applied = 0, last_submit = 0;
+    uint64_t dir_applied = 0;
     std::string last_caption;
-    const uint64_t kDirSubmitEvery = 240u;  // ~2 s of sim between summaries
+    const auto dir_interval = seconds(static_cast<long long>(o.director_interval_s > 0 ? o.director_interval_s : 15u));  // ambient (wall-clock) pacing
+    auto last_submit_wall = start - dir_interval;  // fire the first summary immediately
 
     for (;;) {
         if (wall) { if ((frame & 63u) == 0 && steady_clock::now() >= wall_end) break; }
@@ -853,7 +921,8 @@ int run_soak(const Options& o) {
             }
         }
         if (director) {
-            if (s.tick - last_submit >= kDirSubmitEvery) { director->submit(build_summary(s, o.seed)); last_submit = s.tick; }
+            const auto now = steady_clock::now();
+            if (now - last_submit_wall >= dir_interval) { director->submit(build_summary(s, o.seed)); last_submit_wall = now; }
             for (const contracts::Directive& d : director->poll()) {
                 ++dir_applied;
                 if (d.caption[0] != '\0') last_caption = d.caption;   // The Voice: the latest line
@@ -1669,6 +1738,7 @@ int main(int argc, char** argv) {
     if (o.dxr_walk)   return run_dxr_walk(o);
     if (o.dxr)        return run_dxr(o);
     if (o.director_probe) return run_director_probe(o);
+    if (o.director_eval)  return run_director_eval(o);
     if (o.director_record) return run_director_record(o);
     if (o.director_replay) return run_director_replay(o);
     if (o.soak)       return run_soak(o);

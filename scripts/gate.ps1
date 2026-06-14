@@ -161,6 +161,15 @@ function Get-MetricFloat {
     throw "float metric '$Key' not found in app output"
 }
 
+# Parse "key: <token>" out of captured app output as a string (e.g. a hex hash).
+function Get-MetricStr {
+    param([string]$Text, [string]$Key)
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line -match ("^\s*" + [regex]::Escape($Key) + "\s*:\s*(\S+)\s*$")) { return $matches[1] }
+    }
+    throw "string metric '$Key' not found in app output"
+}
+
 function Invoke-GateM1 {
     param([int]$SoakSeconds, [int]$WindowSeconds)
 
@@ -1106,6 +1115,124 @@ function Invoke-GateM10 {
     }
 }
 
+function Invoke-GateM11 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'ctest green (full regression, incl. director validator)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m11'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+
+    # The Director routes to the KEEL sidecar (ADR-038). It must be reachable, else
+    # the gate is vacuous. (Relaunch: C:\keel-sidecar-7071\start.cmd.)
+    Assert-Gate 'KEEL sidecar reachable (Director inference endpoint :7071)' {
+        $r = Invoke-AppCapture @('--director-probe', '--seed', '1')
+        if ($r.Exit -ne 0) { throw "director-probe exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'keel_ok') -ne 1) { throw "KEEL not reachable at :7071" }
+    }
+
+    # Exit gate #4 (THE sacred one): replay bit-identical with the model OFFLINE.
+    Assert-Gate 'Gate 4 determinism: director record == replay, KEEL fully offline' {
+        $dlog = Join-Path $tmp 'd.bin'
+        $rec = Invoke-AppCapture @('--director-record', '--seed', '11', '--ticks', '600', '--director-log', $dlog)
+        if ($rec.Exit -ne 0) { throw "record exited $($rec.Exit): $($rec.Out)" }
+        $events = Get-Metric $rec.Out 'director_events'
+        if ($events -lt 1) { throw "record captured 0 directives -- gate vacuous (KEEL down?)" }
+        $recHash = Get-MetricStr $rec.Out 'combined_hash'
+        $rep = Invoke-AppCapture @('--director-replay', '--director-log', $dlog)
+        if ($rep.Exit -ne 0) { throw "replay exited $($rep.Exit): $($rep.Out)" }
+        $repHash = Get-MetricStr $rep.Out 'combined_hash'
+        if ($recHash -ne $repHash) { throw "replay hash $repHash != record hash $recHash (NOT bit-identical)" }
+        Write-Note "Gate 4: $events directives, record==replay $recHash (model offline) -- bit-identical"
+    }
+
+    # Exit gates #1 + #3: schema-valid directives + p95 latency over a real N=100.
+    Assert-Gate 'Gates 1+3: schema-valid directives + p95 latency < 5 s (N=100)' {
+        $r = Invoke-AppCapture @('--director-eval', '--eval-count', '100', '--seed', '777')
+        if ($r.Exit -ne 0) { throw "director-eval exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'unreachable') -ne 0) { throw "KEEL went unreachable mid-eval" }
+        $rate = Get-MetricFloat $r.Out 'schema_valid_rate'
+        if ($rate -lt 0.95) { throw "schema-valid rate $rate < 0.95 (Gate 1)" }
+        $p95 = Get-MetricFloat $r.Out 'latency_p95_ms'
+        if ($p95 -ge 5000.0) { throw "p95 directive latency ${p95} ms >= 5000 (Gate 3)" }
+        Write-Note "Gates 1+3: schema-valid $rate, p95 ${p95} ms (< 5 s)"
+    }
+
+    # Exit gate #2 (reformulated, ADR-039): async isolation = A (overhead ~0 + no new
+    # hitches) + B (lived smoothness under ambient pacing within a stated band). The
+    # live-inference baseline shift is shared-GPU contention, not a stall.
+    Assert-Gate 'Gate 2 async isolation: integration ~0 + no new hitches + ambient band (A+B)' {
+        $coff = Join-Path $tmp 'g2_off.csv'; $cdead = Join-Path $tmp 'g2_dead.csv'; $clive = Join-Path $tmp 'g2_live.csv'
+        $roff = Invoke-AppCapture @('--soak', '--no-director', '--seconds', '20', '--seed', '41', '--width', '960', '--height', '540', '--csv', $coff)
+        if ($roff.Exit -ne 0) { throw "off soak exited $($roff.Exit)" }
+        Invoke-AppCapture @('--soak', '--director', '--director-url', '127.0.0.1:9999', '--seconds', '20', '--seed', '41', '--width', '960', '--height', '540', '--csv', $cdead) | Out-Null
+        $rlive = Invoke-AppCapture @('--soak', '--director', '--director-interval', '12', '--seconds', '20', '--seed', '41', '--width', '960', '--height', '540', '--csv', $clive)
+        if ($rlive.Exit -ne 0) { throw "live soak exited $($rlive.Exit)" }
+        if ((Get-Metric $rlive.Out 'debug_error_count') -ne 0) { throw "live soak had debug-layer messages" }
+        if ((Get-Metric $rlive.Out 'director_produced') -lt 1) { throw "live soak ran 0 inferences -- Gate 2 vacuous (KEEL down?)" }
+        $soff = Get-HitchStats $coff; $sdead = Get-HitchStats $cdead; $slive = Get-HitchStats $clive
+        $a1 = $sdead.Median / $soff.Median        # integration overhead (no inference)
+        $bb = $slive.Median / $soff.Median        # lived ambient median
+        $a2 = $slive.P99Ratio / $soff.P99Ratio    # relative hitch (no new stalls)
+        if ($a1 -gt 1.4) { throw ("A.1 integration overhead: deadurl median {0:N2}x off (> 1.40)" -f $a1) }
+        if ($bb -gt 1.6) { throw ("B ambient band: live median {0:N2}x off (> 1.60)" -f $bb) }
+        if ($a2 -gt 1.6) { throw ("A.2 new hitches: live p99/med {0:N2}x off (> 1.60)" -f $a2) }
+        Write-Note ("Gate 2: A.1 deadurl={0:N2}x, B live={1:N2}x, A.2 hitch={2:N2}x off (shared-GPU shift documented, ADR-039)" -f $a1, $bb, $a2)
+    }
+
+    # Exit gate #5: the kill switch -- --no-director runs the sim cleanly.
+    Assert-Gate 'Gate 5: --no-director runs a clean soak (kill switch, INV-6)' {
+        $r = Invoke-AppCapture @('--soak', '--no-director', '--seconds', '15', '--seed', '5', '--width', '640', '--height', '360')
+        if ($r.Exit -ne 0) { throw "--no-director soak exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'director') -ne 0) { throw "--no-director did not disable the Director" }
+        if ((Get-Metric $r.Out 'audit_failures') -ne 0) { throw "soak connectivity audit failed" }
+        if ((Get-Metric $r.Out 'stuck_events') -ne 0) { throw "soak walk-bot got stuck" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "soak had debug-layer messages" }
+        Write-Note "Gate 5: --no-director soak clean (director off, audits/stuck/debug clean)"
+    }
+
+    # Regression: the Director is enhancement-only -- raster goldens unchanged.
+    Assert-Gate 'regression: M5 lit shot + M4 top-down goldens still bit-match' {
+        $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+        $shot = Join-Path $tmp 'm5_shot.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        $d = (& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M5 lit shot golden regressed (diff=$d)" }
+        $td = Join-Path $tmp 'm4_td.png'
+        $r = Invoke-AppCapture @('--topdown', '--seed', '1', '--width', '512', '--height', '512', '--out', $td)
+        if ($r.Exit -ne 0) { throw "M4 top-down exited $($r.Exit)" }
+        $d = (& $hashdiff diff $td (Join-Path $RepoRoot 'goldens\m4\topdown_seed1.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M4 top-down golden regressed (diff=$d)" }
+    }
+
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+
+    Write-Note 'M11 gate covers all 5 exit gates: #1 schema-valid, #2 async isolation (A+B, ADR-039), #3 p95 latency, #4 replay determinism, #5 --no-director'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -1123,6 +1250,7 @@ try {
         'M8'    { Invoke-GateM8 }
         'M9'    { Invoke-GateM9 }
         'M10'   { Invoke-GateM10 }
+        'M11'   { Invoke-GateM11 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2
