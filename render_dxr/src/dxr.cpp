@@ -195,6 +195,7 @@ struct DxrRenderer::Impl {
     ComPtr<ID3D12RootSignature> ptRS;
     ComPtr<ID3D12StateObject> ptPso;
     ComPtr<ID3D12Resource> ptSbt;          // raygen-only table
+    uint32_t accumSamples = 0;             // spp accumulated since the last reset
 
     uint32_t width = 0, height = 0;
 
@@ -983,10 +984,12 @@ bool DxrRenderer::render_scene(const contracts::CameraPose& cam) {
     return true;
 }
 
-bool DxrRenderer::render_pt(const contracts::CameraPose& cam, uint32_t samples, uint32_t seed) {
+bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t samples, uint32_t seed, bool reset) {
     Impl& d = *impl_;
     if (!d.sceneReady || !d.ptPso || !d.shadeVb) { last_error_ = "pt scene not built"; return false; }
     if (samples == 0) samples = 1;
+    const uint32_t base = reset ? 0u : d.accumSamples;   // continue the accumulation, or start fresh
+    const uint32_t total = base + samples;
 
     const float cp = std::cos(cam.pitch), sp = std::sin(cam.pitch);
     const float syaw = std::sin(cam.yaw), cyaw = std::cos(cam.yaw);
@@ -1008,7 +1011,7 @@ bool DxrRenderer::render_pt(const contracts::CameraPose& cam, uint32_t samples, 
         setf(c, 4, fwd.x);   setf(c, 5, fwd.y);   setf(c, 6, fwd.z);   setf(c, 7, cam.aspect);
         setf(c, 8, right.x); setf(c, 9, right.y); setf(c, 10, right.z); setf(c, 11, kSceneNear);
         setf(c, 12, up.x);   setf(c, 13, up.y);   setf(c, 14, up.z);   setf(c, 15, kSceneFar);
-        c[16] = start; c[17] = count; c[18] = samples; c[19] = seed;
+        c[16] = base + start; c[17] = count; c[18] = total; c[19] = seed;
         c[20] = resolve ? 1u : 0u; setf(c, 21, kPtExposure);
         setf(c, 22, static_cast<float>(d.width)); setf(c, 23, static_cast<float>(d.height));
 
@@ -1051,7 +1054,14 @@ bool DxrRenderer::render_pt(const contracts::CameraPose& cam, uint32_t samples, 
         d.queue->ExecuteCommandLists(1, lists);
         d.wait_idle();
     }
+    d.accumSamples = total;
     return true;
 }
+
+bool DxrRenderer::render_pt(const contracts::CameraPose& cam, uint32_t samples, uint32_t seed) {
+    return render_pt_frame(cam, samples, seed, true);
+}
+
+uint32_t DxrRenderer::accum_samples() const { return impl_ ? impl_->accumSamples : 0; }
 
 }  // namespace br::render_dxr

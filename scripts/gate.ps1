@@ -965,6 +965,44 @@ function Invoke-GateM9 {
         }
     }
 
+    # Exit gate #3: interactive PT. (a) >= 60 FPS while walking (1-spp moving frames
+    # at 1440p); (b) accumulation resets on movement (no-ghost) -- a clean reset
+    # matches a fresh render, while NOT resetting blends the prior pose in (large
+    # delta), proving the renderer supports a correct reset-on-move.
+    Assert-Gate 'interactive PT: >= 60 FPS @ 1440p + accumulation resets on movement (no ghost)' {
+        $rf = Invoke-AppCapture @('--dxr-fps', '--seed', '1', '--pose', '3', '--spp', '1', '--width', '2560', '--height', '1440')
+        if ($rf.Exit -ne 0) { throw "--dxr-fps exited $($rf.Exit): $($rf.Out)" }
+        if ((Get-Metric $rf.Out 'debug_error_count') -ne 0) { throw "FPS run had debug-layer messages" }
+        $fps = Get-MetricFloat $rf.Out 'fps'
+        $medms = Get-MetricFloat $rf.Out 'median_ms'
+        if ($fps -lt 60.0) { throw "interactive PT $fps FPS < 60 @ 1440p (median $medms ms)" }
+        Write-Note "interactive PT: $fps FPS @ 1440p (median $medms ms, 1 spp/frame)"
+
+        $rg = Invoke-AppCapture @('--dxr-ghost', '--seed', '1', '--width', '640', '--height', '360')
+        if ($rg.Exit -ne 0) { throw "--dxr-ghost exited $($rg.Exit): $($rg.Out)" }
+        if ((Get-Metric $rg.Out 'debug_error_count') -ne 0) { throw "ghost run had debug-layer messages" }
+        $clean = Get-MetricFloat $rg.Out 'clean_vs_fresh'
+        $ghost = Get-MetricFloat $rg.Out 'ghost_vs_fresh'
+        if ($clean -gt 0.5) { throw "accumulation reset not clean: clean_vs_fresh $clean > 0.5" }
+        if ($ghost -lt 5.0) { throw "no-ghost test has no teeth: ghost_vs_fresh $ghost < 5.0 (movement must ghost without a reset)" }
+        Write-Note "no-ghost: reset clean=$clean, un-reset ghost=$ghost"
+    }
+
+    # Exit gate #4: TLAS rebuild under streaming. A walk-bot covers 1 km in PT mode,
+    # streaming chunks (the acceleration structures rebuild as the resident set
+    # shifts), with zero debug-layer/DRED errors throughout.
+    Assert-Gate 'TLAS rebuild under streaming: walk-bot 1 km in PT mode, zero debug/DRED' {
+        $rw = Invoke-AppCapture @('--dxr-walk', '--seed', '1', '--km', '1', '--width', '640', '--height', '360')
+        if ($rw.Exit -ne 0) { throw "--dxr-walk exited $($rw.Exit): $($rw.Out)" }
+        if ((Get-Metric $rw.Out 'debug_error_count') -ne 0) { throw "1 km PT walk had debug-layer/DRED messages" }
+        $dist = Get-MetricFloat $rw.Out 'distance_m'
+        $rebuilds = Get-Metric $rw.Out 'tlas_rebuilds'
+        $ptf = Get-Metric $rw.Out 'pt_frames'
+        if ($dist -lt 1000.0) { throw "walk only reached $dist m (< 1000)" }
+        if ($rebuilds -lt 1) { throw "TLAS never rebuilt under streaming ($rebuilds rebuilds)" }
+        Write-Note "1 km PT walk: dist=$dist m, $rebuilds TLAS rebuilds, $ptf PT frames, debug-clean"
+    }
+
     # Regression: the additive depth-readback path must not perturb raster output.
     Assert-Gate 'regression: M5 lit shot + M4 top-down goldens still bit-match' {
         $tmp = Join-Path $RepoRoot 'runs\gate-m9'
@@ -991,7 +1029,7 @@ function Invoke-GateM9 {
         if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
     }
 
-    Write-Note 'M9 gate covers exit gates #1 (depth compare) + #2 (converged PT golden); gates #3-#4 land in phase 4'
+    Write-Note 'M9 gate covers all 4 exit gates: #1 depth compare, #2 converged PT golden, #3 interactive PT (FPS + no-ghost), #4 TLAS rebuild under streaming'
 }
 
 # --- dispatch ---------------------------------------------------------------

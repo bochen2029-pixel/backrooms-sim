@@ -48,6 +48,18 @@ errors to process exit codes for the gate scripts (ARCHITECTURE.md §7).
   renderer and the DXR path tracer, reads back both depth buffers, linearizes NDC
   depth to eye-space and compares per pixel (exit gate #1). Prints co-foreground
   pixel count, depth mismatch/edge fractions, mean/max rel-err, both debug counts.
+- `--dxr-pt --pose P --spp N [--seed S]` (M9) — path-traced render (emissive
+  fluorescents + shadow + GI, accumulated over N spp), `--out` PNG; prints a luma
+  band + debug count (exit gate #2 reference).
+- `--dxr-fps --pose P [--spp N]` (M9) — times N reduced-sample interactive frames
+  (resetting accumulation each frame, the moving path); prints median/p99 ms + FPS
+  (exit gate #3a).
+- `--dxr-ghost [--seed S]` (M9) — converges pose A, then renders pose B with and
+  without an accumulation reset; prints clean-vs-fresh (≈0) and ghost-vs-fresh
+  (large) mean-abs diffs, proving reset-on-move clears the accumulator (gate #3b).
+- `--dxr-walk --km K [--seed S]` (M9) — walk-bot covers K km in PT mode, rebuilding
+  the BLAS/TLAS as chunks stream; prints distance, TLAS rebuilds, PT frames, and
+  the debug count (exit gate #4).
 
 **Planned.** `config.toml` + flag/config mirroring (M12), noclip intro + photo
 mode (M12), `--no-director` (M11).

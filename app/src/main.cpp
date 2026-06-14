@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <timeapi.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -53,7 +54,7 @@ struct Options {
     bool walkbot = false, topdown = false, version = false, shot = false;
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
     bool biomeat = false, descend = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
-    bool dxr_depth = false, dxr_pt = false;
+    bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
     uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0, spp = 256;
     uint64_t seed = 1u;
@@ -103,6 +104,9 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--dxr") == 0) o.dxr = true;
         else if (std::strcmp(a, "--dxr-depth") == 0) o.dxr_depth = true;
         else if (std::strcmp(a, "--dxr-pt") == 0) o.dxr_pt = true;
+        else if (std::strcmp(a, "--dxr-fps") == 0) o.dxr_fps = true;
+        else if (std::strcmp(a, "--dxr-ghost") == 0) o.dxr_ghost = true;
+        else if (std::strcmp(a, "--dxr-walk") == 0) o.dxr_walk = true;
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
         else if (std::strcmp(a, "--version") == 0) o.version = true;
@@ -939,6 +943,22 @@ int run_dxr(const Options& o) {
     return dbg == 0 ? 0 : 3;
 }
 
+// The 5 canonical DXR poses (orientation only) at the proven-open spawn cell,
+// shared by --dxr / --dxr-pt / --dxr-fps / --dxr-ghost so they all line up.
+contracts::CameraPose canonical_pose(const Options& o, uint32_t pose) {
+    static const float yaws[5]    = { 0.0f, 1.5707963f, 3.1415927f, 0.7853982f, 4.0f };
+    static const float pitches[5] = { 0.0f, 0.0f, 0.0f, 0.42f, -0.38f };
+    const uint32_t i = pose % 5u;
+    contracts::CameraPose cam{};
+    cam.pos[0] = 16.0f;
+    cam.pos[1] = br::core::kWandererHalfHeight + 0.02f + br::core::kEyeHeight;
+    cam.pos[2] = 16.0f;
+    cam.yaw = yaws[i]; cam.pitch = pitches[i];
+    cam.fov_y = 1.2217305f;
+    cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+    return cam;
+}
+
 // ----- M9 phase 3: path-traced render (emissive fluorescents + GI, accumulated) -
 int run_dxr_pt(const Options& o) {
     struct Pose { float yaw, pitch; };
@@ -995,6 +1015,153 @@ int run_dxr_pt(const Options& o) {
     std::printf("frac_white: %.4f\n", frac_white);
     std::printf("debug_error_count: %u\n", dbg);
     return dbg == 0 ? 0 : 3;
+}
+
+// ----- M9 phase 4: interactive PT frame rate (gate #3, ">= 60 FPS while walking") -
+// Times reduced-sample frames (the moving path resets accumulation every frame).
+int run_dxr_fps(const Options& o) {
+    const contracts::CameraPose cam = canonical_pose(o, o.pose);
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    const auto center = contracts::chunk_key_at(0, 16.0f, 16.0f);
+    sm.update(center); sm.wait_idle(); sm.update(center);
+
+    br::render_dxr::DxrRenderer r;
+    if (!r.init(o.width, o.height)) { std::fprintf(stderr, "dxr init: %s\n", r.last_error().c_str()); return 1; }
+    if (!r.build_scene(sm.resident())) { std::fprintf(stderr, "dxr scene: %s\n", r.last_error().c_str()); return 1; }
+
+    const uint32_t spf = (o.spp > 0) ? o.spp : 1u;   // samples per moving frame
+    const int N = 120;
+    if (!r.render_pt_frame(cam, spf, static_cast<uint32_t>(o.seed), true)) { std::fprintf(stderr, "dxr pt: %s\n", r.last_error().c_str()); return 1; }  // warm-up
+    std::vector<double> ms; ms.reserve(static_cast<size_t>(N));
+    for (int i = 0; i < N; ++i) {
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!r.render_pt_frame(cam, spf, static_cast<uint32_t>(o.seed) + static_cast<uint32_t>(i), true)) { std::fprintf(stderr, "dxr pt: %s\n", r.last_error().c_str()); return 1; }
+        const auto t1 = std::chrono::steady_clock::now();
+        ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+    }
+    std::sort(ms.begin(), ms.end());
+    const double median = ms[static_cast<size_t>(N / 2)];
+    const double p99 = ms[static_cast<size_t>(N * 0.99)];
+    const double fps = (median > 0.0) ? 1000.0 / median : 0.0;
+    const uint32_t dbg = r.debug_error_count();
+    std::printf("resident_chunks: %llu\n", static_cast<unsigned long long>(sm.resident_count()));
+    std::printf("frames: %d\n", N);
+    std::printf("spp_per_frame: %u\n", spf);
+    std::printf("median_ms: %.3f\n", median);
+    std::printf("p99_ms: %.3f\n", p99);
+    std::printf("fps: %.1f\n", fps);
+    std::printf("debug_error_count: %u\n", dbg);
+    return dbg == 0 ? 0 : 3;
+}
+
+// ----- M9 phase 4: accumulation reset on movement (gate #3, "no ghost") --------
+// Converge pose A, then move to pose B. Resetting yields a clean B; NOT resetting
+// blends A into B (ghost). Proves the renderer supports a clean reset-on-move.
+int run_dxr_ghost(const Options& o) {
+    const contracts::CameraPose A = canonical_pose(o, 1);   // a brighter view
+    const contracts::CameraPose B = canonical_pose(o, 4);   // a darker view (looking down)
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    const auto center = contracts::chunk_key_at(0, 16.0f, 16.0f);
+    sm.update(center); sm.wait_idle(); sm.update(center);
+
+    br::render_dxr::DxrRenderer r;
+    if (!r.init(o.width, o.height)) { std::fprintf(stderr, "dxr init: %s\n", r.last_error().c_str()); return 1; }
+    if (!r.build_scene(sm.resident())) { std::fprintf(stderr, "dxr scene: %s\n", r.last_error().c_str()); return 1; }
+
+    const uint32_t seed = static_cast<uint32_t>(o.seed);
+    const uint32_t spf = 64u;
+    std::vector<uint8_t> img_ghost, img_clean, img_fresh;
+    r.render_pt_frame(A, spf, seed, true);     // converge A...
+    r.render_pt_frame(A, spf, seed, false);    // ...accumulator now holds A (128 spp)
+    r.render_pt_frame(B, spf, seed, false);    // ghost: continue with B, no reset -> A+B blend
+    if (!r.readback(img_ghost)) { std::fprintf(stderr, "readback: %s\n", r.last_error().c_str()); return 1; }
+    r.render_pt_frame(B, spf, seed, true);     // clean: reset to B
+    if (!r.readback(img_clean)) { std::fprintf(stderr, "readback: %s\n", r.last_error().c_str()); return 1; }
+    r.render_pt(B, spf, seed);                 // independent fresh B reference
+    if (!r.readback(img_fresh)) { std::fprintf(stderr, "readback: %s\n", r.last_error().c_str()); return 1; }
+
+    auto mad = [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) -> double {
+        if (a.size() != b.size() || a.empty()) return 255.0;
+        uint64_t acc = 0;
+        for (size_t i = 0; i < a.size(); ++i) { const int d = static_cast<int>(a[i]) - static_cast<int>(b[i]); acc += static_cast<uint64_t>(d < 0 ? -d : d); }
+        return static_cast<double>(acc) / static_cast<double>(a.size());
+    };
+    const double clean_vs_fresh = mad(img_clean, img_fresh);   // reset works -> ~0
+    const double ghost_vs_fresh = mad(img_ghost, img_fresh);   // no reset -> large
+    const uint32_t dbg = r.debug_error_count();
+    std::printf("clean_vs_fresh: %.4f\n", clean_vs_fresh);
+    std::printf("ghost_vs_fresh: %.4f\n", ghost_vs_fresh);
+    std::printf("debug_error_count: %u\n", dbg);
+    return dbg == 0 ? 0 : 3;
+}
+
+// ----- M9 phase 4: TLAS rebuild under streaming + walk-bot 1 km PT (gate #4) ----
+int run_dxr_walk(const Options& o) {
+    using namespace br::core;
+    const float target_m = static_cast<float>(o.km) * 1000.0f;
+
+    WorldState s(o.seed);
+    s.wanderer.pos = Vec3{ 2.0f, kWandererHalfHeight + 0.02f, 2.0f };
+    WalkBot bot(o.seed ^ 0x9e3779b97f4a7c15ULL, s.wanderer.pos);
+
+    std::vector<Aabb> collision;
+    contracts::ChunkKey cached{ 0, static_cast<int64_t>(1) << 40, 0 };
+    auto rebuild_collision = [&](contracts::ChunkKey c) {
+        collision.clear();
+        collision.push_back(Aabb{ {-1.0e6f, -1.0f, -1.0e6f}, {1.0e6f, 0.0f, 1.0e6f} });
+        for (int64_t dx = -1; dx <= 1; ++dx)
+            for (int64_t dz = -1; dz <= 1; ++dz) {
+                const contracts::ChunkData cd = contracts::GenerateChunk(o.seed, contracts::ChunkKey{ 0, c.cx + dx, c.cz + dz });
+                for (const auto& b : cd.collision) collision.push_back(Aabb{ {b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]} });
+            }
+        cached = c;
+    };
+
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    br::render_dxr::DxrRenderer r;
+    if (!r.init(o.width, o.height)) { std::fprintf(stderr, "dxr init: %s\n", r.last_error().c_str()); return 1; }
+
+    contracts::ChunkKey center = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+    rebuild_collision(center);
+    sm.update(center); sm.wait_idle(); sm.update(center);
+    if (!r.build_scene(sm.resident())) { std::fprintf(stderr, "dxr scene: %s\n", r.last_error().c_str()); return 1; }
+    contracts::ChunkKey sceneCenter = center;
+
+    uint32_t rebuilds = 0, frames = 0;
+    const uint64_t kMaxTicks = 1500000;
+    const uint64_t kRenderEvery = 120;  // ~1 s of sim between PT frames
+    uint64_t lastRender = 0;
+
+    while (s.odometer < target_m && s.tick < kMaxTicks) {
+        const contracts::ChunkKey here = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+        if (here != cached) rebuild_collision(here);
+        tick(s, bot.step(s), collision);
+
+        if (s.tick - lastRender >= kRenderEvery) {
+            const contracts::ChunkKey rc = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+            if (rc != sceneCenter) {                    // resident set shifted -> rebuild the AS
+                sm.update(rc); sm.wait_idle(); sm.update(rc);
+                if (!r.build_scene(sm.resident())) { std::fprintf(stderr, "dxr rebuild: %s\n", r.last_error().c_str()); return 1; }
+                ++rebuilds; sceneCenter = rc;
+            }
+            contracts::CameraPose cam{};
+            cam.pos[0] = s.wanderer.pos.x; cam.pos[1] = s.wanderer.pos.y + kEyeHeight; cam.pos[2] = s.wanderer.pos.z;
+            cam.yaw = s.wanderer.yaw; cam.pitch = 0.0f;
+            cam.fov_y = 1.2217305f; cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+            if (!r.render_pt_frame(cam, 1u, static_cast<uint32_t>(o.seed) + frames, true)) { std::fprintf(stderr, "dxr pt: %s\n", r.last_error().c_str()); return 1; }
+            ++frames; lastRender = s.tick;
+        }
+    }
+
+    const uint32_t dbg = r.debug_error_count();
+    std::printf("walk_seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("distance_m: %.1f\n", static_cast<double>(s.odometer));
+    std::printf("ticks: %llu\n", static_cast<unsigned long long>(s.tick));
+    std::printf("tlas_rebuilds: %u\n", rebuilds);
+    std::printf("pt_frames: %u\n", frames);
+    std::printf("debug_error_count: %u\n", dbg);
+    const bool ok = (s.odometer >= target_m) && (dbg == 0) && (rebuilds > 0);
+    return ok ? 0 : 4;
 }
 
 // ----- M9 phase 2b: cross-renderer primary-hit depth compare (exit gate #1) ---
@@ -1148,6 +1315,9 @@ int main(int argc, char** argv) {
     if (o.dxr_test)   return run_dxr_test(o);
     if (o.dxr_depth)  return run_dxr_depth(o);
     if (o.dxr_pt)     return run_dxr_pt(o);
+    if (o.dxr_fps)    return run_dxr_fps(o);
+    if (o.dxr_ghost)  return run_dxr_ghost(o);
+    if (o.dxr_walk)   return run_dxr_walk(o);
     if (o.dxr)        return run_dxr(o);
     if (o.sim)     return run_sim(o);
     if (o.walkbot) return run_walkbot(o);

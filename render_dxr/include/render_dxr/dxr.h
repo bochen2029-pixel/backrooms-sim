@@ -56,8 +56,21 @@ public:
     // shadow rays for direct visibility, one cosine-weighted diffuse-GI bounce,
     // seeded per-(pixel,sample) RNG — then tonemap to the RGBA output and write
     // NDC depth. Deterministic for a fixed (scene, camera, samples, seed); read
-    // the result with readback() / readback_depth().
+    // the result with readback() / readback_depth(). Equivalent to a single
+    // render_pt_frame() with reset = true.
     bool render_pt(const contracts::CameraPose& camera, uint32_t samples, uint32_t seed);
+
+    // Interactive PT (M9 phase 4): accumulate `samples` more spp this frame. When
+    // `reset` is true the accumulator is cleared first (call this whenever the
+    // camera moves — otherwise stale samples ghost); when false the new samples
+    // refine the converging image across frames. Resolves to RGBA + NDC depth each
+    // call. The per-sample RNG indexes continue across frames, so accumulation is
+    // progressive and deterministic.
+    bool render_pt_frame(const contracts::CameraPose& camera, uint32_t samples,
+                         uint32_t seed, bool reset);
+
+    // Samples accumulated into the current (un-reset) image — 0 right after a reset.
+    uint32_t accum_samples() const;
 
     bool readback(std::vector<uint8_t>& rgba);    // size width*height*4, RGBA
 
