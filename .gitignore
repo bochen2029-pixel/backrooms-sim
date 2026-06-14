@@ -26,3 +26,6 @@ compile_commands.json
 # OS
 Thumbs.db
 desktop.ini
+
+# M16 runtime config (written next to the exe / cwd)
+backrooms.cfg

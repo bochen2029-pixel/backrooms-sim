@@ -11,6 +11,7 @@
 // Exit codes: 0 ok, 1 init/render/IO failure, 2 usage error, 3 debug-layer msgs.
 #include <windows.h>
 #include <timeapi.h>
+#include <xinput.h>
 
 #include <algorithm>
 #include <chrono>
@@ -47,6 +48,8 @@
 #include "audio/wav.h"
 #include "audio/engine.h"
 #include "hud.h"
+#include "config.h"
+#include "gamepad.h"
 
 namespace contracts = br::contracts;
 namespace audio = br::audio;
@@ -71,6 +74,8 @@ struct Options {
     bool game = false, menu_shot = false, menu_smoke = false;  // M15 menus + game-state shell
     std::string screen;                 // --menu-shot: which screen to render
     uint32_t sel = 0;                   // --menu-shot: selected item index
+    bool config_check = false, resize_smoke = false, fullscreen = false;  // M16
+    std::string config;                 // --config path (load/save persisted settings)
     uint32_t eval_count = 100;          // --director-eval: scenario count
     uint32_t director_interval_s = 15;  // --soak --director: ambient seconds between summaries (wall clock)
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
@@ -156,6 +161,10 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--menu-smoke") == 0) o.menu_smoke = true;
         else if (std::strcmp(a, "--screen") == 0) { if (!str(o.screen)) return false; }
         else if (std::strcmp(a, "--sel") == 0) { if (!u32(o.sel)) return false; }
+        else if (std::strcmp(a, "--config") == 0) { if (!str(o.config)) return false; }
+        else if (std::strcmp(a, "--config-check") == 0) o.config_check = true;
+        else if (std::strcmp(a, "--resize-smoke") == 0) o.resize_smoke = true;
+        else if (std::strcmp(a, "--fullscreen") == 0) o.fullscreen = true;
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -407,6 +416,132 @@ int run_play(const Options& o) {
     return dbg == 0 ? 0 : 3;
 }
 
+// ----- M16 settings/persistence/windowing/gamepad helpers --------------------
+// Borderless-fullscreen toggle: no exclusive mode — the FLIP_DISCARD swapchain just
+// resizes to cover the monitor. Saves/restores the windowed style + rect.
+struct WinSaved { LONG style = 0; RECT rect = {0, 0, 0, 0}; bool valid = false; };
+
+void set_fullscreen(HWND hwnd, bool on, WinSaved& saved, uint32_t& outW, uint32_t& outH) {
+    outW = 0; outH = 0;
+    if (on) {
+        if (!saved.valid) { saved.style = GetWindowLong(hwnd, GWL_STYLE); GetWindowRect(hwnd, &saved.rect); saved.valid = true; }
+        MONITORINFO mi = { sizeof(mi) };
+        GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+        const int mw = mi.rcMonitor.right - mi.rcMonitor.left;
+        const int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+        SetWindowLong(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+        SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mw, mh, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        outW = static_cast<uint32_t>(mw); outH = static_cast<uint32_t>(mh);
+    } else if (saved.valid) {
+        SetWindowLong(hwnd, GWL_STYLE, saved.style);
+        const int w = saved.rect.right - saved.rect.left, h = saved.rect.bottom - saved.rect.top;
+        SetWindowPos(hwnd, HWND_NOTOPMOST, saved.rect.left, saved.rect.top, w, h, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        outW = static_cast<uint32_t>(w); outH = static_cast<uint32_t>(h);
+    }
+}
+
+// Poll XInput controller 0 -> a normalised GamepadState (the pure map is in gamepad.h).
+app::GamepadState poll_gamepad() {
+    app::GamepadState g;
+    XINPUT_STATE st{};
+    if (XInputGetState(0, &st) != ERROR_SUCCESS) return g;  // not connected
+    g.connected = true;
+    auto norm = [](SHORT v) { return static_cast<float>(v) / 32767.0f; };
+    g.lx = norm(st.Gamepad.sThumbLX); g.ly = norm(st.Gamepad.sThumbLY);
+    g.rx = norm(st.Gamepad.sThumbRX); g.ry = norm(st.Gamepad.sThumbRY);
+    g.a = (st.Gamepad.wButtons & XINPUT_GAMEPAD_A) != 0;
+    g.start = (st.Gamepad.wButtons & XINPUT_GAMEPAD_START) != 0;
+    return g;
+}
+
+// M16 gate: write a config from the CLI flags, read it back, and APPLY it to a
+// headless render — proving the persisted settings round-trip AND drive the engine
+// (the rendered frame is at the config's resolution + seed).
+int run_config_check(const Options& o) {
+    const std::string path = o.config.empty() ? std::string("runs/backrooms.cfg") : o.config;
+    app::Config c;
+    c.width = static_cast<int>(o.width);
+    c.height = static_cast<int>(o.height);
+    c.fullscreen = o.fullscreen ? 1 : 0;
+    c.master = static_cast<int>(o.master * 100.0f + 0.5f);
+    c.sfx = static_cast<int>(o.sfx * 100.0f + 0.5f);
+    c.director = o.director ? 1 : 0;
+    c.seed = o.seed;
+    if (!app::save_config(path, c)) { std::fprintf(stderr, "config save failed: %s\n", path.c_str()); return 1; }
+    app::Config rd;
+    if (!app::load_config(path, rd)) { std::fprintf(stderr, "config load failed: %s\n", path.c_str()); return 1; }
+
+    // Apply the loaded resolution + seed to a real headless render.
+    Renderer renderer;
+    if (!renderer.init_headless(static_cast<uint32_t>(rd.width), static_cast<uint32_t>(rd.height))) {
+        std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1;
+    }
+    renderer.set_texture_seed(rd.seed);
+    contracts::CameraPose cam{};
+    cam.pos[1] = br::core::kWandererHalfHeight + 0.02f + br::core::kEyeHeight;
+    cam.fov_y = 1.2217305f;
+    cam.aspect = static_cast<float>(rd.width) / static_cast<float>(rd.height);
+    const std::vector<contracts::ResidentChunk> none;
+    uint32_t drawn = 0;
+    if (!renderer.render_chunks(cam, none, 0u, 0u, &drawn)) { std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); return 1; }
+    FrameImage img;
+    if (!renderer.readback(img)) { std::fprintf(stderr, "readback: %s\n", renderer.last_error().c_str()); return 1; }
+
+    std::printf("width: %d\n", rd.width);
+    std::printf("height: %d\n", rd.height);
+    std::printf("rendered_width: %u\n", img.width);
+    std::printf("rendered_height: %u\n", img.height);
+    std::printf("master: %d\n", rd.master);
+    std::printf("sfx: %d\n", rd.sfx);
+    std::printf("director: %d\n", rd.director);
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(rd.seed));
+    std::printf("debug_error_count: %u\n", renderer.debug_error_count());
+    return renderer.debug_error_count() == 0 ? 0 : 3;
+}
+
+// M16 gate: resolution + fullscreen change smoke. Resize the swapchain across a few
+// resolutions + a borderless-fullscreen toggle, presenting each time; debug-clean.
+int run_resize_smoke(const Options& o) {
+    (void)o;
+    HWND hwnd = create_window(1280, 720);
+    if (!hwnd) { std::fprintf(stderr, "window creation failed\n"); return 1; }
+    SetForegroundWindow(hwnd); SetFocus(hwnd);
+    Renderer renderer;
+    if (!renderer.init_windowed(hwnd, 1280, 720)) { std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1; }
+    app::MenuModel m; m.screen = app::Screen::MainMenu;
+    auto present_at = [&](uint32_t w, uint32_t h) -> bool {
+        std::vector<uint8_t> ovl;
+        app::build_menu_overlay(ovl, w, h, m);
+        return renderer.present_overlay_windowed(ovl.data(), w, h);
+    };
+
+    const struct { uint32_t w, h; } sizes[] = { {1280, 720}, {1920, 1080}, {1024, 768}, {1280, 720} };
+    int steps = 0;
+    for (const auto& sz : sizes) {
+        if (!renderer.resize(sz.w, sz.h)) { std::fprintf(stderr, "resize: %s\n", renderer.last_error().c_str()); return 1; }
+        if (!present_at(sz.w, sz.h)) { std::fprintf(stderr, "present: %s\n", renderer.last_error().c_str()); return 1; }
+        ++steps;
+    }
+    WinSaved saved; uint32_t fw = 0, fh = 0;
+    set_fullscreen(hwnd, true, saved, fw, fh);
+    if (fw && fh) {
+        if (!renderer.resize(fw, fh)) { std::fprintf(stderr, "fs resize: %s\n", renderer.last_error().c_str()); return 1; }
+        if (!present_at(fw, fh)) { std::fprintf(stderr, "fs present: %s\n", renderer.last_error().c_str()); return 1; }
+        ++steps;
+    }
+    uint32_t ww = 0, wh = 0;
+    set_fullscreen(hwnd, false, saved, ww, wh);
+    if (ww && wh) {
+        if (!renderer.resize(ww, wh)) { std::fprintf(stderr, "restore resize: %s\n", renderer.last_error().c_str()); return 1; }
+        if (!present_at(ww, wh)) { std::fprintf(stderr, "restore present: %s\n", renderer.last_error().c_str()); return 1; }
+        ++steps;
+    }
+    const uint32_t dbg = renderer.debug_error_count();
+    std::printf("resize_steps: %d\n", steps);
+    std::printf("debug_error_count: %u\n", dbg);
+    return dbg == 0 ? 0 : 3;
+}
+
 // ----- M15 menus + game-state shell -----------------------------------------
 app::Screen screen_from_name(const std::string& n) {
     if (n == "splash") return app::Screen::Splash;
@@ -490,22 +625,44 @@ int run_menu_smoke(const Options& o) {
 int run_game(const Options& o) {
     using namespace br::core;
     using namespace std::chrono;
-    HWND hwnd = create_window(o.width, o.height);
+
+    // M16: load persisted settings (next to the exe by default). The config drives the
+    // initial resolution / fullscreen / volumes / mouse / seed; it is re-saved on exit.
+    const std::string cfgPath = o.config.empty() ? std::string("backrooms.cfg") : o.config;
+    app::Config cfg;
+    if (!app::load_config(cfgPath, cfg)) {
+        cfg.width = static_cast<int>(o.width); cfg.height = static_cast<int>(o.height); cfg.seed = o.seed;
+        cfg = app::sanitize(cfg);
+    }
+
+    uint32_t curW = static_cast<uint32_t>(cfg.width), curH = static_cast<uint32_t>(cfg.height);
+    HWND hwnd = create_window(curW, curH);
     if (!hwnd) { std::fprintf(stderr, "window creation failed\n"); return 1; }
     SetForegroundWindow(hwnd); SetFocus(hwnd);
     Renderer renderer;
-    if (!renderer.init_windowed(hwnd, o.width, o.height)) {
+    if (!renderer.init_windowed(hwnd, curW, curH)) {
         std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1;
     }
 
     app::MenuModel model;
-    model.seed = o.seed;
+    model.seed = cfg.seed;
+    model.settings.master_pct = cfg.master; model.settings.sfx_pct = cfg.sfx;
+    model.settings.mouse_pct = cfg.mouse; model.settings.director = cfg.director;
+
+    WinSaved fsSaved; bool isFull = false;
+    auto apply_fullscreen = [&](bool on) {
+        if (on == isFull) return;
+        uint32_t nw = 0, nh = 0;
+        set_fullscreen(hwnd, on, fsSaved, nw, nh);
+        if (nw && nh) { renderer.resize(nw, nh); curW = nw; curH = nh; isFull = on; }
+    };
+    if (cfg.fullscreen) apply_fullscreen(true);
 
     std::unique_ptr<br::stream::StreamManager> sm;
-    WorldState s(o.seed);
+    WorldState s(model.seed);
     std::vector<Aabb> collision;
     contracts::ChunkKey cached{ 0, static_cast<int64_t>(1) << 40, 0 };
-    uint64_t texSeed = o.seed;
+    uint64_t texSeed = model.seed;
     auto rebuild = [&](contracts::ChunkKey c) {
         collision.clear();
         collision.push_back(Aabb{ {-1.0e6f, -1.0f, -1.0e6f}, {1.0e6f, 0.0f, 1.0e6f} });
@@ -529,16 +686,14 @@ int run_game(const Options& o) {
         prevSteps = footstep_count(s);
     };
 
-    audio::AudioEngine eng(o.seed, contracts::kAudioSampleRate);
+    audio::AudioEngine eng(model.seed, contracts::kAudioSampleRate);
     bool audioOn = o.no_audio ? false : eng.start_device(false);
 
-    const float aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
     const float tickDt = 1.0f / 120.0f;
-    const float kSens = 0.0022f;
-    const POINT ctr{ static_cast<LONG>(o.width / 2), static_cast<LONG>(o.height / 2) };
-    auto recenter = [&]() -> POINT { POINT p = ctr; ClientToScreen(hwnd, &p); SetCursorPos(p.x, p.y); return p; };
-    POINT anchor = ctr;
+    auto recenter = [&]() -> POINT { POINT p{ static_cast<LONG>(curW / 2), static_cast<LONG>(curH / 2) }; ClientToScreen(hwnd, &p); SetCursorPos(p.x, p.y); return p; };
+    POINT anchor{ static_cast<LONG>(curW / 2), static_cast<LONG>(curH / 2) };
     bool cursorHidden = false;
+    bool prevF11 = false, prevPadStart = false;
 
     struct Keys { bool up=false, down=false, left=false, right=false, enter=false, esc=false; } prev;
     auto edge = [](bool now, bool& p) { const bool e = now && !p; p = now; return e; };
@@ -579,6 +734,18 @@ int run_game(const Options& o) {
         else if (eLf) act = app::UiAction::Left;
         else if (eRt) act = app::UiAction::Right;
 
+        // F11 toggles borderless fullscreen (resizes the swapchain back buffers).
+        const bool f11 = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+        if (f11 && !prevF11) { apply_fullscreen(!isFull); anchor = recenter(); }
+        prevF11 = f11;
+
+        // Gamepad (M16): Start pauses from play / activates in a menu (movement below).
+        const app::GamepadState pad = poll_gamepad();
+        const bool padStart = pad.connected && pad.start;
+        if (padStart && !prevPadStart && act == app::UiAction::None)
+            act = inPlay ? app::UiAction::Back : app::UiAction::Activate;
+        prevPadStart = padStart;
+
         if (act != app::UiAction::None) {
             const app::UiCommand cmd = app::menu_step(model, act);
             if (cmd == app::UiCommand::StartGame) start_session(model.seed);
@@ -597,9 +764,11 @@ int run_game(const Options& o) {
         if (accum > 0.25f) accum = 0.25f;
 
         if (model.screen == app::Screen::Play && sm) {
+            const float aspect = static_cast<float>(curW) / static_cast<float>(curH);
+            const float kSens = 0.0010f + 0.0030f * (static_cast<float>(model.settings.mouse_pct) / 100.0f);
             POINT cur; GetCursorPos(&cur);
-            const float look_yaw = static_cast<float>(cur.x - anchor.x) * kSens;
-            const float look_pitch = -static_cast<float>(cur.y - anchor.y) * kSens;
+            float look_yaw = static_cast<float>(cur.x - anchor.x) * kSens;
+            float look_pitch = -static_cast<float>(cur.y - anchor.y) * kSens;
             anchor = recenter();
             contracts::InputCommand in{};
             if (GetAsyncKeyState('W') & 0x8000) in.move_z += 1.0f;
@@ -607,6 +776,12 @@ int run_game(const Options& o) {
             if (GetAsyncKeyState('D') & 0x8000) in.move_x += 1.0f;
             if (GetAsyncKeyState('A') & 0x8000) in.move_x -= 1.0f;
             if (GetAsyncKeyState(VK_SPACE) & 0x8000) in.buttons |= contracts::kButtonJump;
+            if (pad.connected) {  // M16: gamepad adds to keyboard/mouse this tick
+                const contracts::InputCommand gp = app::gamepad_to_input(pad, kSens * 18.0f);
+                in.move_x += gp.move_x; in.move_z += gp.move_z;
+                look_yaw += gp.look_yaw; look_pitch += gp.look_pitch;
+                in.buttons |= gp.buttons;
+            }
             bool firstTick = true;
             while (accum >= tickDt) {
                 const contracts::ChunkKey here = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
@@ -631,8 +806,8 @@ int run_game(const Options& o) {
         } else {
             accum = 0.0f;  // sim time doesn't advance in menus
             std::vector<uint8_t> ovl;
-            app::build_menu_overlay(ovl, o.width, o.height, model);
-            if (!renderer.present_overlay_windowed(ovl.data(), o.width, o.height)) {
+            app::build_menu_overlay(ovl, curW, curH, model);
+            if (!renderer.present_overlay_windowed(ovl.data(), curW, curH)) {
                 std::fprintf(stderr, "overlay: %s\n", renderer.last_error().c_str()); ShowCursor(TRUE); return 1;
             }
             if (model.screen == app::Screen::Quit) running = false;
@@ -640,10 +815,18 @@ int run_game(const Options& o) {
         ++frames;
     }
     if (cursorHidden) ShowCursor(TRUE);
+
+    // M16: persist the current settings + window state for next launch.
+    cfg.master = model.settings.master_pct; cfg.sfx = model.settings.sfx_pct;
+    cfg.mouse = model.settings.mouse_pct; cfg.director = model.settings.director;
+    cfg.fullscreen = isFull ? 1 : 0; cfg.seed = model.seed;
+    if (!isFull) { cfg.width = static_cast<int>(curW); cfg.height = static_cast<int>(curH); }
+    app::save_config(cfgPath, app::sanitize(cfg));
+
     const uint32_t dbg = renderer.debug_error_count();
     const unsigned long long underruns = static_cast<unsigned long long>(audioOn ? eng.underruns() : 0ull);
     eng.stop();
-    std::printf("game_seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("game_seed: %llu\n", static_cast<unsigned long long>(model.seed));
     std::printf("frames: %llu\n", static_cast<unsigned long long>(frames));
     std::printf("final_screen: %d\n", static_cast<int>(model.screen));
     std::printf("audio_underruns: %llu\n", underruns);
@@ -2251,6 +2434,8 @@ int main(int argc, char** argv) {
     if (o.play)       return run_play(o);
     if (o.menu_shot)  return run_menu_shot(o);
     if (o.menu_smoke) return run_menu_smoke(o);
+    if (o.config_check) return run_config_check(o);
+    if (o.resize_smoke) return run_resize_smoke(o);
     if (o.game)       return run_game(o);
     if (o.soak)       return run_soak(o);
     if (o.sim)     return run_sim(o);

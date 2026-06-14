@@ -45,6 +45,12 @@ public:
     // passed as void* to keep <windows.h> out of this header).
     bool init_windowed(void* native_window_handle, uint32_t width, uint32_t height);
 
+    // Windowed (M16): resize the swapchain back buffers + depth to (width, height)
+    // — for resolution changes and fullscreen toggles. Waits the GPU idle, rebuilds
+    // the RTVs/depth/overlay pipeline. No-op if unchanged or minimized (0). The HWND
+    // style/placement is the app's responsibility; this owns only the GPU resources.
+    bool resize(uint32_t width, uint32_t height);
+
     // Record + submit one clear-color frame; present if windowed. Blocks on the
     // frame fence so the GPU is idle on return.
     bool render_clear_frame();

@@ -1572,6 +1572,103 @@ function Invoke-GateM15 {
     Write-Note 'M15 gate: menus + game-state machine (state tests + render goldens + debug-clean shell). The game has a front end.'
 }
 
+function Invoke-GateM16 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green (incl. config round-trip + gamepad mapping)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m16'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+
+    # Exit gate #1 — config write->read round-trip + synthetic-gamepad mapping (the
+    # pure, headless cores).
+    Assert-Gate 'config round-trip + gamepad -> InputCommand mapping tests pass ([m16])' {
+        $ut = Join-Path (Get-BinDir) 'unit_tests.exe'
+        if (-not (Test-Path $ut)) { throw "unit_tests.exe not built" }
+        & $ut '[m16]' | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "config/gamepad tests failed (exit $LASTEXITCODE)" }
+    }
+
+    # Exit gate #2 — apply-settings headless: write a config, read it back, and prove
+    # it drives the engine (the headless render is at the config's resolution + seed).
+    Assert-Gate 'apply-settings: --config-check round-trips + renders at the config resolution' {
+        $cfg = Join-Path $tmp 'apply.cfg'
+        $r = Invoke-AppCapture @('--config-check', '--config', $cfg, '--width', '800', '--height', '600', '--master', '0.33', '--sfx', '0.5', '--seed', '7')
+        if ($r.Exit -ne 0) { throw "--config-check exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'width') -ne 800) { throw "config width not persisted" }
+        if ((Get-Metric $r.Out 'rendered_width') -ne 800) { throw "renderer did not apply the config width (got $((Get-Metric $r.Out 'rendered_width')))" }
+        if ((Get-Metric $r.Out 'rendered_height') -ne 600) { throw "renderer did not apply the config height" }
+        if ((Get-Metric $r.Out 'master') -ne 33) { throw "master volume not persisted" }
+        if ((Get-Metric $r.Out 'seed') -ne 7) { throw "seed not persisted" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "config-check render had debug-layer messages" }
+        if (-not (Test-Path $cfg)) { throw "config file was not written" }
+        Write-Note 'config write->read->apply: resolution + seed + volumes round-trip and drive the renderer'
+    }
+
+    # Exit gate #3 — resolution + fullscreen change smoke, debug-clean.
+    Assert-Gate 'resolution + fullscreen change smoke is debug-clean (--resize-smoke)' {
+        $r = Invoke-AppCapture @('--resize-smoke')
+        if ($r.Exit -ne 0) { throw "--resize-smoke exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'resize_steps') -lt 6) { throw "expected >= 6 resize steps" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "swapchain resize / fullscreen toggle produced debug-layer messages" }
+        Write-Note "$((Get-Metric $r.Out 'resize_steps')) resolution/fullscreen changes, debug-clean"
+    }
+
+    # Exit gate #4 — the windowed shell honours + persists the config, debug-clean.
+    Assert-Gate 'windowed shell loads/saves config debug-clean (--game --config)' {
+        $g = Join-Path $tmp 'game.cfg'
+        if (Test-Path $g) { Remove-Item -Force $g }
+        $r = Invoke-AppCapture @('--game', '--seconds', '3', '--seed', '5', '--width', '1024', '--height', '768', '--config', $g)
+        if ($r.Exit -ne 0) { throw "--game exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "windowed game shell had debug-layer messages" }
+        if (-not (Test-Path $g)) { throw "config was not persisted on exit" }
+        if ((Get-Content $g -Raw) -notmatch 'seed=5') { throw "persisted config missing the session seed" }
+    }
+
+    Assert-Gate 'regression: M5 lit shot golden still bit-matches' {
+        $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+        $shot = Join-Path $tmp 'm5_shot.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        $d = (& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M5 lit shot golden regressed (diff=$d)" }
+    }
+    Assert-Gate 'menu-render goldens still bit-match (M15 regression)' {
+        $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+        foreach ($sc in @('splash', 'mainmenu', 'pause', 'settings')) {
+            $png = Join-Path $tmp "$sc.png"
+            $r = Invoke-AppCapture @('--menu-shot', '--screen', $sc, '--sel', '0', '--width', '1280', '--height', '720', '--out', $png)
+            if ($r.Exit -ne 0) { throw "menu-shot $sc exited $($r.Exit)" }
+            $d = (& $hashdiff diff $png (Join-Path $RepoRoot "goldens\m15\$sc.png") | Select-Object -Last 1)
+            if ([double]$d -ne 0.0) { throw "menu golden '$sc' regressed (diff=$d)" }
+        }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M16 gate: settings persistence + windowing/fullscreen + gamepad. The game remembers + adapts.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -1594,6 +1691,7 @@ try {
         'M13'   { Invoke-GateM13 }
         'M14'   { Invoke-GateM14 }
         'M15'   { Invoke-GateM15 }
+        'M16'   { Invoke-GateM16 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

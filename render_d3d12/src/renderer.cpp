@@ -450,6 +450,43 @@ bool Renderer::init_windowed(void* native_window_handle, uint32_t width, uint32_
     return true;
 }
 
+bool Renderer::resize(uint32_t width, uint32_t height) {
+    Impl& d = *impl_;
+    if (!d.windowed || !d.swapchain) { last_error_ = "resize needs a window"; return false; }
+    if (width == 0 || height == 0) return true;                 // ignore minimize
+    if (width == d.width && height == d.height) return true;    // no-op
+
+    // GPU must be idle before the back buffers are released.
+    const UINT64 v = ++d.fenceValue;
+    if (FAILED(d.queue->Signal(d.fence.Get(), v))) { last_error_ = "resize fence signal failed"; return false; }
+    if (d.fence->GetCompletedValue() < v) {
+        if (FAILED(d.fence->SetEventOnCompletion(v, d.fenceEvent))) { last_error_ = "resize fence event failed"; return false; }
+        WaitForSingleObject(d.fenceEvent, 5000);
+    }
+    for (UINT i = 0; i < kBackBufferCount; ++i) d.backbuffers[i].Reset();
+
+    if (FAILED(d.swapchain->ResizeBuffers(kBackBufferCount, width, height, kFormat, 0))) {
+        last_error_ = "ResizeBuffers failed"; return false;
+    }
+    d.width = width; d.height = height;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = d.rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    for (UINT i = 0; i < kBackBufferCount; ++i) {
+        if (FAILED(d.swapchain->GetBuffer(i, IID_PPV_ARGS(&d.backbuffers[i])))) {
+            last_error_ = "GetBuffer (resize) failed"; return false;
+        }
+        d.device->CreateRenderTargetView(d.backbuffers[i].Get(), nullptr, rtv);
+        rtv.ptr += d.rtvDescSize;
+    }
+    if (!create_depth(d, last_error_)) return false;  // depth at the new size
+
+    // The overlay pipeline's texture is sized to the old resolution — drop it so it
+    // rebuilds lazily at the new size on the next present (post path is unused windowed).
+    d.ovlReady = false;
+    d.ovlTex.Reset(); d.ovlUpload.Reset(); d.ovlSrvHeap.Reset(); d.ovlRoot.Reset(); d.ovlPso.Reset();
+    return true;
+}
+
 bool Renderer::render_clear_frame() {
     Impl& d = *impl_;
     if (FAILED(d.alloc->Reset())) { last_error_ = "allocator reset failed"; return false; }
