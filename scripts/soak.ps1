@@ -20,6 +20,8 @@ param(
     [int]$MaxRestarts = 5,
     [double]$FpsFloor = 30.0,
     [double]$MemSpreadMaxMB = 48.0,
+    [int]$DirectorInterval = 15,
+    [switch]$Director,
     [switch]$CrashDrill,
     [switch]$NoBuild
 )
@@ -85,7 +87,9 @@ for (;;) {
     $elapsed = ((Get-Date) - $start).TotalSeconds
     $remaining = [int]($total - $elapsed)
     if ($remaining -le 0) { break }
-    $r = Invoke-Exe $exe @('--soak', '--seconds', "$remaining", '--seed', "$Seed", '--width', "$Width", '--height', "$Height", '--csv', $csv, '--out', $shots, '--shot-every', "$ShotEvery", '--crash-dir', $crash)
+    $soakArgs = @('--soak', '--seconds', "$remaining", '--seed', "$Seed", '--width', "$Width", '--height', "$Height", '--csv', $csv, '--out', $shots, '--shot-every', "$ShotEvery", '--crash-dir', $crash)
+    if ($Director) { $soakArgs += @('--director', '--director-interval', "$DirectorInterval") }  # M12 acceptance: Director ON
+    $r = Invoke-Exe $exe $soakArgs
     $lastOut = $r.Out
     $code = $r.Exit
     if ($code -eq 0) { break }
@@ -109,6 +113,7 @@ function Field([string]$text, [string]$key) {
 $auditFail = Field $lastOut 'audit_failures'
 $stuck = Field $lastOut 'stuck_events'
 $dbg = Field $lastOut 'debug_error_count'
+$dirProduced = Field $lastOut 'director_produced'
 
 # --- analyze the frame CSV: FPS percentiles + memory slope ----------------------
 if (-not (Test-Path $csv)) { throw "frame CSV not written: $csv" }
@@ -142,6 +147,7 @@ if (Test-Path $sheetTool) {
 # decorative Write-Step/Write-Ok lines stay on the host stream.
 Write-Output ("soak_frames: {0}" -f $rows.Count)
 Write-Output ("soak_restarts: {0}" -f $restarts)
+Write-Output ("soak_director_produced: {0}" -f $dirProduced)
 Write-Output ("soak_audit_failures: {0}" -f $auditFail)
 Write-Output ("soak_stuck_events: {0}" -f $stuck)
 Write-Output ("soak_debug: {0}" -f $dbg)

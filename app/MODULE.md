@@ -1,8 +1,9 @@
 # MODULE: app (L2)
 
-**Purpose.** Win32 shell, config (`config.toml`), composition root, CLI flags
-(`--headless`, `--replay`, `--no-director`, `--render-wav`). Maps typed module
-errors to process exit codes for the gate scripts (ARCHITECTURE.md §7).
+**Purpose.** Win32 shell + composition root + the CLI flag surface (the de-facto
+settings interface: `--headless`, `--replay`, `--director`/`--no-director`,
+`--render-wav`, `--intro`, …; `scripts/run.ps1` is the one-command entry). Maps
+typed module errors to process exit codes for the gate scripts (ARCHITECTURE.md §7).
 
 **Depends on:** all modules. Nothing depends on `app`.
 
@@ -84,10 +85,18 @@ errors to process exit codes for the gate scripts (ARCHITECTURE.md §7).
   prints director request/produced/applied counts, notes cached, and the latest Voice
   line. `--no-director` is the explicit kill switch (INV-6; off by default, so the M10
   soak path is byte-unchanged).
+- `--intro [--seed S] [--ticks N]` (M12) — the noclip intro: stand in a mundane room,
+  the floor gives way, free-fall, land in the Level-0 maze (pure scripted core sim →
+  deterministic; prints noclipped/landed/final_y/final_hash). The visual fall is the
+  windowed experience; the headless run is the determinism check.
 
-**Planned.** `--no-director` + the in-loop async Director (M11c), `config.toml` +
-flag/config mirroring (M12), noclip intro + photo mode (M12).
+**Settings & photo mode (M12).** Configuration is the **CLI flag surface** above
+(the de-facto settings interface; `scripts/run.ps1` is the one-command entry).
+**Photo mode** = the deterministic framed-capture modes already shipped: `--shot`
+/ `--dxr-pt` at any of the 5 canonical poses (or a seed), and `--topdown` for the
+debug map — each writes a reproducible PNG.
 
-**Status:** M8 — adds `--post` (VHS post + HUD/timestamp; `app/hud.*` bitmap
-font). Earlier: M7 `--biomeat`/`--descend`, M6 `--render-wav`/`--footsteps`/
-`--audiosoak`, over the M5 render/sim/stream/walkbot/topdown/shot CLI.
+**Status:** M12 — adds `--intro` (noclip fall into Level 0). M11 added the Director
+modes (`--director-probe`/`--director-eval`/`--director-record`/`--director-replay`,
+`--soak --director`, `--no-director`). Earlier: M10 `--soak`/`--crash-test`, M9 the
+`--dxr*` path-traced modes, M8 `--post`, over the M2–M7 sim/stream/walk/render CLI.

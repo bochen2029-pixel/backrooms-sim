@@ -64,7 +64,7 @@ struct Options {
     bool soak = false, crash_test = false, director_probe = false;
     bool director_record = false, director_replay = false;
     bool director = false, no_director = false;   // --director enables; --no-director forces off (INV-6 kill switch)
-    bool director_eval = false;
+    bool director_eval = false, intro = false;
     uint32_t eval_count = 100;          // --director-eval: scenario count
     uint32_t director_interval_s = 15;  // --soak --director: ambient seconds between summaries (wall clock)
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
@@ -133,6 +133,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--director-eval") == 0) o.director_eval = true;
         else if (std::strcmp(a, "--eval-count") == 0) { if (!u32(o.eval_count)) return false; }
         else if (std::strcmp(a, "--director-interval") == 0) { if (!u32(o.director_interval_s)) return false; }
+        else if (std::strcmp(a, "--intro") == 0) o.intro = true;
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -803,6 +804,48 @@ contracts::WandererSummary build_summary(const br::core::WorldState& s, uint64_t
 }
 
 }  // namespace
+
+// ----- M12 noclip intro: the fall from a mundane room into Level 0 (deterministic) -
+// The iconic "noclip into the Backrooms": stand in a mundane room, the floor gives
+// way, free-fall, then land in the Level-0 maze. Pure scripted sim (seeded core ticks
+// + collision phases) -> reproducible; the visual fall is the windowed experience.
+int run_intro(const Options& o) {
+    using namespace br::core;
+    WorldState s(o.seed);
+    const float roomY = 8.0f;  // mundane-room floor, +8 m above Level 0
+    s.wanderer.pos = Vec3{ 2.0f, roomY + kWandererHalfHeight + 0.02f, 2.0f };  // above the proven-open spawn cell
+
+    static const std::vector<Aabb> kEmpty;  // noclip phase: nothing to stand on
+    const std::vector<Aabb> roomFloor = { Aabb{ {-4.0f, roomY - 1.0f, -4.0f}, {8.0f, roomY, 8.0f} } };
+    std::vector<Aabb> level0 = { Aabb{ {-1.0e6f, -1.0f, -1.0e6f}, {1.0e6f, 0.0f, 1.0e6f} } };  // Level-0 ground floor
+    for (int64_t dx = -1; dx <= 1; ++dx)
+        for (int64_t dz = -1; dz <= 1; ++dz) {
+            const contracts::ChunkData cd = contracts::GenerateChunk(o.seed, contracts::ChunkKey{ 0, dx, dz });
+            for (const auto& b : cd.collision) level0.push_back(Aabb{ {b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]} });
+        }
+
+    const uint64_t kIdle = 120;  // stand in the room (~1 s) before the floor gives way
+    const uint64_t total = (o.ticks > 0) ? o.ticks : 900u;
+    const float landY = kWandererHalfHeight + 0.5f;
+    contracts::InputCommand idle{};
+    bool noclipped = false, landed = false;
+    for (uint64_t t = 0; t < total; ++t) {
+        const std::vector<Aabb>* coll;
+        if (t < kIdle) coll = &roomFloor;                                         // phase 1: a mundane room
+        else if (s.wanderer.pos.y > landY) { coll = &kEmpty; noclipped = true; }  // phase 2: noclip -> free fall
+        else { coll = &level0; landed = true; }                                   // phase 3: land in the backrooms
+        tick(s, idle, *coll);
+    }
+
+    std::printf("intro_seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("ticks: %llu\n", static_cast<unsigned long long>(total));
+    std::printf("noclipped: %d\n", noclipped ? 1 : 0);
+    std::printf("landed: %d\n", landed ? 1 : 0);
+    std::printf("final_y: %.3f\n", static_cast<double>(s.wanderer.pos.y));
+    std::printf("final_hash: %016llx\n", static_cast<unsigned long long>(world_state_hash(s)));
+    const bool ok = noclipped && landed && (s.wanderer.pos.y < landY) && (s.wanderer.pos.y > 0.0f);
+    return ok ? 0 : 4;
+}
 
 // ----- M10 walk-bot soak: long-haul walk + render + telemetry + audits --------
 // Deterministic maze walk with the streaming raster renderer (the shipping path).
@@ -1741,6 +1784,7 @@ int main(int argc, char** argv) {
     if (o.director_eval)  return run_director_eval(o);
     if (o.director_record) return run_director_record(o);
     if (o.director_replay) return run_director_replay(o);
+    if (o.intro)      return run_intro(o);
     if (o.soak)       return run_soak(o);
     if (o.sim)     return run_sim(o);
     if (o.walkbot) return run_walkbot(o);
