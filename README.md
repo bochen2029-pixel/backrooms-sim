@@ -32,6 +32,36 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gate.ps1 -Milestone 
 
 A milestone is done only when `gate.ps1 -Milestone M<N>` exits 0.
 
+## Run
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run.ps1          # build + a lit smoke render -> runs/run-smoke.png
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run.ps1 -Window  # the windowed walking sim
+```
+
+Everything is procedural — no asset files; geometry, materials, audio, and lighting
+are all generated from a seed at runtime. Highlights:
+
+- **Path-traced mode (DXR):** `backrooms --dxr-pt --pose P --spp N --out shot.png`
+- **The noclip intro:** `backrooms --intro` (mundane room → fall-through → Level 0)
+- **8 h walk-bot soak:** `scripts/soak.ps1 -Hours 8`
+- **Framed captures ("photo mode"):** `--shot` / `--dxr-pt` / `--topdown` write
+  deterministic PNGs. Configuration is the CLI flag surface (see `app/MODULE.md`).
+
+### The Director (optional local LLM)
+
+The ambient **Director** routes to a local **KEEL** sidecar (OpenAI-compatible HTTP)
+for inference — no model is bundled. Start the sidecar, then add `--director`:
+
+```powershell
+scripts/soak.ps1 -Hours 8 -Director     # acceptance soak with the Director ON
+backrooms --director-probe              # one-shot: a WandererSummary -> a directive
+```
+
+The Director is **enhancement-only** (INV-6): `--no-director` (the default) runs the
+full sim with no LLM. Determinism is preserved — the model's output enters the sim
+only as a recorded event log, so a replay is **bit-identical with the model offline**.
+
 ## Layout
 
 `core` `gen` `stream` `render_d3d12` `render_dxr` `audio` `telemetry`

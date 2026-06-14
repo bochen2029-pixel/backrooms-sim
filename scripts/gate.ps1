@@ -1233,6 +1233,93 @@ function Invoke-GateM11 {
     Write-Note 'M11 gate covers all 5 exit gates: #1 schema-valid, #2 async isolation (A+B, ADR-039), #3 p95 latency, #4 replay determinism, #5 --no-director'
 }
 
+function Invoke-GateM12 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    # Exit gate: fresh clone -> one script -> running exe.
+    Assert-Gate 'one-command run.ps1 -> running exe (fresh-clone smoke)' {
+        $out = & (Join-Path $PSScriptRoot 'run.ps1') -NoBuild 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { throw "run.ps1 failed (exit $LASTEXITCODE):`n$out" }
+        if (-not (Test-Path (Join-Path $RepoRoot 'runs\run-smoke.png'))) { throw "run.ps1 produced no smoke render" }
+        Write-Note "run.ps1 -> running exe + lit smoke render"
+    }
+
+    # Polish: the noclip intro is a deterministic scripted sequence that lands in L0.
+    Assert-Gate 'noclip intro: deterministic fall lands in Level 0' {
+        $a = Invoke-AppCapture @('--intro', '--seed', '1')
+        if ($a.Exit -ne 0) { throw "intro exited $($a.Exit): $($a.Out)" }
+        if ((Get-Metric $a.Out 'noclipped') -ne 1) { throw "intro did not noclip" }
+        if ((Get-Metric $a.Out 'landed') -ne 1) { throw "intro did not land in Level 0" }
+        $h1 = Get-MetricStr $a.Out 'final_hash'
+        $h2 = Get-MetricStr (Invoke-AppCapture @('--intro', '--seed', '1')).Out 'final_hash'
+        if ($h1 -ne $h2) { throw "intro not deterministic ($h1 != $h2)" }
+        Write-Note "intro: noclip -> Level 0, deterministic ($h1)"
+    }
+
+    # Exit gate: 12 h unattended acceptance soak with the Director ON. The gate runs a
+    # short, duration-parameterized version (full run = soak.ps1 -Hours 12 -Director);
+    # needs the KEEL sidecar at :7071.
+    Assert-Gate 'acceptance soak with the Director ON (short; full = soak.ps1 -Hours 12 -Director)' {
+        $probe = Invoke-AppCapture @('--director-probe', '--seed', '1')
+        if ((Get-Metric $probe.Out 'keel_ok') -ne 1) { throw "KEEL sidecar not reachable at :7071 (acceptance needs the Director)" }
+        $out = & (Join-Path $PSScriptRoot 'soak.ps1') -NoBuild -Director -Seconds 25 -Width 1280 -Height 720 2>&1 | Out-String
+        $exit = $LASTEXITCODE
+        if ($exit -ne 0) { throw "acceptance soak unhealthy (exit $exit):`n$out" }
+        if ((Get-Metric $out 'soak_director_produced') -lt 1) { throw "Director ran 0 inferences during the acceptance soak" }
+        if ((Get-Metric $out 'soak_audit_failures') -ne 0) { throw "acceptance soak connectivity audit failed" }
+        if ((Get-Metric $out 'soak_debug') -ne 0) { throw "acceptance soak had debug-layer messages" }
+        Write-Note ("acceptance soak (Director ON) healthy: {0} directives, audits/debug clean" -f (Get-Metric $out 'soak_director_produced'))
+    }
+
+    # Exit gate: CI doc checks (inventory + every boundary has a contract file).
+    Assert-Gate 'CI doc checks: module inventory + contract coverage' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+        & (Join-Path $PSScriptRoot 'checks\check_contracts.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "contract coverage check failed" }
+    }
+
+    Assert-Gate 'regression: M5 lit shot + M4 top-down goldens still bit-match' {
+        $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+        $tmp = Join-Path $RepoRoot 'runs\gate-m12'
+        if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        $shot = Join-Path $tmp 'm5_shot.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        $d = (& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M5 lit shot golden regressed (diff=$d)" }
+        $td = Join-Path $tmp 'm4_td.png'
+        $r = Invoke-AppCapture @('--topdown', '--seed', '1', '--width', '512', '--height', '512', '--out', $td)
+        if ($r.Exit -ne 0) { throw "M4 top-down exited $($r.Exit)" }
+        $d = (& $hashdiff diff $td (Join-Path $RepoRoot 'goldens\m4\topdown_seed1.png') | Select-Object -Last 1)
+        if ([double]$d -ne 0.0) { throw "M4 top-down golden regressed (diff=$d)" }
+    }
+
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+
+    Write-Note 'M12 gate: full ctest + one-command run + noclip intro + acceptance soak (Director ON) + doc checks. Acceptance run = soak.ps1 -Hours 12 -Director; tag v1.0 after the M0-M11 regression sweep.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -1251,6 +1338,7 @@ try {
         'M9'    { Invoke-GateM9 }
         'M10'   { Invoke-GateM10 }
         'M11'   { Invoke-GateM11 }
+        'M12'   { Invoke-GateM12 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2
