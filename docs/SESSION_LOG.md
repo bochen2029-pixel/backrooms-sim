@@ -4,12 +4,25 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
-## Session 10 — M9: DXR Path-Traced Mode  🟡 IN PROGRESS (phases 1–3 done — gates #1 + #2 GREEN)
+## Session 10 — M9: DXR Path-Traced Mode  ✅ COMPLETE (`m9-green`, all 4 exit gates)
 
-**Last green tag: `m8-green`; phases 1a/1b/2a/2b/3a/3b committed on top (additive —
-the M9 gate now enforces exit gates #1 depth-compare + #2 converged PT golden).
-Start at phase 4 (interactive PT accum-reset + ≥60 FPS = gate #3; TLAS rebuild under
-streaming + walk-bot 1 km PT = gate #4).** Raster stays default + fallback (INV-6).
+**`gate.ps1 -Milestone M9` exits 0 with all 4 exit gates; M0–M8 regression sweep
+green; tagged `m9-green` + pushed. Next: M10 (8 h walk-bot soak + hardening — the
+real `soak.ps1`, walk-bot v2, contactsheet, minidump/auto-restart).** Raster stays
+the default + fallback (INV-6); the DXR path tracer is enhancement-only.
+
+**Done (phase 4 — interactive PT + streaming, gates #3 + #4 GREEN; commit
+`a5b740f`). + phase 5 (regression sweep + tag).** `render_pt_frame(cam, samples,
+seed, reset)` accumulates spp across frames; `reset` clears the accumulator on
+movement (otherwise the per-sample RNG indices continue → progressive refine).
+`render_pt` is now a `reset=true` wrapper (byte-identical → gate-#2 golden
+preserved). App: `--dxr-fps` (times 1-spp moving frames → FPS), `--dxr-ghost`
+(converge A, render B with/without reset → clean-vs-fresh ~0 vs ghost-vs-fresh
+large), `--dxr-walk` (walk-bot K km in PT, rebuilding BLAS/TLAS as chunks stream).
+**Gate #3:** 178.5 FPS @ 1440p (≥60) + no-ghost (clean 0, un-reset ghost 31).
+**Gate #4:** 1 km PT walk, 13 TLAS rebuilds, 280 frames, debug/DRED-clean.
+**Regression sweep M0–M8: all PASS** (M9 changes are additive; raster goldens
+byte-unchanged). Tagged `m9-green`.
 
 **Done (phase 3 — path-traced lighting + converged golden, gates #1 + #2 GREEN;
 commits `f358f7d`, `91276d0`).** Inline DXR 1.1 **`RayQuery`** (SM 6.5) path tracer:

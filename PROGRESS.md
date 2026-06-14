@@ -16,9 +16,10 @@ Backup remote: **https://github.com/bochen2029-pixel/backrooms-sim** (private).
 | **M6** | Procedural audio: synth, room-probe reverb, offline WAV | M6 | ✅ `m6-green` |
 | **M7** | Biomes, set-piece pillars, verticality (level −1 stairwell) | M7 | ✅ `m7-green` |
 | **M8** | VHS post-processing stack + HUD/timestamp | M8 | ✅ `m8-green` |
-| M9–M12 | DXR · soak · Director · acceptance | — | ⬜ pending |
+| **M9** | DXR path-traced mode (BLAS/TLAS, inline-RayQuery PT, accumulation) | M9 | ✅ `m9-green` |
+| M10–M12 | soak · Director · acceptance | — | ⬜ pending |
 
-**9 milestones green and pushed.** Each is verified by a machine-checkable gate
+**10 milestones green and pushed.** Each is verified by a machine-checkable gate
 (`scripts/gate.ps1 -Milestone M<N>` exits 0) and tagged; the remote is the backup.
 
 All numbers below are from real gate runs on the dev machine (RTX 4070 Ti SUPER,
@@ -142,6 +143,28 @@ debug-clean; the **timestamp** renders the right sim time (verified via telemetr
 **~0.65 ms at 1440p** (budget < 1.5 ms); and the seeded grain keeps the goldens
 deterministic. ADR-034.
 
+### M9 — DXR Path-Traced Mode
+The maze can now be **path-traced**. `render_dxr` is self-contained (its own
+`ID3D12Device5`) and consumes the same `ResidentChunk` geometry as raster, which
+stays the default + fallback (INV-6). A runtime **DXC** wrapper compiles HLSL to
+signed DXIL (SM 6.3 for the recursive primary-ray pass, **SM 6.5** for the inline
+`RayQuery` path tracer); it's a system dependency, no vcpkg change (ADR-035).
+`build_scene` builds a **BLAS per resident chunk + a TLAS**, concatenates every
+chunk's vertices into one `StructuredBuffer`, and tags each instance's start vertex
+offset in `InstanceID` so the shader reads per-hit normal/material via `(InstanceID
++ 3·PrimitiveIndex)`. The **path tracer** (inline `RayQuery`) treats the emissive
+fluorescent ceiling grid as area lights (analytic **NEE + shadow rays** from the
+`is_fluorescent_cell` formula), adds one cosine **diffuse-GI bounce** and a small
+ambient floor, with **seeded per-(pixel,sample) RNG** and an **RGBA32F accumulation
+buffer** across batched dispatches (resets on camera movement for interactive use).
+**Gate (all 4 exit criteria):** (#1) cross-renderer **depth compare** — raster vs
+DXR primary-hit NDC depth within epsilon over 5 poses (mean rel-err ~1e-5, proving
+the AS holds exactly the streamed geometry); (#2) **converged golden** — 1024 spp at
+3 poses, deterministic, mean-abs-diff < threshold (`goldens/m9/`); (#3) **interactive
+PT** — **178.5 FPS @ 1440p** (1 spp/frame, ≥60 bar) + a **no-ghost** accumulation
+reset (clean-vs-fresh 0, un-reset ghost 31); (#4) **TLAS rebuild under streaming** —
+walk-bot **1 km in PT mode**, 13 rebuilds, debug/DRED-clean. ADR-036.
+
 ---
 
 ## Architecture & invariants (the rules that keep it coherent)
@@ -206,20 +229,21 @@ App modes built so far: `--headless` · `--window` · `--scene` · `--sim` ·
 
 ## What's next
 
-- **M9** DXR path-traced mode (2–3 sessions): DXR 1.1, BLAS per chunk, TLAS refit
-  on stream events, path-traced lighting with temporal accumulation; raster stays
-  default + fallback; emissive fluorescents become the real light sources.
-- **M10** 8 h walk-bot soak · **M11** the Director (local LLM) · **M12**
-  integration + 12 h acceptance.
+- **M10** 8 h walk-bot soak + long-haul hardening: walk-bot v2 (corridor-following
+  + doorway-seeking), telemetry percentiles, periodic connectivity audits,
+  `contactsheet` tiling, minidump capture + auto-restart. (`soak.ps1` is the real
+  harness here — currently an M10 stub.)
+- **M11** the Director (local LLM via llama.cpp) · **M12** integration + 12 h
+  acceptance.
 
 ## How to continue (next session)
 
 1. Read `docs/ARCHITECTURE.md`, the latest `docs/SESSION_LOG.md` entry, and the
-   M9 section of `docs/MILESTONES.md`.
-2. Produce the M9 change manifest (`render_dxr`: BLAS/TLAS build, DXR PSO, path
-   tracer, temporal accumulation, raster-parity gate) before writing code.
-3. Run `gate.ps1 -Milestone M9` until exit 0, regression-sweep M0–M8, tag
-   `m9-green`, push, write the SESSION_LOG entry.
+   M10 section of `docs/MILESTONES.md`.
+2. Produce the M10 change manifest (walk-bot v2, `soak.ps1` real harness,
+   `contactsheet` tool, minidump/auto-restart) before writing code.
+3. Run `gate.ps1 -Milestone M10` until exit 0, regression-sweep M0–M9, tag
+   `m10-green`, push, write the SESSION_LOG entry.
 
-_The repo is the memory. Last fully-green tag: `m8-green`. Never resume from a
+_The repo is the memory. Last fully-green tag: `m9-green`. Never resume from a
 broken state — revert to the last green tag if needed._
