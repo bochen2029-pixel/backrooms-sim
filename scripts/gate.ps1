@@ -1032,6 +1032,80 @@ function Invoke-GateM9 {
     Write-Note 'M9 gate covers all 4 exit gates: #1 depth compare, #2 converged PT golden, #3 interactive PT (FPS + no-ghost), #4 TLAS rebuild under streaming'
 }
 
+function Invoke-GateM10 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'ctest green (full regression)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $soakScript = Join-Path $PSScriptRoot 'soak.ps1'
+
+    # Exit gate #1: the soak. A short run exercises the long-haul machinery; the
+    # full acceptance run is `soak.ps1 -Hours 8` (duration-parameterized, like the
+    # M3 stream soak). Asserts zero crashes / audit-failures / stuck events, 1% low
+    # FPS above the floor, and a bounded steady-state memory spread (no leak).
+    Assert-Gate 'walk-bot soak: memory flat + FPS floor + connectivity audits (short run)' {
+        $out = & $soakScript -NoBuild -Seconds 30 -Width 1280 -Height 720 2>&1 | Out-String
+        $exit = $LASTEXITCODE
+        if ($exit -ne 0) { throw "soak.ps1 reported unhealthy (exit $exit):`n$out" }
+        if ((Get-Metric $out 'soak_audit_failures') -ne 0) { throw "connectivity audit failed during soak" }
+        if ((Get-Metric $out 'soak_stuck_events') -ne 0) { throw "walk-bot got stuck during soak" }
+        if ((Get-Metric $out 'soak_debug') -ne 0) { throw "soak had debug-layer messages" }
+        $low = Get-MetricFloat $out 'soak_fps_1pct_low'
+        if ($low -lt 30.0) { throw "1% low FPS $low < 30 floor" }
+        $spread = Get-MetricFloat $out 'soak_mem_spread_mb'
+        if ($spread -gt 48.0) { throw "steady-state memory spread $spread MB > 48 (leak?)" }
+        Write-Note "soak: 1%-low $low FPS, mem spread $spread MB, audits + stuck clean"
+    }
+
+    # Exit gate #2: contact-sheet mechanical screen (no all-black/all-white frames).
+    # Agent visual review of runs\soak\contactsheet.png is the human-in-the-loop part.
+    Assert-Gate 'contact sheet: mechanical screen (no all-black/all-white frames)' {
+        $shots = Join-Path $RepoRoot 'runs\soak\shots'
+        $sheet = Join-Path $RepoRoot 'runs\soak\contactsheet.png'
+        if (-not (Test-Path $shots)) { throw "soak screenshots missing: $shots" }
+        $out = & (Join-Path (Get-BinDir) 'contactsheet.exe') $shots $sheet 2>&1 | Out-String
+        $tiles = Get-Metric $out 'tiles'
+        if ($tiles -lt 4) { throw "too few screenshots tiled ($tiles)" }
+        if ((Get-Metric $out 'black_frames') -ne 0) { throw "all-black frame(s) in soak (render/stream regression)" }
+        if ((Get-Metric $out 'white_frames') -ne 0) { throw "all-white frame(s) in soak" }
+        Write-Note "contact sheet: $tiles tiles, 0 black/white -> runs\soak\contactsheet.png"
+    }
+
+    # Exit gate #3: forced-crash drill -> minidump captured + clean auto-restart.
+    Assert-Gate 'forced-crash drill: minidump captured + clean restart logged' {
+        $out = & $soakScript -NoBuild -CrashDrill 2>&1 | Out-String
+        $exit = $LASTEXITCODE
+        if ($exit -ne 0) { throw "crash drill failed (exit $exit):`n$out" }
+        if ((Get-Metric $out 'crash_exit') -ne 70) { throw "crash exit code not 70 (handler not engaged)" }
+        if ((Get-Metric $out 'minidump_exists') -ne 1) { throw "no minidump captured" }
+        if ((Get-Metric $out 'restart_clean') -ne 1) { throw "auto-restart did not complete cleanly" }
+        Write-Note "crash drill: minidump captured, exit 70, clean restart logged"
+    }
+
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -1048,6 +1122,7 @@ try {
         'M7'    { Invoke-GateM7 }
         'M8'    { Invoke-GateM8 }
         'M9'    { Invoke-GateM9 }
+        'M10'   { Invoke-GateM10 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2
