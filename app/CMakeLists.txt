@@ -2,7 +2,11 @@
 # Nothing depends on app. M1: drives the renderer (headless/windowed), writes
 # PNGs via the shared stb wrapper, and creates the Win32 window (user32).
 # M16: xinput (gamepad) is a Windows system import lib — no vcpkg change (like winmm).
-add_executable(backrooms src/main.cpp src/hud.cpp)
+# M17: version.rc embeds text-only VERSIONINFO (no asset files) via rc.exe.
+if(WIN32)
+  enable_language(RC)
+endif()
+add_executable(backrooms src/main.cpp src/hud.cpp version.rc)
 target_link_libraries(backrooms PRIVATE
   backrooms_flags
   core gen stream telemetry audio render_d3d12 render_dxr director

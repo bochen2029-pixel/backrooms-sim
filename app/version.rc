@@ -1,0 +1,32 @@
+// app/version.rc — Win32 VERSIONINFO (M17). Text-only metadata embedded in the exe
+// (no asset files): version, product name, description. Compiled by rc.exe.
+#include <windows.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 2, 0, 0, 0
+ PRODUCTVERSION 2, 0, 0, 0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "Backrooms Sim"
+            VALUE "FileDescription",  "Backrooms Sim - infinite procedural walking simulation"
+            VALUE "FileVersion",      "2.0.0.0"
+            VALUE "InternalName",     "backrooms"
+            VALUE "OriginalFilename", "backrooms.exe"
+            VALUE "ProductName",      "Backrooms Sim"
+            VALUE "ProductVersion",   "2.0.0.0"
+            VALUE "LegalCopyright",   "Procedurally generated. No asset files. Built autonomously, gate by gate."
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

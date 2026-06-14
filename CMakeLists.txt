@@ -49,6 +49,15 @@ if(MSVC)
   target_compile_options(backrooms_sim_flags INTERFACE /fp:strict)
 endif()
 
+# BACKROOMS_RELEASE (M17): the packaged, end-user build. Compiles the D3D12 debug
+# layer + DRED out of render_d3d12 (BR_RELEASE) so a shipped exe never trips them.
+# OFF for dev/gate builds (the debug layer is a gate). Defined on backrooms_flags,
+# which every module links, so it reaches render_d3d12 and app.
+option(BACKROOMS_RELEASE "Packaged release build: no D3D12 debug layer/DRED" OFF)
+if(BACKROOMS_RELEASE)
+  target_compile_definitions(backrooms_flags INTERFACE BR_RELEASE)
+endif()
+
 # ---------------------------------------------------------------------------
 # contracts — boundary headers (ARCHITECTURE.md §5), included as
 # "contracts/<name>.h". Header-only INTERFACE target linked by both the producer

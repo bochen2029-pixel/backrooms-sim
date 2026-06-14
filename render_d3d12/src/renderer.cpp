@@ -207,9 +207,12 @@ namespace {
 
 // Shared device/queue/fence/list bring-up used by both headless and windowed.
 bool create_device_core(Renderer::Impl& d, std::string& err) {
-    // Debug layer + DRED (dev builds). Errors here are non-fatal.
-    ComPtr<ID3D12Debug> debug;
     UINT factoryFlags = 0;
+#ifndef BR_RELEASE
+    // Debug layer + DRED (dev/gate builds). Errors here are non-fatal. Compiled OUT
+    // of the packaged release (BR_RELEASE, M17) so an end user with the Windows SDK
+    // installed never trips its debug layer / breakpoints on a shipped build.
+    ComPtr<ID3D12Debug> debug;
     if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
         debug->EnableDebugLayer();
         factoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
@@ -219,6 +222,7 @@ bool create_device_core(Renderer::Impl& d, std::string& err) {
         dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
         dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
     }
+#endif
 
     ComPtr<IDXGIFactory6> factory;
     if (FAILED(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&factory)))) {

@@ -29,3 +29,7 @@ desktop.ini
 
 # M16 runtime config (written next to the exe / cwd)
 backrooms.cfg
+
+# M17 packaging output
+dist/
+build-release/

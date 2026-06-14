@@ -1669,6 +1669,103 @@ function Invoke-GateM16 {
     Write-Note 'M16 gate: settings persistence + windowing/fullscreen + gamepad. The game remembers + adapts.'
 }
 
+function Invoke-GateM17 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $zip = Join-Path $RepoRoot 'dist\backrooms-portable.zip'
+    $clean = Join-Path $RepoRoot 'runs\gate-m17-clean'
+
+    # Exit gate: the portable package builds (release config — debug layer compiled
+    # out, optimized) + bundles the DXC compiler/signer + zips.
+    Assert-Gate 'portable package builds (release, no debug layer) + bundles DXC + zips' {
+        & (Join-Path $PSScriptRoot 'package.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "package.ps1 failed (exit $LASTEXITCODE)" }
+        if (-not (Test-Path $zip)) { throw "portable zip not produced" }
+    }
+
+    # Exit gate: CLEAN-ENV. Unzip to a temp dir, scrub the Windows SDK out of PATH,
+    # and run the DXR path (which needs dxcompiler.dll) -> proves the BUNDLED DXC is
+    # used, no SDK required. Then a windowed game smoke. Both debug/exit clean.
+    Assert-Gate 'clean-env (scrubbed PATH, no SDK): bundled DXC drives --dxr-pt + --game' {
+        if (Test-Path $clean) { Remove-Item -Recurse -Force $clean }
+        Expand-Archive -Path $zip -DestinationPath $clean
+        foreach ($f in @('backrooms.exe', 'dxcompiler.dll', 'dxil.dll', 'README.txt', 'CREDITS.txt', 'RUN.cmd')) {
+            if (-not (Test-Path (Join-Path $clean $f))) { throw "package is missing $f" }
+        }
+        $exe = Join-Path $clean 'backrooms.exe'
+        $saved = $env:PATH
+        try {
+            $env:PATH = 'C:\Windows\System32;C:\Windows'  # no Windows SDK on PATH
+            $pt = Join-Path $clean 'pt.png'
+            $out = & $exe --dxr-pt --seed 1 --spp 4 --width 320 --height 180 --out $pt 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "clean-env --dxr-pt exited $LASTEXITCODE (bundled DXC failed?): $out" }
+            if ((Get-Metric $out 'debug_error_count') -ne 0) { throw "clean-env DXR produced debug-layer messages" }
+            if (-not (Test-Path $pt)) { throw "clean-env DXR produced no image" }
+            $g = & $exe --game --seconds 2 --config (Join-Path $clean 'c.cfg') 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "clean-env --game exited $LASTEXITCODE" }
+        } finally { $env:PATH = $saved }
+        Write-Note 'bundled DXC drives a path trace + the windowed game in a scrubbed, no-SDK environment'
+    }
+
+    # Exit gate: fresh-unzip launch smoke — embedded version metadata + credits.
+    Assert-Gate 'fresh-unzip smoke: embedded VERSIONINFO (2.0) + --credits' {
+        $exe = Join-Path $clean 'backrooms.exe'
+        $vi = (Get-Item $exe).VersionInfo
+        if ($vi.ProductName -notmatch 'Backrooms') { throw "VERSIONINFO ProductName missing/incorrect" }
+        if ($vi.ProductVersion -notmatch '^2\.0') { throw "product version not 2.0 (got $($vi.ProductVersion))" }
+        $cr = & $exe --credits 2>&1 | Out-String
+        if ($cr -notmatch 'version: 2.0') { throw "--credits missing the 2.0 version line" }
+    }
+
+    # Regression: the golden surface + isolation + inventory (the full M0-M16 gate
+    # sweep is run separately before the v2.0 tag).
+    Assert-Gate 'regression: M5 lit shot + M4 top-down + M15 menu goldens bit-match' {
+        $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+        $tmp = Join-Path $RepoRoot 'runs\gate-m17'
+        if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        $shot = Join-Path $tmp 'm5.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        if ([double](& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1) -ne 0.0) { throw "M5 golden regressed" }
+        $td = Join-Path $tmp 'm4.png'
+        $r = Invoke-AppCapture @('--topdown', '--seed', '1', '--width', '512', '--height', '512', '--out', $td)
+        if ($r.Exit -ne 0) { throw "M4 top-down exited $($r.Exit)" }
+        if ([double](& $hashdiff diff $td (Join-Path $RepoRoot 'goldens\m4\topdown_seed1.png') | Select-Object -Last 1) -ne 0.0) { throw "M4 golden regressed" }
+        foreach ($sc in @('splash', 'mainmenu', 'pause', 'settings')) {
+            $png = Join-Path $tmp "$sc.png"
+            $r = Invoke-AppCapture @('--menu-shot', '--screen', $sc, '--sel', '0', '--width', '1280', '--height', '720', '--out', $png)
+            if ($r.Exit -ne 0) { throw "menu-shot $sc exited $($r.Exit)" }
+            if ([double](& $hashdiff diff $png (Join-Path $RepoRoot "goldens\m15\$sc.png") | Select-Object -Last 1) -ne 0.0) { throw "menu golden '$sc' regressed" }
+        }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M17 gate: portable .zip + clean-env (bundled DXC, no SDK) + regression. Ship-ready -> v2.0.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -1692,6 +1789,7 @@ try {
         'M14'   { Invoke-GateM14 }
         'M15'   { Invoke-GateM15 }
         'M16'   { Invoke-GateM16 }
+        'M17'   { Invoke-GateM17 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2
