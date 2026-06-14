@@ -21,6 +21,7 @@ Backup remote: **https://github.com/bochen2029-pixel/backrooms-sim** (private).
 | **M11** | The Director + The Voice (local LLM via the KEEL sidecar) | M11 | ✅ `m11-green` |
 | **M12** | Integration · noclip intro · one-command run · 12 h acceptance | M12 | ✅ `v1.0` |
 | **M13** | Playable windowed walk (real-time `--play`, mouse-look, pacing gate) | M13 | ✅ `m13-green` |
+| **M14** | Sound on: real-time audio output (miniaudio, lock-free ring, WASAPI) | M14 | ✅ `m14-green` |
 
 **🏁 v1.0 — all 13 milestones (M0–M12) green and pushed.** Each is verified by a
 machine-checkable gate (`scripts/gate.ps1 -Milestone M<N>` exits 0) and tagged; the
@@ -31,9 +32,10 @@ Director that never breaks bit-exact replay.
 
 **▶ Phase II (M13–M17) — turn the v1.0 visualization into a packaged game.** In
 progress. **M13 ✅** made it genuinely walkable in a window (real-time `--play`:
-fixed-tick accumulator, WASD + mouse-look, frame-pacing gate). Next: M14 real-time
-audio output, M15 menus + game-state machine, M16 settings/config + fullscreen +
-gamepad, M17 portable `.zip` packaging → `v2.0`.
+fixed-tick accumulator, WASD + mouse-look, frame-pacing gate). **M14 ✅** gave it
+sound (real-time audio output via miniaudio: lock-free SPSC ring → WASAPI device,
+zero underruns; offline WAV stays bit-identical). Next: M15 menus + game-state
+machine, M16 settings/config + fullscreen + gamepad, M17 portable `.zip` → `v2.0`.
 
 All numbers below are from real gate runs on the dev machine (RTX 4070 Ti SUPER,
 VS 2022 17.14, Windows 11, vcpkg static triplet).

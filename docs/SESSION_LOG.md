@@ -4,6 +4,49 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 15 — M14: Sound on (real-time audio output)  ✅ COMPLETE — 🏷️ `m14-green`
+
+**`gate.ps1 -Milestone M14` exits 0; tagged `m14-green` + pushed. The game has sound.**
+M6 built the whole procedural audio stack but deliberately deferred the speaker
+backend (headless-first, ADR-028); M14 makes M6's *emulated* "device callback + ring"
+real — audible playback during `--play`.
+
+**Done (M14; commit `27a58a1`).**
+- **miniaudio** (header-only, `vcpkg.json` + **ADR-040**, Iron Rule 8) — real-time
+  playback backend. Runtime-loads WASAPI; **no DLLs to ship** (compiled into
+  `audio/src/device.cpp` only; Catch2 + stb + miniaudio remain the only third-party libs).
+- **`audio/ring.h`** — lock-free **SPSC float ring** (the real mixer→device hand-off),
+  wait-free, allocation-free after `reset()`. Unit-tested: wrap-around integrity +
+  **200 k frames across two threads, in-order/uncorrupted**.
+- **`audio/device.h/.cpp`** — `AudioDevice`, an opaque PIMPL over a miniaudio
+  `ma_device` (default endpoint, or the hardware-free **null backend** for gates).
+  `<miniaudio.h>` never escapes `device.cpp`.
+- **`AudioEngine::start_device(use_null)`** — the producer now fills the ring; the
+  device callback drains it (dry → one underrun + silence). M6's headless `start()` /
+  virtual-cursor `run()` is **untouched**. Added master + SFX volume (playback mix).
+- **`app --play`** now opens the real WASAPI device (silent no-op if none);
+  **`app --audiodev [--null] [--master V] [--sfx V]`** is the headless gate mode.
+- **`Invoke-GateM14`** — clean build + ctest (incl. ring tests) + `--audiodev --null`
+  (device opens, **0 underruns**, 580 blocks) + real WASAPI soft check (0 underruns) +
+  `--render-wav` **bit-identical ×2** + wavcheck spectrum + ADR/vcpkg presence + M6
+  soak regression + INV-5/inventory. **gate.ps1 M14 exits 0.**
+
+**Gotchas / notes.** **Determinism is untouched (INV-1):** the offline `--render-wav`
+uses `Synth` directly and is byte-identical before/after M14 (gate-checks ×2). The gate
+hard-passes on the **null backend** (real-time-paced, hardware-free, CI-safe — the
+headless-first doctrine); the real WASAPI path is a *soft* check (a headless host may
+have no default endpoint) — on the dev box it opens clean at 0 underruns. miniaudio's TU
+compiles warning-free under `/WX` because it's an angle-bracket include (`/external:W0`)
++ a `#pragma warning(push,0)` guard. The file-local data callback needs
+`AudioDevice::Impl` → declared **public** (mirrors `render_d3d12/renderer.h`).
+
+**Next: M15** — menus + game-state machine (splash → menu → play → pause → settings),
+immediate-mode UI on the existing CPU bitmap-font HUD (no new framework). Then M16
+(settings/config persistence + fullscreen/resolution + XInput), M17 (portable .zip →
+v2.0).
+
+---
+
 ## Session 14 — M13: Playable windowed walk (Phase II begins)  ✅ COMPLETE — 🏷️ `m13-green`
 
 **`gate.ps1 -Milestone M13` exits 0; tagged `m13-green` + pushed.** Phase II (turn the
