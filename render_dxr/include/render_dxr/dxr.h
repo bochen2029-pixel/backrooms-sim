@@ -51,6 +51,14 @@ public:
     // distance, miss = background. (gate #1 visualisation; depth-compare next.)
     bool render_scene(const contracts::CameraPose& camera);
 
+    // Path-traced render (M9 phase 3): accumulate `samples` spp into a float
+    // buffer via inline RayQuery — emissive fluorescents as area-grid lights,
+    // shadow rays for direct visibility, one cosine-weighted diffuse-GI bounce,
+    // seeded per-(pixel,sample) RNG — then tonemap to the RGBA output and write
+    // NDC depth. Deterministic for a fixed (scene, camera, samples, seed); read
+    // the result with readback() / readback_depth().
+    bool render_pt(const contracts::CameraPose& camera, uint32_t samples, uint32_t seed);
+
     bool readback(std::vector<uint8_t>& rgba);    // size width*height*4, RGBA
 
     // Read back the per-pixel primary-hit depth from the last render_scene() as

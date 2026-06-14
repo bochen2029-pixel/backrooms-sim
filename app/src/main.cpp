@@ -53,9 +53,9 @@ struct Options {
     bool walkbot = false, topdown = false, version = false, shot = false;
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
     bool biomeat = false, descend = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
-    bool dxr_depth = false;
+    bool dxr_depth = false, dxr_pt = false;
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
-    uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0;
+    uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0, spp = 256;
     uint64_t seed = 1u;
     std::string out, record, replay, hashlog, csv, audiolog;
 };
@@ -102,6 +102,8 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--dxr-test") == 0) o.dxr_test = true;
         else if (std::strcmp(a, "--dxr") == 0) o.dxr = true;
         else if (std::strcmp(a, "--dxr-depth") == 0) o.dxr_depth = true;
+        else if (std::strcmp(a, "--dxr-pt") == 0) o.dxr_pt = true;
+        else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
         else if (std::strcmp(a, "--version") == 0) o.version = true;
         else if (std::strcmp(a, "--frames") == 0) { if (!u32(o.frames)) return false; }
@@ -937,6 +939,64 @@ int run_dxr(const Options& o) {
     return dbg == 0 ? 0 : 3;
 }
 
+// ----- M9 phase 3: path-traced render (emissive fluorescents + GI, accumulated) -
+int run_dxr_pt(const Options& o) {
+    struct Pose { float yaw, pitch; };
+    static const Pose kPoses[5] = {
+        {0.0f, 0.0f}, {1.5707963f, 0.0f}, {3.1415927f, 0.0f}, {0.7853982f, 0.42f}, {4.0f, -0.38f},
+    };
+    const Pose pz = kPoses[o.pose % 5u];
+    const float ex = 16.0f, ez = 16.0f;
+    const float ey = br::core::kWandererHalfHeight + 0.02f + br::core::kEyeHeight;
+    contracts::CameraPose cam{};
+    cam.pos[0] = ex; cam.pos[1] = ey; cam.pos[2] = ez;
+    cam.yaw = pz.yaw; cam.pitch = pz.pitch;
+    cam.fov_y = 1.2217305f;
+    cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    const auto center = contracts::chunk_key_at(0, ex, ez);
+    sm.update(center); sm.wait_idle(); sm.update(center);
+
+    br::render_dxr::DxrRenderer r;
+    if (!r.init(o.width, o.height)) { std::fprintf(stderr, "dxr init: %s\n", r.last_error().c_str()); return 1; }
+    if (!r.build_scene(sm.resident())) { std::fprintf(stderr, "dxr scene: %s\n", r.last_error().c_str()); return 1; }
+    if (!r.render_pt(cam, o.spp, static_cast<uint32_t>(o.seed))) { std::fprintf(stderr, "dxr pt: %s\n", r.last_error().c_str()); return 1; }
+    std::vector<uint8_t> rgba;
+    if (!r.readback(rgba)) { std::fprintf(stderr, "dxr readback: %s\n", r.last_error().c_str()); return 1; }
+    if (!o.out.empty()) {
+        if (stbi_write_png(o.out.c_str(), static_cast<int>(r.width()), static_cast<int>(r.height()),
+                           4, rgba.data(), static_cast<int>(r.width()) * 4) == 0) {
+            std::fprintf(stderr, "PNG write failed: %s\n", o.out.c_str()); return 1;
+        }
+    }
+
+    // Luminance histogram (Rec.709) -> mean + black/white fractions (band gate).
+    uint64_t hist[256] = {};
+    const size_t px = static_cast<size_t>(r.width()) * r.height();
+    for (size_t p = 0; p < px; ++p) {
+        const uint8_t* cc = &rgba[p * 4];
+        const float y = 0.2126f * cc[0] + 0.7152f * cc[1] + 0.0722f * cc[2];
+        int b = static_cast<int>(y); if (b < 0) b = 0; if (b > 255) b = 255;
+        ++hist[b];
+    }
+    double sum = 0.0;
+    for (int b = 0; b < 256; ++b) sum += static_cast<double>(b) * static_cast<double>(hist[b]);
+    const double mean = sum / static_cast<double>(px);
+    const double frac_black = static_cast<double>(hist[0] + hist[1] + hist[2]) / static_cast<double>(px);
+    const double frac_white = static_cast<double>(hist[253] + hist[254] + hist[255]) / static_cast<double>(px);
+
+    const uint32_t dbg = r.debug_error_count();
+    std::printf("resident_chunks: %llu\n", static_cast<unsigned long long>(sm.resident_count()));
+    std::printf("pose: %u\n", o.pose % 5u);
+    std::printf("spp: %u\n", o.spp);
+    std::printf("luma_mean: %.3f\n", mean);
+    std::printf("frac_black: %.4f\n", frac_black);
+    std::printf("frac_white: %.4f\n", frac_white);
+    std::printf("debug_error_count: %u\n", dbg);
+    return dbg == 0 ? 0 : 3;
+}
+
 // ----- M9 phase 2b: cross-renderer primary-hit depth compare (exit gate #1) ---
 // Render the same pose with the rasteriser and the DXR path tracer, read back
 // both depth buffers (NDC), linearize to eye-space metres, and compare per
@@ -1087,6 +1147,7 @@ int main(int argc, char** argv) {
     if (o.dxr_probe)  return run_dxr_probe(o);
     if (o.dxr_test)   return run_dxr_test(o);
     if (o.dxr_depth)  return run_dxr_depth(o);
+    if (o.dxr_pt)     return run_dxr_pt(o);
     if (o.dxr)        return run_dxr(o);
     if (o.sim)     return run_sim(o);
     if (o.walkbot) return run_walkbot(o);

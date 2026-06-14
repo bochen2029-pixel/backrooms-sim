@@ -22,10 +22,12 @@ public:
     bool available() const { return available_; }
     const std::string& load_path() const { return load_path_; }
 
-    // Compile `hlsl` as a DXR shader library (target lib_6_3) to signed DXIL.
-    // Returns false with `err` set on failure (incl. compiler diagnostics).
+    // Compile `hlsl` as a DXR shader library to signed DXIL. `target` is the DXC
+    // profile: lib_6_3 (default; recursive DXR) or lib_6_5 (inline RayQuery, M9
+    // phase 3 path tracer). Returns false with `err` set on failure (incl.
+    // compiler diagnostics).
     bool compile_library(const std::string& hlsl, std::vector<uint8_t>& dxil,
-                         std::string& err);
+                         std::string& err, const char* target = "lib_6_3");
 
 private:
     void* dll_ = nullptr;          // HMODULE for dxcompiler.dll

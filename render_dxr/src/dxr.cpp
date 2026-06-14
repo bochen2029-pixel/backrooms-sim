@@ -188,6 +188,14 @@ struct DxrRenderer::Impl {
     std::vector<ComPtr<ID3D12Resource>> vbs;      // chunk vertex buffers
     bool sceneReady = false;
 
+    // Path-traced lighting (M9 phase 3): inline RayQuery + radiance accumulation.
+    ComPtr<ID3D12Resource> accumTex;       // RGBA32F radiance accumulator (u2)
+    ComPtr<ID3D12Resource> shadeVb;        // concatenated chunk verts (StructuredBuffer t1)
+    uint32_t shadeVertCount = 0;
+    ComPtr<ID3D12RootSignature> ptRS;
+    ComPtr<ID3D12StateObject> ptPso;
+    ComPtr<ID3D12Resource> ptSbt;          // raygen-only table
+
     uint32_t width = 0, height = 0;
 
     void wait_idle() {
@@ -275,9 +283,10 @@ bool DxrRenderer::init(uint32_t w, uint32_t h) {
     if (FAILED(d.device->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &bd,
             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&d.readbackBuf)))) { last_error_ = "readback"; return false; }
 
-    // Shader-visible UAV heap: slot 0 = color (u0), slot 1 = depth (u1).
+    // Shader-visible UAV heap: slot 0 = color (u0), slot 1 = depth (u1),
+    // slot 2 = PT radiance accumulator (u2).
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
-    hd.NumDescriptors = 2; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    hd.NumDescriptors = 3; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(d.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&d.uavHeap)))) { last_error_ = "uav heap"; return false; }
     const UINT uavInc = d.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
@@ -299,6 +308,17 @@ bool DxrRenderer::init(uint32_t w, uint32_t h) {
     D3D12_CPU_DESCRIPTOR_HANDLE depthUavCpu = d.uavHeap->GetCPUDescriptorHandleForHeapStart();
     depthUavCpu.ptr += uavInc;  // slot 1
     d.device->CreateUnorderedAccessView(d.depthTex.Get(), nullptr, &dud, depthUavCpu);
+
+    // PT radiance accumulator (RGBA32F) + UAV (u2, heap slot 2).
+    D3D12_RESOURCE_DESC at = td;
+    at.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    if (FAILED(d.device->CreateCommittedResource(&defHeap, D3D12_HEAP_FLAG_NONE, &at,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&d.accumTex)))) { last_error_ = "accum tex"; return false; }
+    D3D12_UNORDERED_ACCESS_VIEW_DESC aud{};
+    aud.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; aud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    D3D12_CPU_DESCRIPTOR_HANDLE accumUavCpu = d.uavHeap->GetCPUDescriptorHandleForHeapStart();
+    accumUavCpu.ptr += static_cast<SIZE_T>(uavInc) * 2;  // slot 2
+    d.device->CreateUnorderedAccessView(d.accumTex.Get(), nullptr, &aud, accumUavCpu);
 
     // Global root signature: one UAV descriptor table (u0).
     D3D12_DESCRIPTOR_RANGE range{};
@@ -508,6 +528,161 @@ void CHit(inout Payload p, BuiltInTriangleIntersectionAttributes attr) {
 void Miss(inout Payload p) { p.color = float3(0.02, 0.02, 0.06); }
 )";
 
+// Tonemap exposure for the PT resolve (tuned so the lit scene sits mid-band).
+constexpr float kPtExposure = 1.4f;
+
+// M9 phase 3 path tracer — inline RayQuery (SM 6.5). Emissive fluorescent ceiling
+// grid as area lights (NEE + shadow rays for direct), one cosine-weighted diffuse
+// GI bounce, seeded per-(pixel,sample) RNG, accumulated across dispatches.
+const char* kPtShader = R"(
+struct Vertex { float px,py,pz, nx,ny,nz, cr,cg,cb, u,v, mat; };
+cbuffer PT : register(b0) {
+    float3 uPos;   float uTanY;
+    float3 uFwd;   float uAspect;
+    float3 uRight; float uNear;
+    float3 uUp;    float uFar;
+    uint uSampleStart; uint uSampleCount; uint uTotal; uint uSeed;
+    uint uResolve; float uExposure; float uWidth; float uHeight;
+};
+RWTexture2D<float4> g_out   : register(u0);
+RWTexture2D<float>  g_depth : register(u1);
+RWTexture2D<float4> g_accum : register(u2);
+RaytracingAccelerationStructure g_scene : register(t0);
+StructuredBuffer<Vertex> g_verts : register(t1);
+
+static const float PI = 3.14159265;
+static const float kCell = 4.0;   // contracts::kCellSize
+static const float kCeil = 3.0;   // contracts::kCeilingHeight
+static const float3 kLightColor = float3(1.0, 0.95, 0.82);
+static const float  kLightPower = 2.4;
+static const float3 kEmit = float3(1.7, 1.6, 1.36);
+static const float3 kAmbient = float3(0.06, 0.055, 0.045);  // multi-bounce floor (1-bounce GI underestimates an enclosed room)
+
+float rndf(inout uint st){ st = st*747796405u + 2891336453u; uint w = ((st >> ((st >> 28u) + 4u)) ^ st) * 277803737u; return float((w >> 22u) ^ w) * (1.0/4294967296.0); }
+
+bool is_emitter(float m){ return m > 2.5 && m < 3.5; }
+float3 albedo_of(float m){
+    if (m < 0.5) return float3(0.80, 0.72, 0.40);   // wallpaper
+    if (m < 1.5) return float3(0.42, 0.30, 0.19);   // carpet
+    if (m < 2.5) return float3(0.16, 0.16, 0.15);   // ceiling tile
+    if (m < 3.5) return float3(0.0, 0.0, 0.0);       // fluorescent (emitter)
+    return float3(0.28, 0.26, 0.22);                 // baseboard
+}
+
+bool occluded(float3 p, float3 target){
+    float3 d = target - p; float dist = length(d);
+    RayDesc r; r.Origin = p; r.Direction = d / dist; r.TMin = 1e-3; r.TMax = dist - 5e-3;
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
+    q.TraceRayInline(g_scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, r);
+    q.Proceed();
+    return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+}
+
+// Direct lighting from the nearby fluorescent ceiling grid (NEE + shadow rays).
+float3 direct_light(float3 P, float3 N){
+    float3 sum = 0;
+    int ci = (int)floor(P.x / kCell);
+    int cj = (int)floor(P.z / kCell);
+    [loop] for (int di = -2; di <= 2; ++di)
+    [loop] for (int dj = -2; dj <= 2; ++dj){
+        int gi = ci + di, gj = cj + dj;
+        if (((gi & 1) != 0) || ((gj & 1) != 0)) continue;   // fluorescent cell = both even
+        float3 L = float3((gi + 0.5) * kCell, kCeil, (gj + 0.5) * kCell);
+        float3 toL = L - P; float dist2 = dot(toL, toL); float dist = sqrt(dist2);
+        float3 wl = toL / dist;
+        float ndl = max(dot(N, wl), 0.0);
+        if (ndl <= 0.0) continue;
+        if (occluded(P + N * 2e-3, L)) continue;
+        sum += ndl / (1.0 + 0.35 * dist2);
+    }
+    return sum * kLightColor * kLightPower;
+}
+
+float3 cosine_dir(float3 N, float u1, float u2){
+    float r = sqrt(u1); float phi = 2.0 * PI * u2;
+    float3 t = normalize(abs(N.y) < 0.99 ? cross(float3(0,1,0), N) : cross(float3(1,0,0), N));
+    float3 b = cross(N, t);
+    return normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + N * sqrt(max(0.0, 1.0 - u1)));
+}
+
+struct Hit { bool hit; float3 P; float3 N; float mat; float t; };
+Hit trace(float3 origin, float3 dir){
+    Hit h; h.hit = false; h.P = 0; h.N = float3(0,1,0); h.mat = 0; h.t = 0;
+    RayDesc r; r.Origin = origin; r.Direction = dir; r.TMin = 1e-3; r.TMax = uFar;
+    RayQuery<RAY_FLAG_NONE> q;
+    q.TraceRayInline(g_scene, RAY_FLAG_NONE, 0xFF, r);
+    while (q.Proceed()) {}
+    if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT){
+        uint base = q.CommittedInstanceID() + 3u * q.CommittedPrimitiveIndex();
+        Vertex a = g_verts[base + 0], b = g_verts[base + 1], c = g_verts[base + 2];
+        float2 bc = q.CommittedTriangleBarycentrics();
+        float w = 1.0 - bc.x - bc.y;
+        h.hit = true; h.t = q.CommittedRayT();
+        h.P = origin + dir * h.t;
+        h.N = normalize(float3(a.nx,a.ny,a.nz) * w + float3(b.nx,b.ny,b.nz) * bc.x + float3(c.nx,c.ny,c.nz) * bc.y);
+        h.mat = a.mat;
+    }
+    return h;
+}
+
+[shader("raygeneration")]
+void RayGen(){
+    uint2 px = DispatchRaysIndex().xy;
+    uint2 dim = DispatchRaysDimensions().xy;
+    float2 uv = (float2(px) + 0.5) / float2(dim);
+    float sx = (2.0 * uv.x - 1.0) * uTanY * uAspect;
+    float sy = (1.0 - 2.0 * uv.y) * uTanY;
+    float3 dir = normalize(uFwd + uRight * sx + uUp * sy);
+
+    Hit h = trace(uPos, dir);
+
+    float ndc = 1.0;
+    if (h.hit){ float vz = h.t * dot(dir, uFwd); float q = uFar / (uFar - uNear); ndc = q * (1.0 - uNear / vz); }
+
+    // Deterministic term (emission + direct) — identical for every sample.
+    float3 deterministic = float3(0.012, 0.012, 0.03);   // background
+    bool diffuse = false;
+    float3 baseAlb = 0;
+    if (h.hit){
+        if (is_emitter(h.mat)){
+            deterministic = kEmit;
+        } else {
+            baseAlb = albedo_of(h.mat);
+            deterministic = baseAlb * (direct_light(h.P, h.N) + kAmbient);
+            diffuse = true;
+        }
+    }
+
+    // Stochastic one-bounce indirect over this dispatch's samples.
+    float3 indirectSum = 0;
+    if (diffuse){
+        [loop] for (uint s = 0; s < uSampleCount; ++s){
+            uint sidx = uSampleStart + s;
+            uint st = px.x * 1973u + px.y * 9277u + (sidx + 1u) * 26699u + uSeed * 68111u + 1u;
+            float u1 = rndf(st), u2 = rndf(st);
+            float3 wi = cosine_dir(h.N, u1, u2);
+            Hit b = trace(h.P + h.N * 2e-3, wi);
+            if (b.hit){
+                if (is_emitter(b.mat)) indirectSum += baseAlb * kEmit;
+                else indirectSum += baseAlb * albedo_of(b.mat) * direct_light(b.P, b.N);
+            }
+        }
+    }
+
+    float3 local = deterministic * float(uSampleCount) + indirectSum;
+    float3 total = (uSampleStart == 0u) ? local : (g_accum[px].rgb + local);
+    g_accum[px] = float4(total, 1.0);
+
+    if (uResolve != 0u){
+        float3 c = total / float(max(uTotal, 1u));
+        c *= uExposure;
+        c = c / (c + 1.0);          // Reinhard
+        g_out[px] = float4(saturate(c), 1.0);
+        g_depth[px] = ndc;
+    }
+}
+)";
+
 struct V3 { float x, y, z; };
 V3 cross3(V3 a, V3 b) { return { a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x }; }
 V3 norm3(V3 a) {
@@ -534,10 +709,16 @@ bool DxrRenderer::build_scene(const std::vector<contracts::ResidentChunk>& chunk
     Impl& d = *impl_;
     if (!d.device) { last_error_ = "not initialised"; return false; }
     d.blas.clear(); d.vbs.clear(); d.tlas.Reset(); d.sceneReady = false;
+    d.shadeVb.Reset(); d.shadeVertCount = 0;
 
-    // Upload each chunk's vertices to an upload-heap buffer + build a BLAS.
+    // Upload each chunk's vertices to an upload-heap buffer + build a BLAS. The
+    // same vertices are also concatenated into one global buffer (shadeVb) the PT
+    // shader reads for normals/material; each instance's InstanceID is its start
+    // offset into that buffer, so (InstanceID + 3*PrimitiveIndex) indexes a vertex.
     std::vector<ComPtr<ID3D12Resource>> scratches;
     std::vector<D3D12_RAYTRACING_INSTANCE_DESC> instances;
+    std::vector<contracts::ChunkVertex> allVerts;
+    uint32_t vtxOffset = 0;
     if (FAILED(d.alloc->Reset())) { last_error_ = "alloc reset"; return false; }
     if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "list reset"; return false; }
 
@@ -583,14 +764,28 @@ bool DxrRenderer::build_scene(const std::vector<contracts::ResidentChunk>& chunk
 
         D3D12_RAYTRACING_INSTANCE_DESC inst{};
         inst.Transform[0][0] = inst.Transform[1][1] = inst.Transform[2][2] = 1.0f;  // identity (world-space verts)
+        inst.InstanceID = vtxOffset & 0xFFFFFFu;   // start vertex in shadeVb (24-bit)
         inst.InstanceMask = 0xFF;
         inst.AccelerationStructure = result->GetGPUVirtualAddress();
         instances.push_back(inst);
         d.blas.push_back(result);
         d.vbs.push_back(vb);
         scratches.push_back(scratch);
+        allVerts.insert(allVerts.end(), rc.vertices, rc.vertices + rc.vertex_count);
+        vtxOffset += rc.vertex_count;
     }
     if (instances.empty()) { last_error_ = "no geometry to build"; return false; }
+
+    // Global shading vertex buffer (PT reads normals/material via InstanceID).
+    const UINT64 shadeBytes = static_cast<UINT64>(allVerts.size()) * sizeof(contracts::ChunkVertex);
+    d.shadeVb = make_buffer(d.device.Get(), shadeBytes, D3D12_HEAP_TYPE_UPLOAD,
+                            D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+    if (!d.shadeVb) { last_error_ = "shade vb"; return false; }
+    void* sv = nullptr; const D3D12_RANGE svnone{ 0, 0 };
+    d.shadeVb->Map(0, &svnone, &sv);
+    std::memcpy(sv, allVerts.data(), static_cast<size_t>(shadeBytes));
+    d.shadeVb->Unmap(0, nullptr);
+    d.shadeVertCount = vtxOffset;
 
     // TLAS: upload instance descs, build.
     const UINT64 instBytes = instances.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
@@ -679,6 +874,53 @@ bool DxrRenderer::build_scene(const std::vector<contracts::ResidentChunk>& chunk
         std::memcpy(sm + slot * 2, idHit, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
         d.sceneSbt->Unmap(0, nullptr);
     }
+
+    // Build the PT state object + SBT once (inline RayQuery, SM 6.5, raygen-only).
+    if (!d.ptPso) {
+        D3D12_DESCRIPTOR_RANGE prange{};
+        prange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; prange.NumDescriptors = 3; prange.BaseShaderRegister = 0;  // u0,u1,u2
+        prange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        D3D12_ROOT_PARAMETER prp[4]{};
+        prp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        prp[0].Constants.Num32BitValues = 24; prp[0].Constants.ShaderRegister = 0;
+        prp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        prp[1].DescriptorTable.NumDescriptorRanges = 1; prp[1].DescriptorTable.pDescriptorRanges = &prange;
+        prp[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; prp[2].Descriptor.ShaderRegister = 0;  // t0 = TLAS
+        prp[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; prp[3].Descriptor.ShaderRegister = 1;  // t1 = shadeVb
+        D3D12_ROOT_SIGNATURE_DESC prs{}; prs.NumParameters = 4; prs.pParameters = prp; prs.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+        ComPtr<ID3DBlob> psig, pse;
+        if (FAILED(D3D12SerializeRootSignature(&prs, D3D_ROOT_SIGNATURE_VERSION_1, &psig, &pse))) { last_error_ = "pt RS serialize"; return false; }
+        if (FAILED(d.device->CreateRootSignature(0, psig->GetBufferPointer(), psig->GetBufferSize(), IID_PPV_ARGS(&d.ptRS)))) { last_error_ = "pt RS"; return false; }
+
+        DxcCompiler dxc;
+        std::vector<uint8_t> dxil; std::string cerr;
+        if (!dxc.compile_library(kPtShader, dxil, cerr, "lib_6_5")) { last_error_ = "pt compile: " + cerr; return false; }
+        D3D12_EXPORT_DESC pex = { L"RayGen", nullptr, D3D12_EXPORT_FLAG_NONE };
+        D3D12_DXIL_LIBRARY_DESC plib{}; plib.DXILLibrary.pShaderBytecode = dxil.data();
+        plib.DXILLibrary.BytecodeLength = dxil.size(); plib.NumExports = 1; plib.pExports = &pex;
+        D3D12_RAYTRACING_SHADER_CONFIG psc{}; psc.MaxPayloadSizeInBytes = 4; psc.MaxAttributeSizeInBytes = 8;
+        D3D12_RAYTRACING_PIPELINE_CONFIG ppc{}; ppc.MaxTraceRecursionDepth = 1;  // inline RayQuery (no TraceRay recursion)
+        D3D12_GLOBAL_ROOT_SIGNATURE pgrs{}; pgrs.pGlobalRootSignature = d.ptRS.Get();
+        D3D12_STATE_SUBOBJECT psubs[4];
+        psubs[0].Type = D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY; psubs[0].pDesc = &plib;
+        psubs[1].Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG; psubs[1].pDesc = &psc;
+        psubs[2].Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG; psubs[2].pDesc = &ppc;
+        psubs[3].Type = D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE; psubs[3].pDesc = &pgrs;
+        D3D12_STATE_OBJECT_DESC pso_desc{}; pso_desc.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE; pso_desc.NumSubobjects = 4; pso_desc.pSubobjects = psubs;
+        if (FAILED(d.device->CreateStateObject(&pso_desc, IID_PPV_ARGS(&d.ptPso)))) { last_error_ = "pt state object"; return false; }
+
+        ComPtr<ID3D12StateObjectProperties> pprops;
+        d.ptPso.As(&pprops);
+        const void* pid = pprops->GetShaderIdentifier(L"RayGen");
+        if (!pid) { last_error_ = "pt raygen id"; return false; }
+        const UINT64 pslot = D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT;
+        d.ptSbt = make_buffer(d.device.Get(), pslot, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+        uint8_t* psm = nullptr; const D3D12_RANGE pn{ 0, 0 };
+        d.ptSbt->Map(0, &pn, reinterpret_cast<void**>(&psm));
+        std::memcpy(psm, pid, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+        d.ptSbt->Unmap(0, nullptr);
+    }
+
     d.sceneReady = true;
     return true;
 }
@@ -738,6 +980,77 @@ bool DxrRenderer::render_scene(const contracts::CameraPose& cam) {
     ID3D12CommandList* lists[] = { d.list.Get() };
     d.queue->ExecuteCommandLists(1, lists);
     d.wait_idle();
+    return true;
+}
+
+bool DxrRenderer::render_pt(const contracts::CameraPose& cam, uint32_t samples, uint32_t seed) {
+    Impl& d = *impl_;
+    if (!d.sceneReady || !d.ptPso || !d.shadeVb) { last_error_ = "pt scene not built"; return false; }
+    if (samples == 0) samples = 1;
+
+    const float cp = std::cos(cam.pitch), sp = std::sin(cam.pitch);
+    const float syaw = std::sin(cam.yaw), cyaw = std::cos(cam.yaw);
+    const V3 fwd = norm3({ cp * syaw, sp, cp * cyaw });
+    const V3 right = norm3(cross3({ 0, 1, 0 }, fwd));
+    const V3 up = cross3(fwd, right);
+
+    auto setf = [](uint32_t* arr, int i, float f) { std::memcpy(&arr[i], &f, sizeof(float)); };
+
+    // Accumulate in batches of samples per dispatch (keeps each DispatchRays well
+    // under the GPU watchdog); the final batch resolves accum -> color + depth.
+    const uint32_t kBatch = 64u;
+    for (uint32_t start = 0; start < samples; start += kBatch) {
+        const uint32_t count = (samples - start < kBatch) ? (samples - start) : kBatch;
+        const bool resolve = (start + count >= samples);
+
+        uint32_t c[24] = {};
+        setf(c, 0, cam.pos[0]); setf(c, 1, cam.pos[1]); setf(c, 2, cam.pos[2]); setf(c, 3, std::tan(cam.fov_y * 0.5f));
+        setf(c, 4, fwd.x);   setf(c, 5, fwd.y);   setf(c, 6, fwd.z);   setf(c, 7, cam.aspect);
+        setf(c, 8, right.x); setf(c, 9, right.y); setf(c, 10, right.z); setf(c, 11, kSceneNear);
+        setf(c, 12, up.x);   setf(c, 13, up.y);   setf(c, 14, up.z);   setf(c, 15, kSceneFar);
+        c[16] = start; c[17] = count; c[18] = samples; c[19] = seed;
+        c[20] = resolve ? 1u : 0u; setf(c, 21, kPtExposure);
+        setf(c, 22, static_cast<float>(d.width)); setf(c, 23, static_cast<float>(d.height));
+
+        if (FAILED(d.alloc->Reset())) { last_error_ = "pt alloc reset"; return false; }
+        if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "pt list reset"; return false; }
+        ID3D12DescriptorHeap* heaps[] = { d.uavHeap.Get() };
+        d.list->SetDescriptorHeaps(1, heaps);
+        d.list->SetComputeRootSignature(d.ptRS.Get());
+        d.list->SetComputeRoot32BitConstants(0, 24, c, 0);
+        d.list->SetComputeRootDescriptorTable(1, d.uavHeap->GetGPUDescriptorHandleForHeapStart());
+        d.list->SetComputeRootShaderResourceView(2, d.tlas->GetGPUVirtualAddress());
+        d.list->SetComputeRootShaderResourceView(3, d.shadeVb->GetGPUVirtualAddress());
+        d.list->SetPipelineState1(d.ptPso.Get());
+
+        D3D12_DISPATCH_RAYS_DESC dr{};
+        dr.RayGenerationShaderRecord = { d.ptSbt->GetGPUVirtualAddress(), D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT };
+        dr.Width = d.width; dr.Height = d.height; dr.Depth = 1;
+        d.list->DispatchRays(&dr);
+
+        if (resolve) {
+            const D3D12_RESOURCE_BARRIER toCopy = transition(d.uav.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            d.list->ResourceBarrier(1, &toCopy);
+            D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = d.readbackBuf.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = d.footprint;
+            D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = d.uav.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+            d.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            const D3D12_RESOURCE_BARRIER back = transition(d.uav.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            d.list->ResourceBarrier(1, &back);
+
+            const D3D12_RESOURCE_BARRIER dToCopy = transition(d.depthTex.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            d.list->ResourceBarrier(1, &dToCopy);
+            D3D12_TEXTURE_COPY_LOCATION ddst{}; ddst.pResource = d.depthReadback.Get(); ddst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; ddst.PlacedFootprint = d.depthFootprint;
+            D3D12_TEXTURE_COPY_LOCATION dsrc{}; dsrc.pResource = d.depthTex.Get(); dsrc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dsrc.SubresourceIndex = 0;
+            d.list->CopyTextureRegion(&ddst, 0, 0, 0, &dsrc, nullptr);
+            const D3D12_RESOURCE_BARRIER dBack = transition(d.depthTex.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            d.list->ResourceBarrier(1, &dBack);
+        }
+
+        if (FAILED(d.list->Close())) { last_error_ = "pt list close"; return false; }
+        ID3D12CommandList* lists[] = { d.list.Get() };
+        d.queue->ExecuteCommandLists(1, lists);
+        d.wait_idle();
+    }
     return true;
 }
 

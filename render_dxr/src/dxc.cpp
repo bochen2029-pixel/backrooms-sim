@@ -69,9 +69,13 @@ DxcCompiler::~DxcCompiler() {
 }
 
 bool DxcCompiler::compile_library(const std::string& hlsl, std::vector<uint8_t>& dxil,
-                                  std::string& err) {
+                                  std::string& err, const char* target) {
     if (!available_) { err = "dxcompiler.dll not available"; return false; }
     auto create = reinterpret_cast<DxcCreateInstanceProc>(create_proc_);
+
+    // Widen the target profile (e.g. "lib_6_3", "lib_6_5") for the DXC arg list.
+    const char* prof = (target && *target) ? target : "lib_6_3";
+    std::wstring targetW(prof, prof + std::char_traits<char>::length(prof));
 
     IDxcCompiler3* compiler = nullptr;
     if (FAILED(create(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)))) {
@@ -84,7 +88,7 @@ bool DxcCompiler::compile_library(const std::string& hlsl, std::vector<uint8_t>&
     src.Size = hlsl.size();
     src.Encoding = DXC_CP_UTF8;
 
-    const wchar_t* args[] = { L"-T", L"lib_6_3", L"-Qstrip_reflect" };
+    const wchar_t* args[] = { L"-T", targetW.c_str(), L"-Qstrip_reflect" };
     const UINT32 argc = static_cast<UINT32>(sizeof(args) / sizeof(args[0]));
 
     IDxcResult* result = nullptr;
