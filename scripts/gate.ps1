@@ -936,6 +936,35 @@ function Invoke-GateM9 {
         }
     }
 
+    # Exit gate #2: converged path-traced render vs stored golden (1024 spp, 3
+    # poses). The PT is deterministic on a given GPU, so a re-render bit-matches
+    # the golden; the small mean-abs-diff threshold absorbs cross-vendor float
+    # reassociation. Also asserts determinism, a luma band, and debug-clean.
+    Assert-Gate 'converged PT golden: 1024 spp at 3 poses, RMSE/diff < threshold' {
+        $tmp = Join-Path $RepoRoot 'runs\gate-m9'
+        if (-not (Test-Path $tmp)) { New-Item -ItemType Directory -Force -Path $tmp | Out-Null }
+        foreach ($p in 1, 3, 4) {
+            $a = Join-Path $tmp "pt_p${p}_a.png"
+            $b = Join-Path $tmp "pt_p${p}_b.png"
+            $gold = Join-Path $RepoRoot "goldens\m9\pt_pose${p}.png"
+            $r1 = Invoke-AppCapture @('--dxr-pt', '--seed', '1', '--pose', "$p", '--spp', '1024', '--width', '640', '--height', '360', '--out', $a)
+            if ($r1.Exit -ne 0) { throw "pose ${p}: --dxr-pt exited $($r1.Exit): $($r1.Out)" }
+            if ((Get-Metric $r1.Out 'debug_error_count') -ne 0) { throw "pose ${p}: PT debug-layer messages" }
+            $mean = Get-MetricFloat $r1.Out 'luma_mean'
+            $fb = Get-MetricFloat $r1.Out 'frac_black'
+            $fw = Get-MetricFloat $r1.Out 'frac_white'
+            if ($mean -lt 12.0 -or $mean -gt 210.0) { throw "pose ${p}: luma_mean $mean out of band [12,210]" }
+            if ($fb -gt 0.02) { throw "pose ${p}: frac_black $fb > 0.02 (under-lit)" }
+            if ($fw -gt 0.02) { throw "pose ${p}: frac_white $fw > 0.02 (blown out)" }
+            $r2 = Invoke-AppCapture @('--dxr-pt', '--seed', '1', '--pose', "$p", '--spp', '1024', '--width', '640', '--height', '360', '--out', $b)
+            if ($r2.Exit -ne 0) { throw "pose ${p}: second PT render exited $($r2.Exit)" }
+            if ((& $hashdiff hash $a | Select-Object -Last 1) -ne (& $hashdiff hash $b | Select-Object -Last 1)) { throw "pose ${p}: PT not deterministic (two 1024-spp renders differ)" }
+            $d = (& $hashdiff diff $a $gold | Select-Object -Last 1)
+            if ([double]$d -gt 1.0) { throw "pose ${p}: PT golden diff $d > 1.0 (mean abs channel diff)" }
+            Write-Note "pose ${p}: luma=$mean diff_vs_golden=$d (deterministic x2)"
+        }
+    }
+
     # Regression: the additive depth-readback path must not perturb raster output.
     Assert-Gate 'regression: M5 lit shot + M4 top-down goldens still bit-match' {
         $tmp = Join-Path $RepoRoot 'runs\gate-m9'
@@ -962,7 +991,7 @@ function Invoke-GateM9 {
         if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
     }
 
-    Write-Note 'M9 gate covers exit gate #1 (depth compare); gates #2-#4 land in phases 3-4'
+    Write-Note 'M9 gate covers exit gates #1 (depth compare) + #2 (converged PT golden); gates #3-#4 land in phase 4'
 }
 
 # --- dispatch ---------------------------------------------------------------
