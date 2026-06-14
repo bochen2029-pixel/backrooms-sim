@@ -435,6 +435,7 @@ bool Renderer::init_windowed(void* native_window_handle, uint32_t width, uint32_
         d.device->CreateRenderTargetView(d.backbuffers[i].Get(), nullptr, rtv);
         rtv.ptr += d.rtvDescSize;
     }
+    if (!create_depth(d, last_error_)) return false;  // M13: depth for the windowed maze render
     return true;
 }
 
@@ -1553,6 +1554,128 @@ bool Renderer::upload_hud_overlay(const uint8_t* rgba, uint32_t width, uint32_t 
     if (!ensure_post_pipeline(d, last_error_)) return false;
     if (width != d.hudW || height != d.hudH) { last_error_ = "hud overlay size mismatch"; return false; }
     return upload_hud(d, rgba, last_error_);
+}
+
+bool Renderer::render_chunks_windowed(const contracts::CameraPose& camera,
+                                      const std::vector<contracts::ResidentChunk>& resident,
+                                      uint32_t upload_budget, uint64_t tick, uint32_t* out_drawn) {
+    Impl& d = *impl_;
+    if (!d.windowed || !d.swapchain) { last_error_ = "render_chunks_windowed needs a window"; return false; }
+    if (!ensure_lit_pipeline(d, d.pendingTexSeed, last_error_)) return false;
+
+    // Forward fluorescent lighting (identical to render_chunks): grid lights -> CBV.
+    if (!d.lightCb) {
+        D3D12_RESOURCE_DESC bd = {};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = kLightCbBytes; bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
+        bd.Format = DXGI_FORMAT_UNKNOWN; bd.SampleDesc.Count = 1;
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        const D3D12_HEAP_PROPERTIES up = heap_props(D3D12_HEAP_TYPE_UPLOAD);
+        if (FAILED(d.device->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &bd,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&d.lightCb)))) {
+            last_error_ = "light CBV create failed"; return false;
+        }
+        const D3D12_RANGE none = { 0, 0 };
+        if (FAILED(d.lightCb->Map(0, &none, &d.lightCbMapped))) { last_error_ = "light CBV map failed"; return false; }
+    }
+    {
+        LightsCB lc = {};
+        lc.ambientCount[0] = lc.ambientCount[1] = lc.ambientCount[2] = 0.22f;
+        int n = 0;
+        const float cell = contracts::kCellSize;
+        const int64_t gi0 = static_cast<int64_t>(std::floor(camera.pos[0] / cell));
+        const int64_t gj0 = static_cast<int64_t>(std::floor(camera.pos[2] / cell));
+        const int R = 10;
+        for (int64_t dgi = -R; dgi <= R && n < kMaxLights; ++dgi)
+            for (int64_t dgj = -R; dgj <= R && n < kMaxLights; ++dgj) {
+                const int64_t gi = gi0 + dgi, gj = gj0 + dgj;
+                if (!contracts::is_fluorescent_cell(gi, gj)) continue;
+                float p[3]; contracts::fluorescent_light_pos(gi, gj, p);
+                const uint64_t lid = static_cast<uint64_t>(gi) * 0x9e3779b97f4a7c15ULL ^ static_cast<uint64_t>(gj) * 0xc2b2ae3d27d4eb4fULL;
+                const float fl = br::core::light_flicker(d.pendingTexSeed, lid, tick);
+                lc.lights[n][0] = p[0]; lc.lights[n][1] = p[1]; lc.lights[n][2] = p[2]; lc.lights[n][3] = fl;
+                ++n;
+            }
+        lc.ambientCount[3] = static_cast<float>(n);
+        std::memcpy(d.lightCbMapped, &lc, sizeof(lc));
+    }
+
+    // Pool sync (identical): evict non-resident, upload new (budgeted).
+    std::set<contracts::ChunkKey> live;
+    for (const auto& rc : resident) live.insert(rc.key);
+    for (auto it = d.chunkSlotOf.begin(); it != d.chunkSlotOf.end();) {
+        if (live.find(it->first) == live.end()) { d.chunkFree.push_back(it->second); it = d.chunkSlotOf.erase(it); }
+        else ++it;
+    }
+    uint32_t uploaded = 0;
+    for (const auto& rc : resident) {
+        if (d.chunkSlotOf.find(rc.key) == d.chunkSlotOf.end()) {
+            if (uploaded >= upload_budget) continue;
+            if (!upload_chunk_mesh(d, rc, last_error_)) return false;
+            ++uploaded;
+        }
+    }
+
+    const Mat4 mvp = mat_mul(view_lh(camera.pos, camera.yaw, camera.pitch),
+                             proj_lh(camera.fov_y, camera.aspect, 0.05f, 500.0f));
+    float constants[20];
+    std::memcpy(constants, mvp.m, sizeof(mvp.m));
+    float ld[3] = { -0.3f, -1.0f, -0.2f };
+    const float ll = std::sqrt(ld[0]*ld[0] + ld[1]*ld[1] + ld[2]*ld[2]);
+    constants[16] = ld[0]/ll; constants[17] = ld[1]/ll; constants[18] = ld[2]/ll; constants[19] = 0.0f;
+
+    if (FAILED(d.alloc->Reset())) { last_error_ = "allocator reset failed"; return false; }
+    if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "command list reset failed"; return false; }
+
+    const UINT bbIndex = d.swapchain->GetCurrentBackBufferIndex();
+    ID3D12Resource* bb = d.backbuffers[bbIndex].Get();
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = d.rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    rtv.ptr += static_cast<SIZE_T>(bbIndex) * d.rtvDescSize;
+    const D3D12_CPU_DESCRIPTOR_HANDLE dsv = d.dsvHeap->GetCPUDescriptorHandleForHeapStart();
+
+    const D3D12_RESOURCE_BARRIER toRT = transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    d.list->ResourceBarrier(1, &toRT);
+    d.list->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+    d.list->ClearRenderTargetView(rtv, kClearFloat, 0, nullptr);
+    d.list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+    D3D12_VIEWPORT vp = { 0.0f, 0.0f, static_cast<float>(d.width), static_cast<float>(d.height), 0.0f, 1.0f };
+    D3D12_RECT scissor = { 0, 0, static_cast<LONG>(d.width), static_cast<LONG>(d.height) };
+    d.list->RSSetViewports(1, &vp);
+    d.list->RSSetScissorRects(1, &scissor);
+    ID3D12DescriptorHeap* heaps[] = { d.srvHeap.Get() };
+    d.list->SetDescriptorHeaps(1, heaps);
+    d.list->SetGraphicsRootSignature(d.litRoot.Get());
+    d.list->SetPipelineState(d.litPso.Get());
+    d.list->SetGraphicsRoot32BitConstants(0, 20, constants, 0);
+    d.list->SetGraphicsRootDescriptorTable(1, d.srvHeap->GetGPUDescriptorHandleForHeapStart());
+    d.list->SetGraphicsRootConstantBufferView(2, d.lightCb->GetGPUVirtualAddress());
+    d.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    uint32_t drawn = 0;
+    for (const auto& rc : resident) {
+        const auto it = d.chunkSlotOf.find(rc.key);
+        if (it == d.chunkSlotOf.end()) continue;
+        const ChunkSlot& slot = d.chunkPool[it->second];
+        d.list->IASetVertexBuffers(0, 1, &slot.view);
+        d.list->DrawInstanced(slot.vertex_count, 1, 0, 0);
+        ++drawn;
+    }
+    if (out_drawn) *out_drawn = drawn;
+
+    const D3D12_RESOURCE_BARRIER toPresent = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+    d.list->ResourceBarrier(1, &toPresent);
+    if (FAILED(d.list->Close())) { last_error_ = "command list close failed"; return false; }
+    ID3D12CommandList* wlists[] = { d.list.Get() };
+    d.queue->ExecuteCommandLists(1, wlists);
+    if (FAILED(d.swapchain->Present(1, 0))) { last_error_ = "Present failed"; return false; }
+    const UINT64 wv = ++d.fenceValue;
+    if (FAILED(d.queue->Signal(d.fence.Get(), wv))) { last_error_ = "fence Signal failed"; return false; }
+    if (d.fence->GetCompletedValue() < wv) {
+        if (FAILED(d.fence->SetEventOnCompletion(wv, d.fenceEvent))) { last_error_ = "SetEventOnCompletion failed"; return false; }
+        if (WaitForSingleObject(d.fenceEvent, 5000) != WAIT_OBJECT_0) { last_error_ = "fence wait timed out"; return false; }
+    }
+    return true;
 }
 
 bool Renderer::render_chunks(const contracts::CameraPose& camera,

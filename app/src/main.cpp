@@ -64,7 +64,7 @@ struct Options {
     bool soak = false, crash_test = false, director_probe = false;
     bool director_record = false, director_replay = false;
     bool director = false, no_director = false;   // --director enables; --no-director forces off (INV-6 kill switch)
-    bool director_eval = false, intro = false;
+    bool director_eval = false, intro = false, play = false;
     uint32_t eval_count = 100;          // --director-eval: scenario count
     uint32_t director_interval_s = 15;  // --soak --director: ambient seconds between summaries (wall clock)
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
@@ -134,6 +134,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--eval-count") == 0) { if (!u32(o.eval_count)) return false; }
         else if (std::strcmp(a, "--director-interval") == 0) { if (!u32(o.director_interval_s)) return false; }
         else if (std::strcmp(a, "--intro") == 0) o.intro = true;
+        else if (std::strcmp(a, "--play") == 0) o.play = true;
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -246,6 +247,113 @@ int run_clear(const Options& o) {
         }
     }
     return finish_render(renderer, o, rendered, mem_start);
+}
+
+// ----- M13 playable: real-time windowed walk (WASD + mouse-look) -------------
+// The interactive game loop: a fixed 120 Hz sim tick decoupled from render, real
+// keyboard/mouse -> the same InputCommand the walk-bot/replay feed -> core::tick ->
+// the streamed maze drawn to the window. --seconds N auto-exits (gate-runnable); 0
+// runs until the window closes or Esc. The sim path is unchanged (replay-determinism
+// holds); only input gathering + windowed present are new.
+int run_play(const Options& o) {
+    using namespace br::core;
+    using namespace std::chrono;
+    HWND hwnd = create_window(o.width, o.height);
+    if (!hwnd) { std::fprintf(stderr, "window creation failed\n"); return 1; }
+    SetForegroundWindow(hwnd); SetFocus(hwnd);
+    Renderer renderer;
+    if (!renderer.init_windowed(hwnd, o.width, o.height)) { std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1; }
+    renderer.set_texture_seed(o.seed);
+
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    WorldState s(o.seed);
+    s.wanderer.pos = Vec3{ 2.0f, kWandererHalfHeight + 0.02f, 2.0f };
+
+    std::vector<Aabb> collision;
+    contracts::ChunkKey cached{ 0, static_cast<int64_t>(1) << 40, 0 };
+    auto rebuild = [&](contracts::ChunkKey c) {
+        collision.clear();
+        collision.push_back(Aabb{ {-1.0e6f, -1.0f, -1.0e6f}, {1.0e6f, 0.0f, 1.0e6f} });
+        for (int64_t dx = -1; dx <= 1; ++dx)
+            for (int64_t dz = -1; dz <= 1; ++dz) {
+                const contracts::ChunkData cd = contracts::GenerateChunk(o.seed, contracts::ChunkKey{ 0, c.cx + dx, c.cz + dz });
+                for (const auto& b : cd.collision) collision.push_back(Aabb{ {b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]} });
+            }
+        cached = c;
+    };
+    contracts::ChunkKey c0 = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+    rebuild(c0);
+    sm.update(c0); sm.wait_idle(); sm.update(c0);
+
+    const float aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+    const float kSens = 0.0022f;  // mouse radians/pixel
+    ShowCursor(FALSE);
+    POINT ctr{ static_cast<LONG>(o.width / 2), static_cast<LONG>(o.height / 2) };
+    auto recenter = [&]() -> POINT { POINT p = ctr; ClientToScreen(hwnd, &p); SetCursorPos(p.x, p.y); return p; };
+    POINT anchor = recenter();
+
+    const float tickDt = 1.0f / 120.0f;
+    const auto t_start = steady_clock::now();
+    auto prev = t_start;
+    float accum = 0.0f;
+    const bool timed = (o.seconds > 0);
+    uint64_t frames = 0;
+    bool running = true;
+    while (running) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) running = false;
+            TranslateMessage(&msg); DispatchMessageW(&msg);
+        }
+        if (!running) break;
+        if (timed && steady_clock::now() >= t_start + seconds(static_cast<long long>(o.seconds))) break;
+        if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) break;
+
+        contracts::InputCommand in{};
+        if (GetAsyncKeyState('W') & 0x8000) in.move_z += 1.0f;
+        if (GetAsyncKeyState('S') & 0x8000) in.move_z -= 1.0f;
+        if (GetAsyncKeyState('D') & 0x8000) in.move_x += 1.0f;
+        if (GetAsyncKeyState('A') & 0x8000) in.move_x -= 1.0f;
+        if (GetAsyncKeyState(VK_SPACE) & 0x8000) in.buttons |= contracts::kButtonJump;
+
+        POINT cur; GetCursorPos(&cur);
+        const float look_yaw = static_cast<float>(cur.x - anchor.x) * kSens;
+        const float look_pitch = -static_cast<float>(cur.y - anchor.y) * kSens;
+        anchor = recenter();
+
+        const auto now = steady_clock::now();
+        accum += duration<float>(now - prev).count();
+        prev = now;
+        if (accum > 0.25f) accum = 0.25f;  // clamp the spiral of death
+        bool firstTick = true;
+        while (accum >= tickDt) {
+            const contracts::ChunkKey here = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+            if (here != cached) rebuild(here);
+            contracts::InputCommand step = in;
+            if (firstTick) { step.look_yaw = look_yaw; step.look_pitch = look_pitch; firstTick = false; }  // mouse delta is per-frame
+            tick(s, step, collision);
+            accum -= tickDt;
+        }
+
+        const contracts::ChunkKey center = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+        sm.update(center);
+        const contracts::CameraPose cam = wanderer_camera(s, aspect);
+        uint32_t drawn = 0;
+        if (!renderer.render_chunks_windowed(cam, sm.resident(), 8u, s.tick, &drawn)) {
+            std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str());
+            ShowCursor(TRUE);
+            return 1;
+        }
+        ++frames;
+    }
+    ShowCursor(TRUE);
+    const uint32_t dbg = renderer.debug_error_count();
+    std::printf("play_seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("frames: %llu\n", static_cast<unsigned long long>(frames));
+    std::printf("ticks: %llu\n", static_cast<unsigned long long>(s.tick));
+    std::printf("distance_m: %.1f\n", static_cast<double>(s.odometer));
+    std::printf("debug_error_count: %u\n", dbg);
+    return dbg == 0 ? 0 : 3;
 }
 
 // ----- M2 scene render (test room from a fixed golden pose) -----------------
@@ -1785,6 +1893,7 @@ int main(int argc, char** argv) {
     if (o.director_record) return run_director_record(o);
     if (o.director_replay) return run_director_replay(o);
     if (o.intro)      return run_intro(o);
+    if (o.play)       return run_play(o);
     if (o.soak)       return run_soak(o);
     if (o.sim)     return run_sim(o);
     if (o.walkbot) return run_walkbot(o);

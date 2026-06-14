@@ -24,8 +24,10 @@ $exe = Join-Path (Get-BinDir) 'backrooms.exe'
 if (-not (Test-Path $exe)) { throw "backrooms.exe not built" }
 
 if ($Window) {
-    Write-Ok "launching the windowed app (close the window to exit)"
-    & $exe --window --width $Width --height $Height --seed $Seed
+    Write-Ok "launching the playable walk (WASD + mouse-look; Esc or close the window to exit)"
+    $a = @('--play', '--width', "$Width", '--height', "$Height", '--seed', "$Seed")
+    if ($Director) { $a += '--director' }
+    & $exe @a
     exit $LASTEXITCODE
 }
 
