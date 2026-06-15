@@ -72,7 +72,7 @@ struct Options {
     bool headless = false, windowed = false, scene = false, sim = false, stream = false;
     bool walkbot = false, topdown = false, version = false, shot = false;
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
-    bool biomeat = false, descend = false, ascend = false, vstream = false, shaftfall = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
+    bool biomeat = false, descend = false, ascend = false, vstream = false, shaftfall = false, abyss = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
     bool soak = false, crash_test = false, director_probe = false;
     bool director_record = false, director_replay = false;
@@ -155,6 +155,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--ascend") == 0) o.ascend = true;
         else if (std::strcmp(a, "--vstream") == 0) o.vstream = true;
         else if (std::strcmp(a, "--shaftfall") == 0) o.shaftfall = true;
+        else if (std::strcmp(a, "--abyss") == 0) o.abyss = true;
         else if (std::strcmp(a, "--post") == 0) o.post = true;
         else if (std::strcmp(a, "--dxr-probe") == 0) o.dxr_probe = true;
         else if (std::strcmp(a, "--dxr-test") == 0) o.dxr_test = true;
@@ -2873,6 +2874,87 @@ int run_shaftfall(const Options& o) {
     return landed ? 0 : 6;
 }
 
+// ----- M30: headless ABYSS render proof (look DOWN an open shaft) -------------
+// Finds a shaft, points a camera down its void from the top floor, and renders with a BAND
+// of floors resident (the abyss) vs just the top floor. The band shows several floors down
+// (then black where the bounded ring ends = fog-to-black); the renders must DIFFER + be
+// debug-clean, and the band's residency is exactly (renderDepth+1)x the one-floor ring.
+int run_abyss(const Options& o) {
+    using namespace br::core;
+    int64_t scx = 0, scz = 0;
+    br::gen::ShaftSpec sh;
+    bool found = false;
+    for (int64_t r = 0; r < 200 && !found; ++r)
+        for (int64_t cz = -r; cz <= r && !found; ++cz)
+            for (int64_t cx = -r; cx <= r && !found; ++cx) {
+                const br::gen::ShaftSpec s = br::gen::shaft_at(o.seed, cx, cz);
+                if (s.present && s.cell_i >= 1 && s.cell_i <= 6 && s.cell_j >= 1 && s.cell_j <= 6) {
+                    scx = cx; scz = cz; sh = s; found = true;
+                }
+            }
+    if (!found) { std::printf("no_shaft_found: 1\n"); return 6; }
+
+    const float cs = br::gen::kCellSize;
+    const float camx = static_cast<float>(scx) * contracts::kChunkSize + (static_cast<float>(sh.cell_i) + 0.5f) * cs;
+    const float camz = static_cast<float>(scz) * contracts::kChunkSize + (static_cast<float>(sh.cell_j) + 0.5f) * cs;
+    const float camy = contracts::level_base_y(sh.top_level) + kWandererHalfHeight + 0.02f + kEyeHeight;
+    contracts::CameraPose cam{};
+    cam.pos[0] = camx; cam.pos[1] = camy; cam.pos[2] = camz;
+    cam.yaw = 0.0f; cam.pitch = -1.3f;  // look down into the void
+    cam.fov_y = 1.2217305f;
+    cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+    const contracts::ChunkKey center = contracts::chunk_key_at(sh.top_level, camx, camz);
+    const int32_t renderDepth = (sh.depth < 4) ? sh.depth : 4;  // a few floors down, then fog-to-black
+
+    auto render_band = [&](int32_t lo, int32_t hi, std::vector<uint8_t>& rgba, size_t& resident, uint32_t& dbg) -> bool {
+        Renderer renderer;
+        if (!renderer.init_headless(o.width, o.height)) { std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return false; }
+        renderer.set_texture_seed(o.seed);
+        br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+        sm.update(center, lo, hi);
+        sm.wait_idle();
+        sm.update(center, lo, hi);
+        resident = sm.resident_count();
+        uint32_t drawn = 0;
+        const size_t target = sm.resident_count();
+        for (int w = 0; w < 2000 && static_cast<size_t>(drawn) < target; ++w)
+            if (!renderer.render_chunks(cam, sm.resident(), 64u, 0u, &drawn)) { std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); return false; }
+        if (!renderer.render_chunks(cam, sm.resident(), 64u, 0u, &drawn)) { std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); return false; }
+        FrameImage img;
+        if (!renderer.readback(img)) { std::fprintf(stderr, "readback: %s\n", renderer.last_error().c_str()); return false; }
+        rgba = img.rgba;
+        dbg = renderer.debug_error_count();
+        return true;
+    };
+
+    std::vector<uint8_t> deep, shallow;
+    size_t resDeep = 0, resShallow = 0;
+    uint32_t dbgDeep = 0, dbgShallow = 0;
+    if (!render_band(sh.top_level - renderDepth, sh.top_level, deep, resDeep, dbgDeep)) return 1;
+    if (!render_band(sh.top_level, sh.top_level, shallow, resShallow, dbgShallow)) return 1;
+
+    double acc = 0.0;
+    const size_t n = (deep.size() < shallow.size()) ? deep.size() : shallow.size();
+    for (size_t i = 0; i < n; ++i) {
+        const int d = static_cast<int>(deep[i]) - static_cast<int>(shallow[i]);
+        acc += (d < 0) ? -d : d;
+    }
+    const double abyss_diff = (n > 0) ? acc / static_cast<double>(n) : 0.0;
+
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("shaft_chunk: %lld %lld cell %d %d\n", static_cast<long long>(scx), static_cast<long long>(scz), sh.cell_i, sh.cell_j);
+    std::printf("top_level: %d\n", sh.top_level);
+    std::printf("render_depth: %d\n", renderDepth);
+    std::printf("resident_shallow: %llu\n", static_cast<unsigned long long>(resShallow));
+    std::printf("resident_deep: %llu\n", static_cast<unsigned long long>(resDeep));
+    std::printf("abyss_diff: %.4f\n", abyss_diff);
+    std::printf("debug_error_count: %u\n", dbgDeep + dbgShallow);
+    const bool ok = (dbgDeep == 0 && dbgShallow == 0) && (resShallow > 0) &&
+                    (resDeep == resShallow * static_cast<size_t>(renderDepth + 1)) && (abyss_diff > 0.5);
+    std::printf("abyss_ok: %d\n", ok ? 1 : 0);
+    return ok ? 0 : 6;
+}
+
 // ----- M9 DXR capability probe: device tier + DXC shader compilation ----------
 int run_dxr_probe(const Options&) {
     const br::render_dxr::DxrCaps c = br::render_dxr::probe_caps();
@@ -3493,6 +3575,7 @@ int main(int argc, char** argv) {
     if (o.ascend)     return run_ascend(o);
     if (o.vstream)    return run_vstream(o);
     if (o.shaftfall)  return run_shaftfall(o);
+    if (o.abyss)      return run_abyss(o);
     if (o.dxr_probe)  return run_dxr_probe(o);
     if (o.dxr_test)   return run_dxr_test(o);
     if (o.dxr_depth)  return run_dxr_depth(o);
