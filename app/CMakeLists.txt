@@ -26,3 +26,13 @@ target_link_libraries(backrooms PRIVATE
   br_stb user32 winmm xinput)
 target_compile_definitions(backrooms PRIVATE UNICODE _UNICODE)
 set_target_properties(backrooms PROPERTIES OUTPUT_NAME "backrooms")
+
+# Windows screensaver: a .scr IS just the exe renamed (it self-detects /s /p /c). Emit Backrooms.scr
+# next to the exe on EVERY build so it is reproducible -- it used to be a one-off manual copy, so a
+# clean build (which wipes build/bin) had nothing to regenerate it and it vanished.
+if(WIN32)
+  add_custom_command(TARGET backrooms POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:backrooms> $<TARGET_FILE_DIR:backrooms>/Backrooms.scr
+    COMMENT "screensaver: backrooms.exe -> Backrooms.scr"
+    VERBATIM)
+endif()
