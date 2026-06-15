@@ -4,6 +4,37 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 33 — screensaver FIX: natural hallway navigation (the Stroller)  ✅ — `gate M30` green
+
+**Operator-reported bug:** the screensaver's autonomous camera was "completely useless" — it bumped wall to
+wall by blind probing and, because the camera faces the travel direction, it *stared at* each wall it hit and
+never looked down the hallways like a person. **Fixed + gate-guarded + pushed.**
+
+**Root cause.** The screensaver reused `WalkBot` (the soak/PT roamer): walk straight; when blocked, rotate a
+fixed 1.3 rad and retry. Fine as a coverage *soak*, terrible as a *camera* — it faceplants, scans by
+collision, and the yaw (== the view) points at whatever it is about to hit. `WalkBot` is also used by the
+**gated** `run_soak` + `run_dxr_walk` paths, so it had to stay byte-identical.
+
+**Done (ADR-060).** A screensaver-only **`Stroller`** that walks the maze like a person: a **cardinal heading**
+(camera looks straight DOWN the corridor), **one turn-decision per cell at the cell centre** (deliberate pivots,
+stays corridor-centred), choosing open neighbours by a chest-height ray-probe that treats walls, pillars,
+**stair risers, and open floor holes** as blocked (rounds pits, never climbs/faceplants), a **strong straight
+bias** (weight 5:1) with **no reversing** unless dead-ended, a **safety-net re-pick** if a wall looms < 1.5 m,
+forward speed eased off while pivoting (rounds corners), and a subtle idle weave. `WalkBot` untouched.
+
+**Proof.** New headless `--strollcheck` (distance + explored span + a **faceplant ratio** = fraction of ticks
+with a wall within 1.2 m straight along the *camera* facing). Across 7 seeds: distance **~1000–1050 m** (was 27 m
+when WalkBot wedged on seed 1), span **60–106 m** (was 10–26 m circling), faceplant **0.0006–0.0077** (was
+0.04–**0.94**). `gate.ps1 M30` adds a guard (`stroll_ok` + faceplant < 0.05 over seeds 1/42/500); walker stays
+on its floor (`final_level` 0 — pit-avoidance holds). Full ctest 100/100; M30 gate exits 0.
+
+**Gotcha.** First pass re-decided every tick when a wall was ahead → oscillation/wedge (seed 1 stuck at 27 m,
+0.94 faceplant). Switching to **decide-once-per-cell-at-centre + a close-range safety-net re-pick** fixed both
+the stuck and the small exploration span (now ranges 60–106 m). The cardinal-heading invariant is what keeps
+it corridor-centred (a cardinal move never drifts sideways) and makes the camera look straight down halls.
+
+---
+
 ## Session 32 — M30 polish ×3: live descent + deep-descent soak + draft telegraph  ✅ — `gate M30` green; model-free Phase IV EXHAUSTED
 
 **Three gated/pushed slices this session** (`04767fb` live descent · `30c5f77` deep-descent soak · `337ae21`

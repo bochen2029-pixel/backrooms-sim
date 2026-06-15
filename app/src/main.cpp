@@ -75,6 +75,7 @@ struct Options {
     bool biomeat = false, descend = false, ascend = false, vstream = false, shaftfall = false, abyss = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
     bool livedescent = false;   // M30: headless proof that the live-walk holed floor lets you fall through a down-stair hole + land
     bool descentsoak = false;   // M30: deep-descent soak (repeated deep falls; bounded memory/residency + determinism)
+    bool strollcheck = false;   // screensaver: headless proof the Stroller navigates naturally (low faceplant ratio)
     bool screensaver = false, scr_config = false;   // Windows .scr: /s run, /p <hwnd> preview, /c config
     std::string scr_preview;                         // /p <hwnd>: parent HWND to render the preview into
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
@@ -172,6 +173,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--shaftfall") == 0) o.shaftfall = true;
         else if (std::strcmp(a, "--livedescent") == 0) o.livedescent = true;
         else if (std::strcmp(a, "--descentsoak") == 0) o.descentsoak = true;
+        else if (std::strcmp(a, "--strollcheck") == 0) o.strollcheck = true;
         else if (std::strcmp(a, "--abyss") == 0) o.abyss = true;
         else if (std::strcmp(a, "--post") == 0) o.post = true;
         else if (std::strcmp(a, "--dxr-probe") == 0) o.dxr_probe = true;
@@ -1526,6 +1528,172 @@ struct WalkBot {
         return in;
     }
 };
+
+// A natural hallway navigator for the SCREENSAVER (cosmetic, non-gated). WalkBot (above) walks
+// straight, bumps a wall, then blindly rotates -- it faceplants wall-to-wall while the camera
+// stares at whatever it is about to hit, and never looks down a corridor. The Stroller instead
+// walks the maze like a person: it keeps a CARDINAL heading (so the camera looks straight DOWN the
+// corridor it is in), probes ahead/left/right for the next opening -- treating walls, stairwell
+// risers AND open floor holes as "blocked", so it rounds pits and never climbs or faceplants -- and
+// at a junction (or before a wall) turns to FACE an open corridor and then walks it, easing forward
+// speed off while it pivots so it rounds the corner instead of scraping it. A subtle weave keeps it
+// from feeling rigid; a no-progress fallback frees a rare wedge. WalkBot stays for the gated soak/PT
+// paths; the Stroller is screensaver-only, so it cannot perturb any gate.
+struct Stroller {
+    br::core::Pcg64 rng;
+    float heading = 0.0f;            // current CARDINAL target yaw: 0=+Z, pi/2=+X, pi=-Z, 3pi/2=-X
+    br::core::Vec3 last_pos;         // previous-tick position (wedge detector)
+    int64_t dec_gx = (static_cast<int64_t>(1) << 40);  // the cell we last made a turn-decision in
+    int64_t dec_gz = (static_cast<int64_t>(1) << 40);  // (sentinel -> forces a decision on the first step)
+    int low_ticks = 0;              // consecutive ~motionless ticks
+    double sway = 0.0;              // a gentle idle look-weave
+    bool decided = false;
+
+    Stroller(uint64_t seed, br::core::Vec3 spawn) : rng(seed), last_pos(spawn) {}
+
+    // Is the corridor clear for `reach` metres along `yaw`? Blocked by a chest-height wall / pillar /
+    // stair riser OR an open floor hole (a pit). Probing at chest height means the floor slab and a
+    // low first riser never read as walls -- only standing geometry and real openings stop the walk.
+    static bool clear(uint64_t seed, int32_t level, const br::core::Vec3& p, float yaw, float reach,
+                      const std::vector<br::core::Aabb>& col) {
+        const float fx = std::sin(yaw), fz = std::cos(yaw);
+        const float r = br::core::kWandererRadius + 0.20f;
+        const float cs = br::gen::kCellSize;
+        for (float d = 0.7f; d <= reach; d += 0.4f) {
+            const float x = p.x + fx * d, z = p.z + fz * d;
+            const contracts::ChunkKey k = contracts::chunk_key_at(level, x, z);
+            const int i = static_cast<int>((x - static_cast<float>(k.cx) * contracts::kChunkSize) / cs);
+            const int j = static_cast<int>((z - static_cast<float>(k.cz) * contracts::kChunkSize) / cs);
+            if (i >= 0 && i < 8 && j >= 0 && j < 8 &&
+                br::gen::floor_hole_at(seed, level, k.cx, k.cz, i, j)) return false;  // a pit ahead -> avoid
+            for (const br::core::Aabb& b : col) {
+                if (p.y > b.mn.y + 0.05f && p.y < b.mx.y - 0.05f &&    // standing geometry at chest height
+                    x + r > b.mn.x && x - r < b.mx.x &&
+                    z + r > b.mn.z && z - r < b.mx.z) return false;
+            }
+        }
+        return true;
+    }
+
+    // Choose an open cardinal heading from the current spot. Strongly prefers to continue straight
+    // (long corridor runs); never reverses unless boxed in (a dead-end). reach `2.8 m` looks just
+    // past the cell boundary so it answers "is the NEIGHBOUR cell open?".
+    void repick(uint64_t seed, int32_t lvl, const br::core::Vec3& p, const std::vector<br::core::Aabb>& col,
+                bool allow_straight) {
+        const float kQ = 1.5707963f, kTwoPi = 6.2831853f, reach = 2.8f;
+        const bool oF = allow_straight && clear(seed, lvl, p, heading, reach, col);
+        const bool oL = clear(seed, lvl, p, heading - kQ, reach, col);
+        const bool oR = clear(seed, lvl, p, heading + kQ, reach, col);
+        const float wF = oF ? 5.0f : 0.0f, wL = oL ? 1.0f : 0.0f, wR = oR ? 1.0f : 0.0f;
+        const float tot = wF + wL + wR;
+        if (tot <= 0.0f) heading += kTwoPi * 0.5f;            // dead-end: turn around (the only way out)
+        else {
+            float rr = static_cast<float>(rng.next_double()) * tot;
+            if (rr < wF) { /* keep going straight */ }
+            else if (rr < wF + wL) heading -= kQ;
+            else heading += kQ;
+        }
+        while (heading >= kTwoPi) heading -= kTwoPi;
+        while (heading < 0.0f) heading += kTwoPi;
+    }
+
+    contracts::InputCommand step(const br::core::WorldState& s, uint64_t seed,
+                                 const std::vector<br::core::Aabb>& col) {
+        contracts::InputCommand in{};
+        const br::core::Vec3 p = s.wanderer.pos;
+        const int32_t lvl = contracts::level_from_y(p.y);
+        const float kTwoPi = 6.2831853f, cs = br::gen::kCellSize;
+
+        const float sdx = p.x - last_pos.x, sdz = p.z - last_pos.z;
+        last_pos = p;
+        low_ticks = (std::sqrt(sdx * sdx + sdz * sdz) < 0.004f) ? low_ticks + 1 : 0;
+
+        // The cell we are in + its centre. We make ONE turn-decision per cell, AT its centre, so the
+        // pivot happens about the corridor crossing -- deliberate, and it stays corridor-centred
+        // (a cardinal heading only moves along its axis, so a centred walker never drifts sideways).
+        const int64_t gx = static_cast<int64_t>(std::floor(p.x / cs));
+        const int64_t gz = static_cast<int64_t>(std::floor(p.z / cs));
+        const float ccx = static_cast<float>(gx) * cs + cs * 0.5f;
+        const float ccz = static_cast<float>(gz) * cs + cs * 0.5f;
+        const float toCenter = std::sqrt((p.x - ccx) * (p.x - ccx) + (p.z - ccz) * (p.z - ccz));
+        const bool wedged = (low_ticks > 120);  // ~1 s without progress
+
+        if (!decided || wedged || ((gx != dec_gx || gz != dec_gz) && toCenter < 0.7f)) {
+            repick(seed, lvl, p, col, /*allow_straight=*/!wedged);  // wedged -> force an actual turn
+            dec_gx = gx; dec_gz = gz; decided = true; low_ticks = 0;
+        }
+        // Safety net: if a wall looms close in the committed heading (a mid-cell glitch, or a turn that
+        // didn't open up), re-pick a side NOW so the camera never faceplants into a wall.
+        if (!clear(seed, lvl, p, heading, 1.5f, col)) {
+            repick(seed, lvl, p, col, /*allow_straight=*/false);
+            dec_gx = gx; dec_gz = gz;
+        }
+
+        sway += 0.011;
+        const float target = heading + 0.04f * static_cast<float>(std::sin(sway));  // a subtle, human weave
+        float dyaw = target - s.wanderer.yaw;
+        while (dyaw > 3.14159265f) dyaw -= kTwoPi;
+        while (dyaw < -3.14159265f) dyaw += kTwoPi;
+        in.look_yaw = br::core::clampf(dyaw, -0.030f, 0.030f);  // a calm, deliberate turn (no snapping)
+
+        const float ad = std::fabs(dyaw);
+        in.move_z = (ad < 0.30f) ? 1.0f : (ad > 0.90f ? 0.0f : (0.90f - ad) / 0.60f);  // pivot at corners, then walk
+        return in;
+    }
+};
+
+// Headless proof that the screensaver's Stroller navigates NATURALLY (the operator's bug: the old
+// WalkBot faceplanted wall-to-wall and stared at walls). Drives the Stroller with the same holed
+// collision the screensaver uses, for --ticks, and reports: distance covered (it isn't stuck),
+// the explored span (it ranges out, doesn't circle one spot), and the FACEPLANT RATIO -- the
+// fraction of ticks with a wall within 1.2 m straight along the CAMERA facing (what the viewer
+// sees). A natural walker looks DOWN open corridors, so that ratio is low; WalkBot's was high.
+int run_strollcheck(const Options& o) {
+    using namespace br::core;
+    WorldState s(o.seed);
+    s.wanderer.pos = Vec3{ 2.0f, kWandererHalfHeight + 0.02f, 2.0f };
+    Stroller bot(o.seed ^ 0x5170990000000001ull, s.wanderer.pos);
+    std::vector<Aabb> col;
+    contracts::ChunkKey cached{ 0x7fffffff, 0, 0 };
+    auto rebuild = [&](contracts::ChunkKey c) { build_walk_collision(col, o.seed, c); cached = c; };
+    rebuild(contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z));
+
+    const uint32_t ticks = (o.ticks > 0) ? o.ticks : 36000u;  // ~5 min of walking @120 Hz
+    uint64_t faceplant = 0;
+    float dist = 0.0f; Vec3 prev = s.wanderer.pos;
+    float minx = prev.x, maxx = prev.x, minz = prev.z, maxz = prev.z;
+    for (uint32_t t = 0; t < ticks; ++t) {
+        const contracts::ChunkKey here = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
+        if (here != cached) rebuild(here);
+        tick(s, bot.step(s, o.seed, col), col);
+        const float fx = std::sin(s.wanderer.yaw), fz = std::cos(s.wanderer.yaw);  // the CAMERA facing
+        const float r = kWandererRadius + 0.1f;
+        bool wallClose = false;
+        for (float d = 0.5f; d <= 1.2f && !wallClose; d += 0.3f) {
+            const float x = s.wanderer.pos.x + fx * d, z = s.wanderer.pos.z + fz * d;
+            for (const Aabb& b : col)
+                if (s.wanderer.pos.y > b.mn.y + 0.05f && s.wanderer.pos.y < b.mx.y - 0.05f &&
+                    x + r > b.mn.x && x - r < b.mx.x && z + r > b.mn.z && z - r < b.mx.z) { wallClose = true; break; }
+        }
+        if (wallClose) ++faceplant;
+        const float dx = s.wanderer.pos.x - prev.x, dz = s.wanderer.pos.z - prev.z;
+        dist += std::sqrt(dx * dx + dz * dz); prev = s.wanderer.pos;
+        const float px = s.wanderer.pos.x, pz = s.wanderer.pos.z;
+        if (px < minx) minx = px; if (px > maxx) maxx = px;
+        if (pz < minz) minz = pz; if (pz > maxz) maxz = pz;
+    }
+    const double facer = static_cast<double>(faceplant) / static_cast<double>(ticks);
+    const float span = std::max(maxx - minx, maxz - minz);
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("ticks: %u\n", ticks);
+    std::printf("distance_m: %.1f\n", static_cast<double>(dist));
+    std::printf("explore_span_m: %.1f\n", static_cast<double>(span));
+    std::printf("faceplant_ratio: %.4f\n", facer);
+    std::printf("final_level: %d\n", contracts::level_from_y(s.wanderer.pos.y));
+    const bool ok = (dist > static_cast<float>(ticks) * 0.012f) && (span > 40.0f) && (facer < 0.15);
+    std::printf("stroll_ok: %d\n", ok ? 1 : 0);
+    return ok ? 0 : 6;
+}
 
 int run_walkbot(const Options& o) {
     using namespace br::core;
@@ -3926,7 +4094,7 @@ int run_screensaver(const Options& o) {
 
     WorldState s(seed);
     s.wanderer.pos = Vec3{ 2.0f, kWandererHalfHeight + 0.02f, 2.0f };
-    WalkBot bot(seed ^ 0x5170990000000001ull, s.wanderer.pos);   // the autonomous camera
+    Stroller bot(seed ^ 0x5170990000000001ull, s.wanderer.pos);   // the autonomous camera -- natural hallway navigation
     app::Shoggoth shog; shog.pos = s.wanderer.pos; shog.pos.x += 22.0f; shog.pos.z += 6.0f;
 
     std::vector<Aabb> collision;
@@ -3978,7 +4146,7 @@ int run_screensaver(const Options& o) {
         while (accum >= tickDt) {
             const contracts::ChunkKey here = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
             if (here != cached) rebuild(here);
-            tick(s, bot.step(s), collision);                                  // auto-driven, no keyboard
+            tick(s, bot.step(s, texSeed, collision), collision);              // auto-driven, no keyboard
             app::shoggoth_step(shog, s.wanderer.pos, seed, (s.tick % 8u) == 0u);
             accum -= tickDt;
         }
@@ -4045,6 +4213,7 @@ int main(int argc, char** argv) {
     if (o.shaftfall)  return run_shaftfall(o);
     if (o.livedescent) return run_livedescent(o);
     if (o.descentsoak) return run_descentsoak(o);
+    if (o.strollcheck) return run_strollcheck(o);
     if (o.abyss)      return run_abyss(o);
     if (o.dxr_probe)  return run_dxr_probe(o);
     if (o.dxr_test)   return run_dxr_test(o);

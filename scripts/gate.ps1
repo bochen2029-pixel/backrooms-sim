@@ -2903,6 +2903,23 @@ function Invoke-GateM30 {
         Write-Note 'deep-descent soak: seeds 1/42 fall a deep shaft ~50-66 times each (bit-identical x2), residency bounded (245 <= 294 = (kBand+2)x ring), process memory flat post-warmup (<32 MB) -- the vertical paths hold determinism + bounded memory over the long haul'
     }
 
+    # SCREENSAVER navigation: the autonomous camera (Stroller) must walk like a person -- cover ground,
+    # range out (explore), and almost NEVER face a wall up close. The old WalkBot faceplanted wall-to-
+    # wall while the camera stared at whatever it hit; --strollcheck drives the Stroller headlessly with
+    # the screensaver's own holed collision and reports a "faceplant ratio" (fraction of ticks with a
+    # wall within 1.2 m straight ahead). A natural walker keeps it near zero. Guards a cosmetic path, but
+    # the screensaver nav must not silently regress.
+    Assert-Gate 'screensaver Stroller navigates naturally (covers ground, explores, ~never faceplants a wall)' {
+        foreach ($seed in 1, 42, 500) {
+            $r = Invoke-AppCapture @('--strollcheck', '--seed', "$seed", '--ticks', '36000')
+            if ($r.Exit -ne 0) { throw "strollcheck seed ${seed} exited $($r.Exit): $($r.Out)" }
+            if ((Get-Metric $r.Out 'stroll_ok') -ne 1) { throw "seed ${seed} stroll not natural: $($r.Out)" }
+            $fp = Get-MetricFloat $r.Out 'faceplant_ratio'
+            if ($fp -ge 0.05) { throw "seed ${seed} faceplant_ratio $fp >= 0.05 (the camera stares at walls instead of down corridors)" }
+        }
+        Write-Note 'screensaver Stroller: seeds 1/42/500 each walk ~1000+ m, explore a 60-106 m span, faceplant ratio < 0.01 (looks DOWN corridors + turns deliberately at junctions) -- the WalkBot wall-faceplant is gone'
+    }
+
     # The abyss renders: look DOWN a shaft with a band of floors resident -> the depths show through
     # the void (then black where the bounded ring ends = fog-to-black), debug-clean + bounded.
     Assert-Gate 'abyss render: floors show down a shaft (fog-to-black), bounded + debug-clean' {
@@ -2944,7 +2961,7 @@ function Invoke-GateM30 {
         & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
         if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
     }
-    Write-Note 'M30 gate: open shafts -- a rare deep vertical void (shaft_at, ~1/1500) cut through the floors, a soft-catch fall the full depth (5..10), debug-clean, deterministic. Live in-game descent (holed walk floor) + multi-floor fog render + a deep-descent soak (bounded + deterministic) are DONE. Remaining M30 polish: the draft-audio telegraph (decision 6, ROADMAP).'
+    Write-Note 'M30 gate: open shafts -- a rare deep vertical void (shaft_at, ~1/1500) cut through the floors, a soft-catch fall the full depth (5..10), debug-clean, deterministic. ALL M30 polish DONE: live in-game descent (holed walk floor), multi-floor fog render, a deep-descent soak (bounded + deterministic), the draft-audio telegraph (decision 6), and the screensaver natural-navigation redo (the Stroller -- no more WalkBot wall-faceplanting).'
 }
 
 function Invoke-GateM29 {
