@@ -10,6 +10,37 @@ Canon: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Build sequence:
 [`docs/MILESTONES.md`](docs/MILESTONES.md). Where the build stands:
 [`docs/SESSION_LOG.md`](docs/SESSION_LOG.md).
 
+![The AI Shoggoth in the path-traced Backrooms](docs/images/shoggoth-dxr.png)
+
+> *The AI Shoggoth, path-traced. Everything in this frame is generated from a seed — the
+> walls, the fluorescent lights, the creature, and the lighting that falls on it. Rendered
+> with `backrooms --shoggoth-dxr-shot --seed 11 --pose 0`.*
+
+## The Shoggoth — a living, AI-driven monster (Phase III)
+
+An autonomous creature hunts the wanderer through the maze. Its whole sensory arc is built
+milestone by milestone (M20–M25), and **determinism stays sacred** throughout — every AI
+decision enters the sim only as a recorded event at a deterministic tick, so a recorded
+chase **replays bit-identically with every model offline**:
+
+- **Body + navigation** — a procedural warm-salmon radial-tentacle body (no assets) with
+  deterministic BFS maze-pathfinding toward the wanderer, visible in **both** the raster and
+  the **ray-traced** renderers.
+- **A KEEL brain** — a local LLM (the same sovereign KEEL substrate as the Director) chooses
+  what the creature *wants* (hunt / stalk / lurk / flank / flee). It runs **live, off the
+  120 Hz frame thread**, so it thinks while you play without ever hitching.
+- **Eyes** — a virtual camera renders the creature's POV; a local **vision model**
+  (qwen-VL + an `mmproj` projector) looks at the frame and informs the intent.
+- **Ears + a voice** — the creature hears its surroundings through **whisper.cpp**, and the
+  Backrooms PA speaks through a **from-scratch procedural formant TTS** (no assets) that
+  whisper reads back as words (*"Evacuate sector five."*).
+
+```powershell
+backrooms --shoggoth --out chase.png                     # headless: a deterministic chase + top-down map
+backrooms --shoggoth-dxr-shot --pose 0 --out shot.png    # the creature in the path-traced path
+backrooms --game --rt                                    # play it: the creature hunts you, ray-traced
+```
+
 ## Prerequisites
 
 - Windows 10/11 x64
