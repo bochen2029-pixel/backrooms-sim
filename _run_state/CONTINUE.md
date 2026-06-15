@@ -18,6 +18,15 @@ and press on. Minimal meta — no scaffolding-on-scaffolding; the bulk of effort
 
 ## CURRENT POSITION (update this line as you go)
 - ✅ Autopilot rig + perpetual memory + M26 (`m26-green`, live multi-level) shipped.
+- ✅ **POST-M30 (this session, all pushed, HEAD `f75c805`, tree clean):** (1) render-resolution feature —
+  1080p default + first-launch NATIVE auto-detect + in-menu picker to 4K, applied-on-relaunch (ADR-056);
+  (2) a multi-agent QC **AUDIT** — `docs/AUDIT_2026-06-15.md` (31 agents, 82 findings, 0 confirmed criticals,
+  core/gen clean; FIXED stair+shaft cell guard + DXR InstanceID guard + ARCHITECTURE §5 doc-drift;
+  OVERTURNED 3 "stream race" false-positives; follow-ons → ROADMAP §5 ISSUE-6); (3) docs
+  `RUN_LOG_2026-06-15.md` + `PROJECT_STATE.md`; (4) ZIP backup
+  `C:\backrooms_backups\backrooms_phaseIV_2026-06-15_ede9b7f.zip`; (5) a working **Windows screensaver**
+  — `Backrooms.scr` / `run_screensaver` (`/s` auto-walk+VHS+audio+abyss, random seed, exits on input; `/p`
+  preview; `/c` config; commit `f75c805`). All DONE — do NOT redo. NEXT work is unchanged (below).
 - ✅ **M27 (procedural stairs) DONE — `m27-green`, gate exits 0, tagged + pushed.** `stair_at` hybrid
   placement; aligned floor/ceiling holes; a climbable thin riser-slab stairwell + collision; stair-aware
   carve; **step-up locomotion** in `move_and_collide` (inert for walls → prior collision bit-identical);
