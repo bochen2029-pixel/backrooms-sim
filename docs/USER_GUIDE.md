@@ -39,6 +39,7 @@ See the project [`README.md`](../README.md). In short: Visual Studio 2022 + the 
 | Menu select | `Enter` / `Space` | `A` |
 | Adjust a setting | `← →` | — |
 | Toggle fullscreen | `F11` | — |
+| Toggle ray tracing | `F2` | — |
 | Quit | Quit from the menu, or close the window | — |
 
 Mouse-look is captured while you walk and released in menus. Mouse sensitivity is a
@@ -61,6 +62,9 @@ setting (below).
   - **SFX** — footstep / effect volume (0–100).
   - **Mouse** — look sensitivity (0–100).
   - **Director** — turn the optional local-LLM "Director" on/off (see §6).
+  - **Ray Tracing** — toggle real-time **path-traced lighting** (DXR). Off by default;
+    needs an RTX / DXR GPU. Softer, more physically realistic light + shadows (and a touch
+    of noise while moving). Also toggled in-game with **F2**.
   - **Back** — return.
 
 All settings (plus resolution, fullscreen, and the last seed) **persist** across launches

@@ -26,6 +26,7 @@ Backup remote: **https://github.com/bochen2029-pixel/backrooms-sim** (private).
 | **M16** | Settings persistence + windowing/fullscreen + XInput gamepad | M16 | ✅ `m16-green` |
 | **M17** | Portable packaging (bundled DXC, release build, clean-env zip) | M17 | ✅ `v2.0` |
 | **M18** | Realistic walking: humanlike head-bob (view-only) + Shift-to-run | M18 | ✅ `m18-green` |
+| **M19** | Real-time ray-tracing toggle (DXR→present, default off, no regression) | M19 | ✅ `m19-green` |
 
 **🏁 v1.0 — all 13 milestones (M0–M12) green and pushed.** Each is verified by a
 machine-checkable gate (`scripts/gate.ps1 -Milestone M<N>` exits 0) and tagged; the

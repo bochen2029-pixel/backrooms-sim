@@ -4,6 +4,36 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 20 — M19: Real-time ray-tracing toggle  ✅ COMPLETE — 🏷️ `m19-green`
+
+**`gate.ps1 -Milestone M19` exits 0; tagged `m19-green` + pushed.** The live walk can now be
+**path-traced** with a Settings toggle — default OFF, so it can't regress anything.
+
+**Done (M19; commit `<wip>` + gate; ADR-045).**
+- **Toggle** — Settings → "RAY TRACING" (`kSettingsItems` 5→6), **F2** hotkey, `--rt` flag,
+  persisted in `backrooms.cfg` (the reserved `renderer` field). Default **off**.
+- **The bridge** — `render_dxr` is a separate device doing headless readback; rather than share
+  the swapchain, when RT is on the loop renders the path tracer at **2/3 internal res**,
+  `readback`s, and presents via `render_d3d12::present_overlay_windowed`, which now **sizes its
+  overlay texture to the source** and **upscales** via the fullscreen-triangle sampler. No
+  cross-device sharing, no new pipeline (reuses the M15 overlay primitive). Accumulation resets
+  on camera move; scene rebuilds on chunk-center change.
+- **`Invoke-GateM19`** — ctest + **RT-on** (`--play --rt`: 663 DXR frames, luma 176, debug-clean)
+  + **RT-off** (`--play`: raster, `rt_frames=0`, debug-clean) + **M5 raster golden bit-identical**
+  (default-off = no regression) + menu goldens (incl. the new RAY TRACING row) + INV-5/inventory.
+
+**Gotchas / notes.** `present_overlay_windowed` now takes a *source* size (the menu callers pass
+window-size → unchanged; RT passes the smaller DXR size → upscaled). The **settings golden was
+re-captured** via `goldgen` (Iron Rule 6, ADR-045) — only `settings.png` changed. RT perf is
+fine because the per-frame cost is dominated by the readback (~constant); the headless `--play`
+test sits static so it *accumulates* (clean), but moving resets each frame at the same cost. The
+DXR→present bridge will be reused for **M22 shoggoth vision**.
+
+**Next: M20** — the **Shoggoth**: a procedural amorphous 3D body + deterministic grid pathfinding
+(WorldState entity, seeded/replayable), intermittent chase. Then M21 its KEEL brain, M22 vision.
+
+---
+
 ## Session 19 — M18: Realistic walking (head-bob + run)  ✅ COMPLETE — 🏷️ `m18-green` · Phase III begins
 
 **`gate.ps1 -Milestone M18` exits 0; tagged `m18-green` + pushed. Phase III ("the Backrooms
