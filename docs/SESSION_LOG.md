@@ -63,6 +63,13 @@ was ~0–3°; uniform-random 22.5°), distance ~1110–1140 m, faceplant 0.01–
 requires `offcardinal > 6`; faceplant ceiling loosened 0.05→0.10. `gate M30` exits 0; ctest 100/100. Desktop
 `.scr` refreshed with the new nav.
 
+**Follow-up 4 — SPACE drops the screensaver into a playable WASD walk.** Operator request. In `scr_proc`,
+`VK_SPACE` now sets `g_scrPlay` (instead of exiting); any OTHER key/click still exits (the .scr contract). The
+loop hands the camera from the Stroller to the player: WASD move, Shift run, Space jump, mouse-look (relative,
+cursor recentred each frame — mirrors `run_play`), ESC exits; the idle mouse-move-exit is disabled while
+playing. The holed floor means you can even fall down shafts/stairs live, and the Shoggoth keeps hunting. Build
+clean, ctest 100/100 (interactive path, mirrors the proven `--play` loop). Desktop `.scr` refreshed.
+
 ---
 
 ## Session 32 — M30 polish ×3: live descent + deep-descent soak + draft telegraph  ✅ — `gate M30` green; model-free Phase IV EXHAUSTED

@@ -282,16 +282,22 @@ HWND create_window(uint32_t width, uint32_t height) {
     return hwnd;
 }
 
-// Screensaver window: ANY key / click / wheel / app-deactivation ends it (the .scr contract);
-// mouse-move is caught in the loop via GetCursorPos. A file-static flag -- the screensaver owns
-// the only window of this class.
+// Screensaver window. As a screensaver, ANY key / click / wheel / app-deactivation ends it (the .scr
+// contract) -- EXCEPT SPACE, which drops into a playable WASD walk (g_scrPlay). Once playing, keys +
+// clicks are game input (the loop reads them via GetAsyncKeyState), so they no longer exit; ESC exits.
+// Mouse-move is caught in the loop (it exits while idle, but steers the look while playing).
 static volatile bool g_scrQuit = false;
+static volatile bool g_scrPlay = false;  // SPACE -> become a playable WASD/mouse walk
 LRESULT CALLBACK scr_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_KEYDOWN: case WM_SYSKEYDOWN:
+            if (g_scrPlay) return 0;                            // playing: keys are game input, not an exit
+            if (wp == VK_SPACE) { g_scrPlay = true; return 0; }  // SPACE -> drop into the playable walk
+            g_scrQuit = true; return 0;                         // any other key -> exit (the .scr contract)
         case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN: case WM_MOUSEWHEEL:
-            g_scrQuit = true; return 0;
-        case WM_ACTIVATEAPP: if (wp == FALSE) g_scrQuit = true; return 0;
+            if (!g_scrPlay) g_scrQuit = true;                   // playing: clicks/wheel are ignored, not an exit
+            return 0;
+        case WM_ACTIVATEAPP: if (wp == FALSE) g_scrQuit = true; return 0;  // losing focus always exits
         case WM_CLOSE:   DestroyWindow(hwnd); return 0;
         case WM_DESTROY: PostQuitMessage(0);  return 0;
         default:         return DefWindowProcW(hwnd, msg, wp, lp);
@@ -4229,12 +4235,22 @@ int run_screensaver(const Options& o) {
     uint64_t frames = 0;
     bool haveAnchor = false; POINT anchor{};
     const double cap = (o.seconds > 0) ? static_cast<double>(o.seconds) : 0.0;  // 0 = run until input
+    // SPACE drops into a playable WASD/mouse walk; the screensaver auto-walk (the Stroller) hands over.
+    bool playMode = false, firstLook = true; POINT lookAnchor{}; const float kSens = 0.0022f;
 
     while (!g_scrQuit) {
         pump_messages();
         if (g_scrQuit) break;
         if (preview && !IsWindow(hwnd)) break;        // host closed the settings dialog
-        if (ownWindow) {                              // any cursor move ends it (.scr contract)
+        // SPACE (caught in scr_proc) hands the camera to the player: WASD walk + mouse look; ESC exits.
+        if (g_scrPlay && !playMode) {
+            playMode = true;
+            lookAnchor.x = static_cast<LONG>(W / 2); lookAnchor.y = static_cast<LONG>(H / 2);
+            SetCursorPos(lookAnchor.x, lookAnchor.y); firstLook = true;
+        }
+        if (playMode) {
+            if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) { g_scrQuit = true; break; }
+        } else if (ownWindow) {                       // idle screensaver: any cursor move ends it (.scr contract)
             POINT cp;
             if (GetCursorPos(&cp)) {
                 if (!haveAnchor) { anchor = cp; haveAnchor = true; }
@@ -4248,10 +4264,33 @@ int run_screensaver(const Options& o) {
         if (accum > 0.25f) accum = 0.25f;
         const float aspect = static_cast<float>(W) / static_cast<float>(H);
 
+        // Play-mode input: WASD move, Shift run, Space jump, mouse look (relative; recentred each frame).
+        contracts::InputCommand plyIn{}; float plyYaw = 0.0f, plyPitch = 0.0f;
+        if (playMode) {
+            if (GetAsyncKeyState('W') & 0x8000) plyIn.move_z += 1.0f;
+            if (GetAsyncKeyState('S') & 0x8000) plyIn.move_z -= 1.0f;
+            if (GetAsyncKeyState('D') & 0x8000) plyIn.move_x += 1.0f;
+            if (GetAsyncKeyState('A') & 0x8000) plyIn.move_x -= 1.0f;
+            if (GetAsyncKeyState(VK_SPACE) & 0x8000) plyIn.buttons |= contracts::kButtonJump;
+            if (GetAsyncKeyState(VK_SHIFT) & 0x8000) plyIn.buttons |= contracts::kButtonRun;
+            POINT cur; GetCursorPos(&cur);
+            if (!firstLook) { plyYaw = static_cast<float>(cur.x - lookAnchor.x) * kSens;
+                              plyPitch = -static_cast<float>(cur.y - lookAnchor.y) * kSens; }
+            firstLook = false;
+            SetCursorPos(lookAnchor.x, lookAnchor.y);
+        }
+
+        bool firstTick = true;
         while (accum >= tickDt) {
             const contracts::ChunkKey here = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
             if (here != cached) rebuild(here);
-            tick(s, bot.step(s, texSeed, collision), collision);              // auto-driven, no keyboard
+            if (playMode) {
+                contracts::InputCommand in = plyIn;
+                if (firstTick) { in.look_yaw = plyYaw; in.look_pitch = plyPitch; firstTick = false; }  // mouse delta is per-frame
+                tick(s, in, collision);
+            } else {
+                tick(s, bot.step(s, texSeed, collision), collision);          // auto-driven, no keyboard
+            }
             app::shoggoth_step(shog, s.wanderer.pos, seed, (s.tick % 8u) == 0u);
             accum -= tickDt;
         }
