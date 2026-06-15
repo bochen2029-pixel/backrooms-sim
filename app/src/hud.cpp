@@ -203,9 +203,14 @@ void build_menu_overlay(std::vector<uint8_t>& rgba, uint32_t width, uint32_t hei
             std::snprintf(rows[2], 32, "MOUSE  %d", m.settings.mouse_pct);
             std::snprintf(rows[3], 32, "DIRECTOR  %s", m.settings.director ? "ON" : "OFF");
             std::snprintf(rows[4], 32, "RAY TRACING  %s", m.settings.rt ? "ON" : "OFF");
-            std::snprintf(rows[5], 32, "BACK");
-            const char* labels[kSettingsItems] = {rows[0], rows[1], rows[2], rows[3], rows[4], rows[5]};
+            std::snprintf(rows[5], 32, "RESOLUTION  %dx%d", m.settings.res_w, m.settings.res_h);
+            std::snprintf(rows[6], 32, "BACK");
+            const char* labels[kSettingsItems] = {rows[0], rows[1], rows[2], rows[3], rows[4], rows[5], rows[6]};
             items(labels, nullptr, kSettingsItems, m.settings_sel, height * 2 / 5);
+            // Resolution applies on the next launch -> say so clearly when that row is selected.
+            if (m.settings_sel == 5)
+                draw_centered(rgba, width, height, cx, static_cast<int>(height) - base * 16, base,
+                              "* APPLIES ON RESTART", nr, ng, nb, 220);
             break;
         }
         case Screen::Play:

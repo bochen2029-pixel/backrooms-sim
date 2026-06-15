@@ -802,7 +802,15 @@ int run_game(const Options& o) {
     const std::string cfgPath = o.config.empty() ? std::string("backrooms.cfg") : o.config;
     app::Config cfg;
     if (!app::load_config(cfgPath, cfg)) {
-        cfg.width = static_cast<int>(o.width); cfg.height = static_cast<int>(o.height); cfg.seed = o.seed;
+        // First launch (no config): default to the monitor's NATIVE resolution (DPI-independent
+        // via EnumDisplaySettings); fall back to the flag size. The user can change it in Settings.
+        DEVMODE dm = {}; dm.dmSize = sizeof(dm);
+        if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) && dm.dmPelsWidth > 0) {
+            cfg.width = static_cast<int>(dm.dmPelsWidth); cfg.height = static_cast<int>(dm.dmPelsHeight);
+        } else {
+            cfg.width = static_cast<int>(o.width); cfg.height = static_cast<int>(o.height);
+        }
+        cfg.seed = o.seed;
         cfg = app::sanitize(cfg);
     }
 
@@ -820,6 +828,7 @@ int run_game(const Options& o) {
     model.settings.master_pct = cfg.master; model.settings.sfx_pct = cfg.sfx;
     model.settings.mouse_pct = cfg.mouse; model.settings.director = cfg.director;
     model.settings.rt = o.rt ? 1 : cfg.renderer;  // M19: --rt forces on; else from config
+    model.settings.res_w = cfg.width; model.settings.res_h = cfg.height;  // the in-menu resolution picker
 
     WinSaved fsSaved; bool isFull = false;
     auto apply_fullscreen = [&](bool on) {
@@ -1068,7 +1077,7 @@ int run_game(const Options& o) {
     cfg.mouse = model.settings.mouse_pct; cfg.director = model.settings.director;
     cfg.renderer = model.settings.rt;  // M19 persist the ray-tracing toggle
     cfg.fullscreen = isFull ? 1 : 0; cfg.seed = model.seed;
-    if (!isFull) { cfg.width = static_cast<int>(curW); cfg.height = static_cast<int>(curH); }
+    cfg.width = model.settings.res_w; cfg.height = model.settings.res_h;  // the picked resolution (applies next launch)
     app::save_config(cfgPath, app::sanitize(cfg));
 
     const uint32_t dbg = renderer.debug_error_count();

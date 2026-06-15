@@ -102,6 +102,16 @@ TEST_CASE("settings adjust, clamp, and round-trip to the origin screen", "[m15][
     menu_step(m, UiAction::Right); REQUIRE(m.settings.director == 1);
     menu_step(m, UiAction::Left);  REQUIRE(m.settings.director == 0);
 
+    // Resolution (sel 5): Left/Right cycle the presets, clamped (no wrap), applied on relaunch.
+    m.settings_sel = 5;
+    m.settings.res_w = 1920; m.settings.res_h = 1080;       // 1080p
+    menu_step(m, UiAction::Right); REQUIRE(m.settings.res_w == 2560);  // -> 1440p
+    menu_step(m, UiAction::Right); REQUIRE((m.settings.res_w == 3840 && m.settings.res_h == 2160));  // -> 4K
+    menu_step(m, UiAction::Right); REQUIRE(m.settings.res_w == 3840);  // clamps at the top preset
+    menu_step(m, UiAction::Left);  REQUIRE(m.settings.res_w == 2560);
+    for (int i = 0; i < 5; ++i) menu_step(m, UiAction::Left);
+    REQUIRE((m.settings.res_w == 1280 && m.settings.res_h == 720));    // clamps at the bottom preset
+
     // Esc returns to the origin (MainMenu).
     menu_step(m, UiAction::Back);
     REQUIRE(m.screen == Screen::MainMenu);

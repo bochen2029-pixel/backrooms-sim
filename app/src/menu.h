@@ -30,12 +30,14 @@ struct Settings {
     int mouse_pct = 50;   // 0..100 mouse sensitivity (scaled by the shell)
     int director = 0;     // 0/1 Director on/off
     int rt = 0;           // 0/1 ray tracing on/off (M19; default off = no regression)
+    int res_w = 1920;     // chosen render resolution (applied on relaunch; default 1080p)
+    int res_h = 1080;
 };
 
 // Item counts per screen — shared so the renderer and the logic never disagree.
 constexpr int kMainItems = 4;      // New Game, Continue, Settings, Quit
 constexpr int kPauseItems = 3;     // Resume, Settings, Quit to Menu
-constexpr int kSettingsItems = 6;  // Master, SFX, Mouse, Director, Ray Tracing, Back
+constexpr int kSettingsItems = 7;  // Master, SFX, Mouse, Director, Ray Tracing, Resolution, Back
 
 struct MenuModel {
     Screen screen = Screen::Splash;
@@ -52,6 +54,25 @@ namespace detail {
 inline int wrap(int i, int n) { return ((i % n) + n) % n; }
 inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+// Render-resolution presets for the Settings picker (Left/Right; applied on relaunch). Pure.
+struct ResPreset { int w, h; };
+inline constexpr ResPreset kResPresets[] = { {1280, 720}, {1920, 1080}, {2560, 1440}, {3840, 2160} };
+inline constexpr int kResPresetCount = 4;
+// Step (w,h) to the next/prev preset (clamped, no wrap). If (w,h) is not a preset (e.g. a
+// detected native resolution), the first step snaps to the nearest preset by width.
+inline void res_step(int& w, int& h, int dir) {
+    int idx = -1, nearest = 0, nd = 1 << 30;
+    for (int i = 0; i < kResPresetCount; ++i) {
+        if (kResPresets[i].w == w && kResPresets[i].h == h) { idx = i; break; }
+        const int d = (kResPresets[i].w > w) ? (kResPresets[i].w - w) : (w - kResPresets[i].w);
+        if (d < nd) { nd = d; nearest = i; }
+    }
+    int ni = (idx >= 0) ? (idx + dir) : nearest;
+    if (ni < 0) ni = 0;
+    if (ni >= kResPresetCount) ni = kResPresetCount - 1;
+    w = kResPresets[ni].w; h = kResPresets[ni].h;
+}
+
 // Adjust the setting the cursor is on by +/- step (Left/Right on the Settings screen).
 inline void adjust_setting(Settings& s, int sel, int dir) {
     switch (sel) {
@@ -60,6 +81,7 @@ inline void adjust_setting(Settings& s, int sel, int dir) {
         case 2: s.mouse_pct = clampi(s.mouse_pct + dir * 5, 0, 100); break;
         case 3: s.director = dir > 0 ? 1 : 0; break;
         case 4: s.rt = dir > 0 ? 1 : 0; break;
+        case 5: res_step(s.res_w, s.res_h, dir); break;  // resolution (applied on relaunch)
         default: break;  // "Back" item has no value
     }
 }
