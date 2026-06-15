@@ -4,7 +4,12 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
-## Session 32 — M30 polish: LIVE in-game descent (the despair gradient, playable)  ✅ — `gate M30` green
+## Session 32 — M30 polish ×3: live descent + deep-descent soak + draft telegraph  ✅ — `gate M30` green; model-free Phase IV EXHAUSTED
+
+**Three gated/pushed slices this session** (`04767fb` live descent · `30c5f77` deep-descent soak · `337ae21`
+draft telegraph), each green + committed + pushed. With them, **all model-free Phase-IV work is done** — the
+despair gradient is fully playable and the §3 DONE criteria hold **except M29** (`m29-green` is model-blocked
+on `llama-server :8080`, ISSUE-5; both servers were down again all session). Detail per slice below.
 
 `gate.ps1 -Milestone M30` exits 0 (with a NEW live-descent proof). **You can now fall through the
 world's real openings while playing** — not just look down them. This closes ROADMAP §2 M30 item (1)
