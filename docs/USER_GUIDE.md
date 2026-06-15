@@ -31,6 +31,7 @@ See the project [`README.md`](../README.md). In short: Visual Studio 2022 + the 
 | Action | Keyboard / Mouse | Gamepad (XInput) |
 |---|---|---|
 | Move | `W A S D` | Left stick |
+| **Run** | Hold `Shift` | Hold left trigger / LB |
 | Look | Mouse | Right stick |
 | Jump | `Space` | `A` |
 | Pause / Back | `Esc` | `Start` |

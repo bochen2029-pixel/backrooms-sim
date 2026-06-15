@@ -4,6 +4,36 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 19 — M18: Realistic walking (head-bob + run)  ✅ COMPLETE — 🏷️ `m18-green` · Phase III begins
+
+**`gate.ps1 -Milestone M18` exits 0; tagged `m18-green` + pushed. Phase III ("the Backrooms
+come alive", M18–M23) is underway.** The walk now bobs like a person walking, and Shift runs.
+
+**Done (M18; commit `<wip>` + gate; ADR-044).**
+- **Run** — `contracts::kButtonRun` (Shift / gamepad left-trigger or shoulder) → `core::tick`
+  uses `kRunSpeed` (6.8 m/s ≈ 1.7× walk). Deterministic *through the input contract*: unset in
+  every existing replay/walk-bot/gate, so they run at `kWalkSpeed` exactly as before — **M0–M17
+  determinism untouched** (`world_state_hash` gains no field).
+- **Head-bob** — `app/head_bob.h`, a **pure** `head_bob(distance, speed, walk, run) → {dy,dx}`
+  driven by the **deterministic odometer** but applied to the **render camera only**
+  (`apply_head_bob` after `wanderer_camera`) → never WorldState. Two vertical dips per stride
+  cycle (footfalls) + half-frequency lateral sway (figure-8), eased in/out by speed; running
+  raises cadence + amplitude. Wired into `--play` + `--game`.
+- **`Invoke-GateM18`** — ctest (incl. `[m18]`: curve bounded/dips-only/2-per-cycle/continuous +
+  run odometer ~1.7× deterministic) + `--game` debug-clean + **M5 raster golden bit-identical**
+  (proves the bob is view-only) + INV-5/inventory. **gate.ps1 M18 exits 0.**
+
+**Gotchas / notes.** The bob is reproducible *because* it reads the deterministic odometer, yet
+golden-safe *because* it's a view-layer camera offset — `--shot` uses fixed poses (not
+`wanderer_camera`), so the M5 golden is bit-identical (gate-checked). The Phase III template:
+**sim-affecting input through the contract, cosmetics in the view.** Plan: memory
+`project-phase-III-living-backrooms.md` + `docs/MILESTONES.md` Phase III.
+
+**Next: M19** — real-time ray-tracing **toggle** in the windowed loop (Settings; default OFF →
+no regression; bring `render_dxr` to the swapchain). Then M20–M22 the AI Shoggoth.
+
+---
+
 ## Session 18 — M17: Portable packaging  ✅ COMPLETE — 🏁 `v2.0` (playable + packaged)
 
 **`gate.ps1 -Milestone M17` exits 0; the full M0–M16 regression sweep is green; tagged

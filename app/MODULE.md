@@ -128,6 +128,12 @@ header-only) is a `key=value` config saved/loaded next to the exe; `app/gamepad.
 unit-tested; XInput is a Windows system import lib (no vcpkg). Fullscreen is borderless (no
 exclusive mode); `render_d3d12::resize` handles the swapchain.
 
+**Realistic walking (M18).** `app/head_bob.h` (pure, header-only) — `head_bob(distance, speed,
+walk, run)` returns a camera offset (two vertical dips/stride + half-freq lateral sway, eased by
+speed); `apply_head_bob` adds it to the `CameraPose` after `wanderer_camera` — **view-only, never
+WorldState** (the M5 golden stays bit-identical). Shift / gamepad trigger sets `kButtonRun`, which
+`core::tick` turns into `kRunSpeed` (deterministic through the input contract).
+
 **Settings & photo mode (M12).** Configuration is the **CLI flag surface** above
 (the de-facto settings interface; `scripts/run.ps1` is the one-command entry).
 **Photo mode** = the deterministic framed-capture modes already shipped: `--shot`
