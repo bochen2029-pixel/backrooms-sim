@@ -74,6 +74,33 @@ Vec3 move_and_collide(Vec3 pos, Vec3 he, Vec3& vel, float dt,
     Vec3 step = delta * (1.0f / static_cast<float>(steps));
 
     for (int s = 0; s < steps; ++s) {
+        // M27 step-up: let the capsule mount a low step (a box whose top is within
+        // kStepHeight of the feet) rather than be stopped flat by its face -- this is what
+        // makes the procedural stairwells climbable. Inert for full-height walls/pillars
+        // (top far above the feet) and whenever nothing blocks, so all prior collision is
+        // bit-identical; only the new low stair risers ever trigger it. A box still counts
+        // as a ceiling/wall (blocks the lift) if its top is above the raised feet + a step.
+        if (step.x != 0.0f || step.z != 0.0f) {
+            Vec3 ahead = pos;
+            ahead.x += step.x;
+            ahead.z += step.z;
+            const float feetY = pos.y - he.y;
+            float needTop = feetY;
+            bool blocked = false;
+            for (const Aabb& b : boxes) {
+                if (overlaps(box_at(ahead, he), b)) { blocked = true; if (b.mx.y > needTop) needTop = b.mx.y; }
+            }
+            if (blocked && needTop > feetY && (needTop - feetY) <= kStepHeight) {
+                Vec3 lifted = ahead;
+                lifted.y = needTop + he.y + kSkin;
+                const float liftedFeet = lifted.y - he.y;
+                bool clear = true;
+                for (const Aabb& b : boxes) {
+                    if (overlaps(box_at(lifted, he), b) && b.mx.y > liftedFeet + kStepHeight) { clear = false; break; }
+                }
+                if (clear) { pos = lifted; step.x = 0.0f; step.z = 0.0f; }
+            }
+        }
         // Resolve one axis at a time so a blocked axis still slides on the others.
         pos.x += step.x;
         for (const Aabb& b : boxes) {

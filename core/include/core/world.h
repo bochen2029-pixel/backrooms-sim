@@ -30,6 +30,7 @@ constexpr float kWalkSpeed = 4.0f;            // m/s
 constexpr float kRunSpeed = 6.8f;             // m/s (M18: kButtonRun held; ~1.7x walk)
 constexpr float kGravity = 18.0f;             // m/s^2
 constexpr float kJumpSpeed = 6.0f;            // m/s
+constexpr float kStepHeight = 0.55f;          // M27: max riser the capsule mounts (> stair 0.5 m, << wall 3 m)
 constexpr float kMaxPitch = 1.55334f;         // ~89 degrees
 
 // --- Entities --------------------------------------------------------------

@@ -72,7 +72,7 @@ struct Options {
     bool headless = false, windowed = false, scene = false, sim = false, stream = false;
     bool walkbot = false, topdown = false, version = false, shot = false;
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
-    bool biomeat = false, descend = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
+    bool biomeat = false, descend = false, ascend = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
     bool soak = false, crash_test = false, director_probe = false;
     bool director_record = false, director_replay = false;
@@ -152,6 +152,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--audio") == 0) o.audio = true;
         else if (std::strcmp(a, "--biomeat") == 0) o.biomeat = true;
         else if (std::strcmp(a, "--descend") == 0) o.descend = true;
+        else if (std::strcmp(a, "--ascend") == 0) o.ascend = true;
         else if (std::strcmp(a, "--post") == 0) o.post = true;
         else if (std::strcmp(a, "--dxr-probe") == 0) o.dxr_probe = true;
         else if (std::strcmp(a, "--dxr-test") == 0) o.dxr_test = true;
@@ -2661,6 +2662,70 @@ int run_descend(const Options& o) {
     return (level_reached == -1 && conn && geom) ? 0 : 6;
 }
 
+// ----- M27 verticality: scripted ASCENT of a procedural in-world stairwell -----
+// Finds a real up-stair on level 0, generates that chunk (its stairwell steps + walls +
+// the carved-open cell), stands the wanderer at the stair cell's low (-X) approach, and
+// walks +X. The M27 step-up locomotion carries the capsule up the 0.5 m risers and through
+// the ceiling hole. Reports the climb height + the determinism hash (the gate runs it
+// twice). Proves the procedural stairs are actually climbable, not just decorative.
+int run_ascend(const Options& o) {
+    using namespace br::core;
+    // Find a level-0 up-stair whose cell is fully interior (all four walls carved open).
+    int64_t scx = 0, scz = 0;
+    int ci = 0, cj = 0;
+    bool found = false;
+    for (int64_t r = 0; r < 64 && !found; ++r)
+        for (int64_t cz = -r; cz <= r && !found; ++cz)
+            for (int64_t cx = -r; cx <= r && !found; ++cx) {
+                const br::gen::StairSpec st = br::gen::stair_at(o.seed, 0, cx, cz);
+                if (st.present && st.cell_i >= 1 && st.cell_i <= 6 && st.cell_j >= 1 && st.cell_j <= 6) {
+                    scx = cx; scz = cz; ci = st.cell_i; cj = st.cell_j; found = true;
+                }
+            }
+    if (!found) { std::printf("no_stair_found: 1\n"); return 6; }
+
+    const contracts::ChunkData cd = contracts::GenerateChunk(o.seed, contracts::ChunkKey{0, scx, scz});
+    const float baseY = contracts::level_base_y(0);
+    const float ox = static_cast<float>(scx) * contracts::kChunkSize;
+    const float oz = static_cast<float>(scz) * contracts::kChunkSize;
+    const float cs = br::gen::kCellSize;
+
+    std::vector<Aabb> col;
+    col.push_back(Aabb{{ox - 1.0f, baseY - 1.0f, oz - 1.0f},
+                       {ox + contracts::kChunkSize + 1.0f, baseY, oz + contracts::kChunkSize + 1.0f}});  // level-0 floor
+    for (const auto& b : cd.collision)
+        col.push_back(Aabb{{b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]}});
+
+    WorldState s(o.seed);
+    s.wanderer.pos = Vec3{ox + static_cast<float>(ci) * cs - 0.3f,         // a short run-up, -X of the steps
+                          baseY + kWandererHalfHeight + 0.02f,
+                          oz + (static_cast<float>(cj) + 0.5f) * cs};       // cell centre in Z
+    s.wanderer.yaw = 0.0f;                                                 // move_x with yaw 0 walks +X
+
+    const float startY = s.wanderer.pos.y;
+    float maxY = startY;
+    contracts::InputCommand in{};
+    in.move_x = 1.0f;  // walk +X into and up the stairwell
+    const uint32_t ticks = (o.ticks > 0) ? o.ticks : 1200u;
+    for (uint32_t t = 0; t < ticks; ++t) {
+        tick(s, in, col);
+        if (s.wanderer.pos.y > maxY) maxY = s.wanderer.pos.y;
+    }
+    const float climb = maxY - startY;
+    const bool climbed = (climb >= 3.0f);  // rose past the level-0 ceiling (3 m) up the stairwell
+
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("stair_chunk: %lld %lld cell %d %d\n",
+                static_cast<long long>(scx), static_cast<long long>(scz), ci, cj);
+    std::printf("start_y: %.3f\n", static_cast<double>(startY));
+    std::printf("max_y: %.3f\n", static_cast<double>(maxY));
+    std::printf("climb_m: %.3f\n", static_cast<double>(climb));
+    std::printf("level_at_max: %d\n", contracts::level_from_y(maxY));
+    std::printf("climbed: %d\n", climbed ? 1 : 0);
+    std::printf("final_hash: %016llx\n", static_cast<unsigned long long>(world_state_hash(s)));
+    return climbed ? 0 : 6;
+}
+
 // ----- M9 DXR capability probe: device tier + DXC shader compilation ----------
 int run_dxr_probe(const Options&) {
     const br::render_dxr::DxrCaps c = br::render_dxr::probe_caps();
@@ -3278,6 +3343,7 @@ int main(int argc, char** argv) {
     if (o.audiodev)   return run_audiodev(o);
     if (o.biomeat)    return run_biomeat(o);
     if (o.descend)    return run_descend(o);
+    if (o.ascend)     return run_ascend(o);
     if (o.dxr_probe)  return run_dxr_probe(o);
     if (o.dxr_test)   return run_dxr_test(o);
     if (o.dxr_depth)  return run_dxr_depth(o);
