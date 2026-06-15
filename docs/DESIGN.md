@@ -284,9 +284,10 @@ pair. **No assets. No engine. No framework.** Just math, from a seed.
 
 - **Steam** — the engineering (Steamworks SDK, depot upload) is straightforward; the
   partner account, fee, store page, and *Publish* are operator-only steps.
-- **Polish** — a procedurally-generated app icon, an in-game credits screen, far-chunk
-  camera-relative rendering (the one known floating-point deferral, visible only kilometers
-  from the origin), and GBNF-constrained Director decoding once the sidecar exposes it.
+- **Polish** — an in-game credits screen, far-chunk camera-relative rendering (the one known
+  floating-point deferral, visible only kilometers from the origin), and GBNF-constrained
+  Director decoding once the sidecar exposes it. *(The procedurally-generated app icon —
+  drawn from code by `tools/icongen` at build time, no committed asset — landed in v2.1.)*
 
 None of it is required. What exists is complete: an endless, deterministic, fully
 procedural Backrooms you can unzip and walk into. There is no exit — that's the point.

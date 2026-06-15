@@ -33,3 +33,6 @@ backrooms.cfg
 # M17 packaging output
 dist/
 build-release/
+
+# M17 procedural app icon (generated at build time by icongen)
+app/backrooms.ico

@@ -15,6 +15,10 @@ target_link_libraries(hashdiff PRIVATE backrooms_flags br_stb)
 add_executable(goldgen goldgen/main.cpp)
 target_link_libraries(goldgen PRIVATE backrooms_flags br_stb core)
 
+# icongen (M17 polish): the procedural app icon, generated at build time -> .ico.
+add_executable(icongen icongen/main.cpp)
+target_link_libraries(icongen PRIVATE backrooms_flags br_stb core)
+
 # wavcheck (M6): WAV spectral gate. Uses the header-only audio/wav.h reader.
 add_executable(wavcheck wavcheck/main.cpp)
 target_link_libraries(wavcheck PRIVATE backrooms_flags audio)

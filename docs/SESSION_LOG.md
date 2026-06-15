@@ -43,9 +43,15 @@ packaging artifacts, gitignored, same class as `build`). The portable folder's o
 non-exe binaries are Microsoft's redistributable DXC DLLs; the three third-party *libraries*
 remain Catch2 + stb + miniaudio. The clean-env gate is the real proof of self-containment.
 
+**Polish (`v2.1`).** A **procedural app icon**: `tools/icongen` draws it from code
+(Backrooms-yellow wallpaper + a dark doorway + a fluorescent bar), PNG-encodes it into a
+`.ico` at **build time** via a CMake custom command, and `version.rc` embeds it — still no
+committed asset (`app/backrooms.ico` is gitignored). The exe and window now carry a proper
+icon. `gate.ps1 M17` re-runs green with it. Tagged `v2.1`.
+
 **🏁 The build is complete: 18 milestones (M0–M17), every one gate-verified and tagged,
 from an empty repo to a portable procedural game. `v1.0` was the visualization; `v2.0` is
-the game.** Post-v2.0 (operator-only / optional): Steam (Steamworks + depot upload, the
+the game** (and `v2.1` gave it a face). Post-v2.0 (operator-only / optional): Steam (Steamworks + depot upload, the
 account/$100/store/Publish steps); polish (procedural app icon, in-game credits screen,
 far-chunk camera-relative rendering).
 

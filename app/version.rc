@@ -1,6 +1,10 @@
-// app/version.rc — Win32 VERSIONINFO (M17). Text-only metadata embedded in the exe
-// (no asset files): version, product name, description. Compiled by rc.exe.
+// app/version.rc — Win32 VERSIONINFO + app icon (M17). The metadata is text-only;
+// the icon (backrooms.ico) is generated procedurally at build time by `icongen`
+// (gitignored, not a committed asset). Compiled by rc.exe.
 #include <windows.h>
+
+// Lowest-ID icon -> the exe's shell/window icon.
+1 ICON "backrooms.ico"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 2, 0, 0, 0
