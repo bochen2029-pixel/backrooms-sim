@@ -235,6 +235,72 @@ are operator-only.)*
 
 ---
 
+# Phase III — The Backrooms come alive (M18–M23)
+
+*Operator-directed after `v2.1`. Make the walk feel alive, add a ray-tracing toggle, and put a
+living, AI-driven **Shoggoth** in the maze. Determinism stays sacred: every AI decision (Director
+**and** Shoggoth) enters the sim only as recorded **event-log** entries at a deterministic tick, so
+replay is **bit-identical with all models offline**. Head-bob and ray-tracing are presentation-only;
+the shoggoth's body + navigation live in WorldState (seeded, replayable), its intent in the log.
+**Do NOT touch `C:\KEEL`** — reuse the `:7071` sidecar; for vision, stand up a backrooms-local KEEL
+copy if needed. See the durable plan in memory `project-phase-III-living-backrooms.md`.*
+
+## M18 — Realistic walking (head-bob + run)
+**Scope:** A **run** modifier (`kButtonRun` — Shift / gamepad) → a deterministic higher move speed
+in the sim core. A humanlike **head-bob**: a pure function of the walk-phase (from the deterministic
+odometer), speed, and run-state — vertical `A·sin(2πf·phase)` + lateral sway at **half frequency**
+(figure-8), footfall at the bob trough; running raises `f` and `A`. Applied to the **render camera
+only** (INV-1 intact — never perturbs WorldState).
+**Exit gates:** [ ] Unit-test the pure bob curve (amplitude/frequency, walk vs run, continuity) +
+the run input (deterministic odometer-rate increase, replayable hash). [ ] `--game --seconds N`
+debug-clean. [ ] M0–M17 regression (the raster/sim goldens are unchanged — bob is view-only).
+
+## M19 — Ray-tracing toggle (real-time DXR in the window)
+**Scope:** Bring `render_dxr` into the live windowed loop as a **toggleable renderer** (Settings →
+"Ray Tracing", persisted in config, **default OFF → no regression**). Add a **windowed present** for
+DXR (it currently does headless readback): render → accumulate → blit to the swapchain, reset on
+movement. "Not too fancy" is fine — few-spp RT lighting, or RT shadows + AO on the raster path.
+**Exit gates:** [ ] RT-on and RT-off both windowed debug-clean. [ ] RT lighting is physically
+plausible (luma band / soft shadow present). [ ] The toggle persists in `backrooms.cfg`. [ ]
+**Default-off leaves the M5 raster golden bit-identical** (no regression). [ ] M0–M18 regression.
+
+## M20 — Shoggoth: body + deterministic movement
+**Scope:** A procedural amorphous **3D blob** (metaball / SDF-noise sphere cluster that writhes — no
+assets), as a **WorldState entity** with a seeded position. **Grid pathfinding** (A* / flow-field on
+the chunk collision grid) navigates it to a target cell; **organic locomotion** oozes it along
+("walks like a shoggoth"). An intermittent chase state machine (lurk → hunt → chase → retreat) on
+distance (and later AI intent).
+**Exit gates:** [ ] Deterministic shoggoth movement (seeded → replayable hash, ×2 identical).
+[ ] Pathfinding reaches targets across seeds with no stuck. [ ] Renders (raster + DXR) debug-clean.
+[ ] M0–M19 regression.
+
+## M21 — Shoggoth brain (KEEL intent + cascade)
+**Scope:** A "Shoggoth Director" reusing the KEEL HTTP client with a **shoggoth system prompt**:
+input = a summary (shoggoth/wanderer positions, distance, recent events) → a **schema-validated
+INTENT** (`{action: stalk|lurk|flee, target_hint, mood}`). The intent → a **deterministic
+navigator** picks a concrete target cell → M20 locomotion walks it. Expensive LLM every N s; cheap
+motion every tick — cascading, delegated embodiment.
+**Exit gates:** [ ] 100% schema-valid (post-hoc validator). [ ] Intent → navigation mapping tests.
+[ ] **Replay bit-identical with the model offline** (the sacred gate — intent via the event log).
+[ ] `--no-shoggoth` kill switch. [ ] M0–M20 regression.
+
+## M22 — Shoggoth sees (KEEL vision / qwen-VL + mmproj)
+**Scope:** A virtual camera renders the shoggoth's **POV snapshot** (offscreen → image) → a **vision
+model via KEEL** (`C:\models\mmproj-F16.gguf`) → richer intent. **First check whether the `:7071`
+sidecar / KEEL can do vision; if not, stand up a backrooms-local KEEL copy** (a folder I own — NOT
+`C:\KEEL`) with the qwen-VL model + mmproj. Snapshot + vision happen at **record time only** → intent
+via event log → replay bit-identical model-offline.
+**Exit gates:** [ ] POV snapshot → vision call → parsed intent. [ ] Determinism preserved (replay
+model-offline bit-identical). [ ] Graceful no-op if the vision endpoint is down. [ ] M0–M21 regression.
+
+## M23 — Shoggoth hears (whisper.cpp) *(later / speculative)*
+**Scope:** Nearby procedural audio → `C:\whisper.cpp` → text → the shoggoth's LLM context, so it
+"knows its true surroundings" (vision + hearing). Defer until M22 lands; then the sys-prompt drives
+"act like a real shoggoth" with the cheap deterministic navigation/locomotion doing the embodiment.
+**Exit gates:** [ ] Audio → transcript → context. [ ] Determinism preserved. [ ] Kill switch + no-op.
+
+---
+
 ## Session protocol per milestone
 
 1. Load ARCHITECTURE.md + this milestone's section + target module context pack
