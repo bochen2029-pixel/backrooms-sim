@@ -51,6 +51,7 @@
 #include "config.h"
 #include "gamepad.h"
 #include "head_bob.h"
+#include "shoggoth.h"
 
 namespace contracts = br::contracts;
 namespace audio = br::audio;
@@ -79,6 +80,7 @@ struct Options {
     std::string config;                 // --config path (load/save persisted settings)
     bool credits = false;               // M17 credits screen (text)
     bool rt = false;                    // M19 force ray tracing on in --game/--play
+    bool shoggoth = false;              // M20 headless shoggoth chase (determinism + nav)
     uint32_t eval_count = 100;          // --director-eval: scenario count
     uint32_t director_interval_s = 15;  // --soak --director: ambient seconds between summaries (wall clock)
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
@@ -170,6 +172,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--fullscreen") == 0) o.fullscreen = true;
         else if (std::strcmp(a, "--credits") == 0) o.credits = true;
         else if (std::strcmp(a, "--rt") == 0) o.rt = true;
+        else if (std::strcmp(a, "--shoggoth") == 0) o.shoggoth = true;
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -2499,6 +2502,92 @@ int run_biomeat(const Options& o) {
     return 0;
 }
 
+// ----- M20 headless Shoggoth chase: determinism + maze navigation ------------
+// A wanderer walks the maze (the M11 MazeWalker); the Shoggoth hunts it. Reports the
+// deterministic shoggoth fingerprint (gate runs twice -> identical), how far it
+// navigated (not stuck), the closest it got, and whether it engaged the hunt.
+int run_shoggoth(const Options& o) {
+    MazeWalker w(o.seed);
+    app::Shoggoth sh;
+    sh.pos = w.s.wanderer.pos;
+    sh.pos.x += 24.0f;  // spawn ~6 cells away, within hunt range
+    const br::core::Vec3 start = sh.pos;
+    const uint64_t N = (o.ticks > 0) ? o.ticks : 2400u;
+
+    float min_dist = 1e9f, max_moved = 0.0f;
+    int ever_hunted = 0;
+    std::vector<std::pair<float, float>> wtrail, strail;  // for the optional top-down map
+    for (uint64_t t = 0; t < N; ++t) {
+        w.step();  // the wanderer walks the maze
+        app::shoggoth_step(sh, w.s.wanderer.pos, o.seed, (t % 8) == 0);
+        if (sh.state != app::ShoggothState::Lurk) ever_hunted = 1;
+        const float dx = sh.pos.x - w.s.wanderer.pos.x, dz = sh.pos.z - w.s.wanderer.pos.z;
+        const float d = std::sqrt(dx * dx + dz * dz);
+        if (d < min_dist) min_dist = d;
+        const float mx = sh.pos.x - start.x, mz = sh.pos.z - start.z;
+        const float moved = std::sqrt(mx * mx + mz * mz);
+        if (moved > max_moved) max_moved = moved;
+        if (!o.out.empty() && (t % 6u) == 0u) {
+            wtrail.push_back({w.s.wanderer.pos.x, w.s.wanderer.pos.z});
+            strail.push_back({sh.pos.x, sh.pos.z});
+        }
+    }
+
+    // Optional CPU top-down map: the maze (walls from gen) + the wanderer trail (cyan)
+    // and the shoggoth trail (red) — a visual of the hunt. Deterministic, GPU-free.
+    if (!o.out.empty() && !wtrail.empty()) {
+        const int W = 800, H = 800;
+        float minx = start.x, maxx = start.x, minz = start.z, maxz = start.z;
+        for (const auto& p : wtrail) { minx = std::min(minx, p.first); maxx = std::max(maxx, p.first); minz = std::min(minz, p.second); maxz = std::max(maxz, p.second); }
+        for (const auto& p : strail) { minx = std::min(minx, p.first); maxx = std::max(maxx, p.first); minz = std::min(minz, p.second); maxz = std::max(maxz, p.second); }
+        const float cx = 0.5f * (minx + maxx), cz = 0.5f * (minz + maxz);
+        const float half = std::max(16.0f, 0.5f * std::max(maxx - minx, maxz - minz) + 8.0f);
+        std::vector<uint8_t> img(static_cast<size_t>(W) * H * 4u, 255u);
+        auto px = [&](float x) { return static_cast<int>((x - (cx - half)) / (2.0f * half) * W); };
+        auto py = [&](float z) { return static_cast<int>((z - (cz - half)) / (2.0f * half) * H); };
+        for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+            const float wx = (cx - half) + (x + 0.5f) / W * 2.0f * half;
+            const float wz = (cz - half) + (y + 0.5f) / H * 2.0f * half;
+            int64_t gi, gj; app::world_to_cell(wx, wz, gi, gj);
+            std::unordered_map<int64_t, br::gen::ChunkLayout> cache;
+            const float fx = wx / br::gen::kCellSize - std::floor(wx / br::gen::kCellSize);
+            const float fz = wz / br::gen::kCellSize - std::floor(wz / br::gen::kCellSize);
+            uint8_t v = 26;  // open floor (dark)
+            const float wallT = 0.12f;
+            if ((fx < wallT && !app::maze_open(o.seed, gi, gj, 1, cache)) ||
+                (fx > 1 - wallT && !app::maze_open(o.seed, gi, gj, 0, cache)) ||
+                (fz < wallT && !app::maze_open(o.seed, gi, gj, 3, cache)) ||
+                (fz > 1 - wallT && !app::maze_open(o.seed, gi, gj, 2, cache))) v = 90;  // wall
+            uint8_t* d = &img[(static_cast<size_t>(y) * W + x) * 4];
+            d[0] = v; d[1] = v; d[2] = static_cast<uint8_t>(v < 80 ? v - 6 : v); d[3] = 255;
+        }
+        auto dot = [&](float x, float z, uint8_t r, uint8_t g, uint8_t b, int rad) {
+            const int X = px(x), Y = py(z);
+            for (int dy = -rad; dy <= rad; ++dy) for (int dx2 = -rad; dx2 <= rad; ++dx2) {
+                const int xx = X + dx2, yy = Y + dy;
+                if (xx < 0 || yy < 0 || xx >= W || yy >= H || dx2 * dx2 + dy * dy > rad * rad) continue;
+                uint8_t* d = &img[(static_cast<size_t>(yy) * W + xx) * 4];
+                d[0] = r; d[1] = g; d[2] = b;
+            }
+        };
+        for (const auto& p : wtrail) dot(p.first, p.second, 60, 200, 220, 1);   // wanderer trail (cyan)
+        for (const auto& p : strail) dot(p.first, p.second, 220, 50, 40, 1);    // shoggoth trail (red)
+        dot(w.s.wanderer.pos.x, w.s.wanderer.pos.z, 120, 255, 255, 5);          // wanderer (bright)
+        dot(sh.pos.x, sh.pos.z, 255, 80, 60, 6);                                // shoggoth (bright)
+        stbi_write_png(o.out.c_str(), W, H, 4, img.data(), W * 4);
+    }
+    const float fdx = sh.pos.x - w.s.wanderer.pos.x, fdz = sh.pos.z - w.s.wanderer.pos.z;
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("ticks: %llu\n", static_cast<unsigned long long>(N));
+    std::printf("shoggoth_hash: %016llx\n", static_cast<unsigned long long>(app::shoggoth_hash(sh)));
+    std::printf("min_dist: %.2f\n", static_cast<double>(min_dist));
+    std::printf("final_dist: %.2f\n", static_cast<double>(std::sqrt(fdx * fdx + fdz * fdz)));
+    std::printf("moved: %.1f\n", static_cast<double>(max_moved));
+    std::printf("ever_hunted: %d\n", ever_hunted);
+    std::printf("state: %d\n", static_cast<int>(sh.state));
+    return 0;
+}
+
 }  // namespace
 
 // Tighten the OS timer/wait granularity (default ~15.6 ms) to 1 ms for the
@@ -2548,6 +2637,7 @@ int main(int argc, char** argv) {
     if (o.config_check) return run_config_check(o);
     if (o.resize_smoke) return run_resize_smoke(o);
     if (o.credits)    return run_credits(o);
+    if (o.shoggoth)   return run_shoggoth(o);
     if (o.game)       return run_game(o);
     if (o.soak)       return run_soak(o);
     if (o.sim)     return run_sim(o);

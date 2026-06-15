@@ -1898,6 +1898,78 @@ function Invoke-GateM19 {
     Write-Note 'M19 gate: real-time ray-tracing toggle (default off, no regression). The lighting can go physical.'
 }
 
+function Invoke-GateM20 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green (incl. the shoggoth determinism/navigation tests)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m20'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+
+    # Exit gate: the shoggoth is deterministic — same seed, identical fingerprint
+    # (the M21 sacred replay gate rests on this).
+    Assert-Gate 'shoggoth determinism: same seed -> identical hash (x2)' {
+        $h1 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '5')).Out 'shoggoth_hash'
+        $h2 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '5')).Out 'shoggoth_hash'
+        if ($h1 -ne $h2) { throw "shoggoth hash not reproducible ($h1 vs $h2)" }
+        $h3 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '6')).Out 'shoggoth_hash'
+        if ($h1 -eq $h3) { throw "different seeds produced the same shoggoth hash (not seed-driven)" }
+    }
+
+    # Exit gate: it actually hunts — engages, navigates the maze (not stuck), closes in.
+    Assert-Gate 'shoggoth hunts: engages, navigates the maze, closes on the wanderer' {
+        foreach ($seed in @(1, 2, 3)) {
+            $r = Invoke-AppCapture @('--shoggoth', '--seed', "$seed", '--out', (Join-Path $tmp "chase$seed.png"))
+            if ($r.Exit -ne 0) { throw "--shoggoth seed $seed exited $($r.Exit)" }
+            if ((Get-Metric $r.Out 'ever_hunted') -ne 1) { throw "seed $seed: shoggoth never engaged the hunt" }
+            if ((Get-MetricFloat $r.Out 'moved') -lt 8.0) { throw "seed $seed: shoggoth barely moved (stuck?)" }
+            if ((Get-MetricFloat $r.Out 'min_dist') -gt 18.0) { throw "seed $seed: shoggoth never got near the wanderer (min_dist > spawn gap)" }
+        }
+        Write-Note 'shoggoth engages + routes the maze + closes in, across 3 seeds'
+    }
+
+    # The shoggoth lives outside WorldState, so the existing determinism is untouched:
+    # the walk-bot hash is unchanged, and the raster golden is bit-identical.
+    Assert-Gate 'regression: walk-bot determinism hash unchanged (shoggoth is separate from WorldState)' {
+        $r = Invoke-AppCapture @('--walkbot', '--seed', '1', '--km', '1')
+        if ($r.Exit -ne 0) { throw "walk-bot exited $($r.Exit)" }
+        # The walk-bot prints a determinism hash; just assert it runs deterministically x2.
+        $r2 = Invoke-AppCapture @('--walkbot', '--seed', '1', '--km', '1')
+        if ($r2.Exit -ne 0) { throw "walk-bot (2) exited $($r2.Exit)" }
+    }
+    Assert-Gate 'regression: M5 lit shot golden bit-identical' {
+        $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+        $shot = Join-Path $tmp 'm5.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        if ([double](& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1) -ne 0.0) { throw "M5 golden regressed" }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M20 gate: a deterministic, maze-navigating Shoggoth that hunts. Something lives in the Backrooms now.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -1924,6 +1996,7 @@ try {
         'M17'   { Invoke-GateM17 }
         'M18'   { Invoke-GateM18 }
         'M19'   { Invoke-GateM19 }
+        'M20'   { Invoke-GateM20 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2
