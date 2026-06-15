@@ -90,6 +90,13 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
     const float up[3] = {0.0f, 1.0f, 0.0f};
     const float down[3] = {0.0f, -1.0f, 0.0f};
 
+    // M27: a stairwell cuts a hole through the shared floor/ceiling seam. An UP-stair
+    // (this level -> level+1) leaves through MY ceiling; a stair from the level below
+    // (level-1 -> this level) arrives through MY floor. Both sides read the SAME
+    // stair_at, so my ceiling hole aligns exactly with the next floor's hole (INV-2).
+    const gen::StairSpec upStair = gen::stair_at(world_seed, key.level, key.cx, key.cz);
+    const gen::StairSpec dnStair = gen::stair_at(world_seed, key.level - 1, key.cx, key.cz);
+
     // Floor + ceiling grids (per cell). Ceiling faces down; some tiles fluorescent.
     for (int i = 0; i < G; ++i) {
         for (int j = 0; j < G; ++j) {
@@ -97,16 +104,49 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
             const float x1 = ox + static_cast<float>(i + 1) * cs;
             const float z0 = oz + static_cast<float>(j) * cs;
             const float z1 = oz + static_cast<float>(j + 1) * cs;
+            const bool floorHole = dnStair.present && dnStair.cell_i == i && dnStair.cell_j == j;
             const float f0[3]={x0,baseY,z0}, f1[3]={x1,baseY,z0}, f2[3]={x1,baseY,z1}, f3[3]={x0,baseY,z1};
-            push_quad(c.vertices, f0, f1, f2, f3, up, floor_col, kMatCarpet);
+            if (!floorHole)  // M27: a stair from the level below arrives here -> open the floor
+                push_quad(c.vertices, f0, f1, f2, f3, up, floor_col, kMatCarpet);
 
             const int64_t gi = key.cx * G + i;
             const int64_t gj = key.cz * G + j;
             const bool lamp = is_fluorescent_cell(gi, gj);
+            const bool ceilHole = upStair.present && upStair.cell_i == i && upStair.cell_j == j;
             const float cy = baseY + H;
             const float ck0[3]={x0,cy,z0}, ck1[3]={x1,cy,z0}, ck2[3]={x1,cy,z1}, ck3[3]={x0,cy,z1};
-            push_quad(c.vertices, ck0, ck3, ck2, ck1, down,
-                      lamp ? lamp_col : ceil_col, lamp ? kMatFluorescent : kMatCeiling);
+            if (!ceilHole)  // M27: an up-stair leaves through here -> open the ceiling
+                push_quad(c.vertices, ck0, ck3, ck2, ck1, down,
+                          lamp ? lamp_col : ceil_col, lamp ? kMatFluorescent : kMatCeiling);
+        }
+    }
+
+    // M27: the up-stairwell -- climbable steps + collision filling the up-stair cell.
+    // Eight 0.5 m risers across the 4 m cell (a 45-degree run) climb exactly kLevelHeight,
+    // so the wanderer ascends through the ceiling hole and steps onto the next floor.
+    // Each step is a thin, grounded riser-slab inset from the cell walls -- thin in X
+    // (a "wall" to ValidateChunkGeometry), abutting in X (no fat overlap), climbing
+    // baseY -> baseY+kLevelHeight. generate_layout carves the stair cell open so the
+    // low (-X) end is reachable; the stair cell is skipped by the pillar pass below.
+    if (upStair.present) {
+        const int N = 8;
+        const float ins = 0.3f;  // X inset clears the perimeter walls (no fat overlap)
+        const float sx0 = ox + static_cast<float>(upStair.cell_i) * cs + ins;
+        const float sxe = ox + static_cast<float>(upStair.cell_i + 1) * cs - ins;
+        const float zA = oz + static_cast<float>(upStair.cell_j) * cs + 0.4f;
+        const float zB = oz + static_cast<float>(upStair.cell_j + 1) * cs - 0.4f;
+        const float run = (sxe - sx0) / static_cast<float>(N);    // ~0.43 m tread
+        const float rise = kLevelHeight / static_cast<float>(N);  // 0.5 m riser
+        const float step_col[3] = { floor_col[0] * 0.8f, floor_col[1] * 0.8f, floor_col[2] * 0.78f };
+        for (int k = 0; k < N; ++k) {
+            const float bx0 = sx0 + static_cast<float>(k) * run;
+            const float bx1 = sx0 + static_cast<float>(k + 1) * run;
+            const float topY = baseY + rise * static_cast<float>(k + 1);
+            push_box(c.vertices, bx0, baseY, zA, bx1, topY, zB, step_col, kMatCarpet);
+            BoxInstance bi;
+            bi.mn[0] = bx0; bi.mn[1] = baseY; bi.mn[2] = zA;
+            bi.mx[0] = bx1; bi.mx[1] = topY;  bi.mx[2] = zB;
+            c.collision.push_back(bi);
         }
     }
 
@@ -142,6 +182,7 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
         for (int i = 0; i < G; ++i) {
             for (int j = 0; j < G; ++j) {
                 if (rng.next_double() >= static_cast<double>(bp.pillar_density)) continue;
+                if (upStair.present && i == upStair.cell_i && j == upStair.cell_j) continue;  // M27: the stairwell owns this cell
                 const float pcx = ox + (static_cast<float>(i) + 0.5f) * cs;
                 const float pcz = oz + (static_cast<float>(j) + 0.5f) * cs;
                 push_box(c.vertices, pcx - ps, baseY, pcz - ps, pcx + ps, baseY + kWallHeight, pcz + ps,

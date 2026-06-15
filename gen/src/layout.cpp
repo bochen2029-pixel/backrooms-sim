@@ -136,6 +136,18 @@ ChunkLayout generate_layout_carve(uint64_t world_seed, contracts::ChunkKey key,
     L.hwall[L.door_bottom][0] = false;
     L.hwall[L.door_top][G]    = false;
 
+    // M27: keep the up-stair cell reachable at floor level -- open its INTERIOR walls so
+    // the staircase is mountable from a neighbour. Carving only removes walls (never
+    // disconnects), and perimeter/door walls are untouched, so adjacent chunks still agree
+    // on their shared edges (INV-2). The stair cell becomes a small open landing-junction.
+    const StairSpec us = stair_at(world_seed, key.level, key.cx, key.cz);
+    if (us.present) {
+        if (us.cell_i > 0)     L.vwall[us.cell_i][us.cell_j]     = false;  // -X (the low approach)
+        if (us.cell_i < G - 1) L.vwall[us.cell_i + 1][us.cell_j] = false;  // +X
+        if (us.cell_j > 0)     L.hwall[us.cell_i][us.cell_j]     = false;  // -Z
+        if (us.cell_j < G - 1) L.hwall[us.cell_i][us.cell_j + 1] = false;  // +Z
+    }
+
     return L;
 }
 
