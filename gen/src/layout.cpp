@@ -21,6 +21,26 @@ int door_index(uint64_t seed, int64_t a, int64_t b, uint64_t tag) {
     h ^= h >> 32;
     return static_cast<int>(h % static_cast<uint64_t>(G));
 }
+
+// M27: a level-folded, tag-separated 64-bit hash for stair placement.
+uint64_t stair_hash(uint64_t seed, int32_t level, int64_t a, int64_t b, uint64_t tag) {
+    uint64_t h = seed ^ tag;
+    h ^= (static_cast<uint64_t>(level) + 1u) * 0x9e3779b97f4a7c15ULL;
+    h = (h ^ (h >> 33)) * 0xff51afd7ed558ccdULL;
+    h ^= static_cast<uint64_t>(a) * 0xc2b2ae3d27d4eb4fULL;
+    h = (h ^ (h >> 29)) * 0xc4ceb9fe1a85ec53ULL;
+    h ^= static_cast<uint64_t>(b) * 0x165667b19e3779f9ULL;
+    h ^= h >> 32;
+    return h;
+}
+bool stair_density_here(uint64_t seed, int32_t level, int64_t cx, int64_t cz) {
+    return (stair_hash(seed, level, cx, cz, 0x53A1ULL) % static_cast<uint64_t>(kStairDensityN)) == 0u;
+}
+int64_t floordiv_i(int64_t a, int64_t b) {  // round toward -inf (superblock index, neg-safe)
+    int64_t q = a / b;
+    if ((a % b != 0) && ((a < 0) != (b < 0))) --q;
+    return q;
+}
 }  // namespace
 
 uint64_t chunk_seed(uint64_t world_seed, contracts::ChunkKey key) {
@@ -29,6 +49,29 @@ uint64_t chunk_seed(uint64_t world_seed, contracts::ChunkKey key) {
     s ^= static_cast<uint64_t>(key.cx) * 0xc2b2ae3d27d4eb4fULL;
     s ^= static_cast<uint64_t>(key.cz) * 0x165667b19e3779f9ULL;
     s ^= s >> 31;
+    return s;
+}
+
+StairSpec stair_at(uint64_t world_seed, int32_t level, int64_t cx, int64_t cz) {
+    StairSpec s;
+    auto set_cell = [&]() {
+        const uint64_t h = stair_hash(world_seed, level, cx, cz, 0xCE11ULL);
+        s.cell_i = static_cast<int>(h % static_cast<uint64_t>(G));
+        s.cell_j = static_cast<int>((h / static_cast<uint64_t>(G)) % static_cast<uint64_t>(G));
+    };
+    // Density scatter: an organic up-stair ~1 per kStairDensityN chunks.
+    if (stair_density_here(world_seed, level, cx, cz)) { s.present = true; set_cell(); return s; }
+    // Backstop: if NO density stair fell anywhere in this chunk's KxK superblock, one
+    // canonical chunk in the block gets one -> every block has >=1 up-stair (INV-3 in Z).
+    const int K = kStairSuperblock;
+    const int64_t bx = floordiv_i(cx, K), bz = floordiv_i(cz, K);
+    for (int di = 0; di < K; ++di)
+        for (int dj = 0; dj < K; ++dj)
+            if (stair_density_here(world_seed, level, bx * K + di, bz * K + dj)) return s;  // covered elsewhere
+    const uint64_t pick = stair_hash(world_seed, level, bx, bz, 0xBACCULL) % static_cast<uint64_t>(K * K);
+    const int64_t pcx = bx * K + static_cast<int64_t>(pick % static_cast<uint64_t>(K));
+    const int64_t pcz = bz * K + static_cast<int64_t>(pick / static_cast<uint64_t>(K));
+    if (cx == pcx && cz == pcz) { s.present = true; set_cell(); }
     return s;
 }
 

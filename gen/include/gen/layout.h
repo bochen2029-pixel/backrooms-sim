@@ -53,4 +53,20 @@ constexpr float kStairWidth = 8.0f;
 void build_stairwell(float x0, float z0, int32_t top_level,
                      std::vector<contracts::BoxInstance>& out);
 
+// M27 (Phase IV): procedural placement of an UP-stair from level L to L+1. A pure
+// shared-seam function read identically from BOTH floors -- L builds the up-stairwell +
+// cuts its ceiling hole; L+1 reads the SAME stair_at(seed, L, cx, cz) to cut its floor
+// hole + place the landing (the Z-analogue of the door hash; INV-2, no neighbour query).
+// HYBRID coverage: a density scatter (~1 per kStairDensityN chunks) PLUS a guaranteed
+// per-superblock backstop, so every kStairSuperblock x kStairSuperblock block holds >=1
+// up-stair -> the stack is vertically connected within a bounded XZ distance (INV-3 in Z).
+// Pure/total: only hash evals (<= one block scan); never generates a chunk.
+constexpr int kStairSuperblock = 4;   // 4x4 chunks (~128 m) -- the K=4 hard backstop
+constexpr int kStairDensityN  = 13;   // ~1 density up-stair per N chunks (backstop fills empties)
+struct StairSpec {
+    bool present = false;          // is there an up-stair (level -> level+1) in this chunk?
+    int cell_i = 0, cell_j = 0;    // its cell in the G x G grid (0..G-1)
+};
+StairSpec stair_at(uint64_t world_seed, int32_t level, int64_t cx, int64_t cz);
+
 }  // namespace br::gen
