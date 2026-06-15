@@ -78,6 +78,7 @@ struct Options {
     bool config_check = false, resize_smoke = false, fullscreen = false;  // M16
     std::string config;                 // --config path (load/save persisted settings)
     bool credits = false;               // M17 credits screen (text)
+    bool rt = false;                    // M19 force ray tracing on in --game/--play
     uint32_t eval_count = 100;          // --director-eval: scenario count
     uint32_t director_interval_s = 15;  // --soak --director: ambient seconds between summaries (wall clock)
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
@@ -168,6 +169,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--resize-smoke") == 0) o.resize_smoke = true;
         else if (std::strcmp(a, "--fullscreen") == 0) o.fullscreen = true;
         else if (std::strcmp(a, "--credits") == 0) o.credits = true;
+        else if (std::strcmp(a, "--rt") == 0) o.rt = true;
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -326,6 +328,14 @@ int run_play(const Options& o) {
             }
         cached = c;
     };
+    // M19: lazy DXR for --play --rt (ray tracing at 2/3 internal res, upscaled to the window).
+    std::unique_ptr<br::render_dxr::DxrRenderer> dxr;
+    uint32_t dxrW = 0, dxrH = 0;
+    contracts::ChunkKey dxrCenter{0, static_cast<int64_t>(1) << 40, 0};
+    float lastCamX = 1e9f, lastCamY = 1e9f, lastCamZ = 1e9f, lastYaw = 1e9f, lastPitch = 1e9f;
+    bool rtOn = o.rt;
+    uint64_t rtFrames = 0;
+    std::vector<uint8_t> lastRt;
     contracts::ChunkKey c0 = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
     rebuild(c0);
     sm.update(c0); sm.wait_idle(); sm.update(c0);
@@ -407,11 +417,33 @@ int run_play(const Options& o) {
         sm.update(center);
         contracts::CameraPose cam = wanderer_camera(s, aspect);
         apply_head_bob(cam, s);  // M18 head-bob (view-only)
-        uint32_t drawn = 0;
-        if (!renderer.render_chunks_windowed(cam, sm.resident(), 8u, s.tick, &drawn)) {
-            std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str());
-            ShowCursor(TRUE);
-            return 1;
+        if (rtOn) {  // M19: ray-traced path (DXR at 2/3 res, upscaled present)
+            const uint32_t rw = (o.width * 2u) / 3u, rh = (o.height * 2u) / 3u;
+            if (!dxr || dxrW != rw || dxrH != rh) {
+                dxr = std::make_unique<br::render_dxr::DxrRenderer>();
+                if (dxr->init(rw, rh)) { dxrW = rw; dxrH = rh; dxrCenter = contracts::ChunkKey{0, static_cast<int64_t>(1) << 40, 0}; }
+                else { rtOn = false; dxr.reset(); }  // no DXR -> raster fallback
+            }
+            if (dxr) {
+                if (center != dxrCenter) { dxr->build_scene(sm.resident()); dxrCenter = center; lastYaw = 1e9f; }
+                const bool moved = (cam.pos[0] != lastCamX || cam.pos[1] != lastCamY || cam.pos[2] != lastCamZ ||
+                                    cam.yaw != lastYaw || cam.pitch != lastPitch);
+                lastCamX = cam.pos[0]; lastCamY = cam.pos[1]; lastCamZ = cam.pos[2]; lastYaw = cam.yaw; lastPitch = cam.pitch;
+                dxr->render_pt_frame(cam, 4u, static_cast<uint32_t>(o.seed) + static_cast<uint32_t>(frames), moved);
+                std::vector<uint8_t> rt;
+                if (dxr->readback(rt) && renderer.present_overlay_windowed(rt.data(), dxrW, dxrH)) {
+                    ++rtFrames;
+                    if (!o.out.empty()) lastRt = rt;  // keep the last RT frame for an optional capture
+                }
+            }
+        }
+        if (!rtOn) {
+            uint32_t drawn = 0;
+            if (!renderer.render_chunks_windowed(cam, sm.resident(), 8u, s.tick, &drawn)) {
+                std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str());
+                ShowCursor(TRUE);
+                return 1;
+            }
         }
         if (csvOpen && frames > 0) {  // skip frame 0 (includes window/stream warm-up)
             csv.write(contracts::FrameMetrics{ frames, frame_ms, sm.resident_count(), sm.generated_total(), renderer.process_private_bytes() });
@@ -429,6 +461,13 @@ int run_play(const Options& o) {
     std::printf("ticks: %llu\n", static_cast<unsigned long long>(s.tick));
     std::printf("distance_m: %.1f\n", static_cast<double>(s.odometer));
     std::printf("audio_underruns: %llu\n", underruns);
+    std::printf("rt_frames: %llu\n", static_cast<unsigned long long>(rtFrames));
+    if (!o.out.empty() && !lastRt.empty()) {  // M19: optional capture of the windowed RT frame
+        stbi_write_png(o.out.c_str(), static_cast<int>(dxrW), static_cast<int>(dxrH), 4, lastRt.data(), static_cast<int>(dxrW) * 4);
+        double sum = 0.0;
+        for (size_t i = 0; i + 2 < lastRt.size(); i += 4) sum += 0.299 * lastRt[i] + 0.587 * lastRt[i + 1] + 0.114 * lastRt[i + 2];
+        std::printf("rt_luma_mean: %.1f\n", sum / static_cast<double>(dxrW * dxrH));
+    }
     std::printf("debug_error_count: %u\n", dbg);
     return dbg == 0 ? 0 : 3;
 }
@@ -685,6 +724,7 @@ int run_game(const Options& o) {
     model.seed = cfg.seed;
     model.settings.master_pct = cfg.master; model.settings.sfx_pct = cfg.sfx;
     model.settings.mouse_pct = cfg.mouse; model.settings.director = cfg.director;
+    model.settings.rt = o.rt ? 1 : cfg.renderer;  // M19: --rt forces on; else from config
 
     WinSaved fsSaved; bool isFull = false;
     auto apply_fullscreen = [&](bool on) {
@@ -730,7 +770,15 @@ int run_game(const Options& o) {
     auto recenter = [&]() -> POINT { POINT p{ static_cast<LONG>(curW / 2), static_cast<LONG>(curH / 2) }; ClientToScreen(hwnd, &p); SetCursorPos(p.x, p.y); return p; };
     POINT anchor{ static_cast<LONG>(curW / 2), static_cast<LONG>(curH / 2) };
     bool cursorHidden = false;
-    bool prevF11 = false, prevPadStart = false;
+    bool prevF11 = false, prevPadStart = false, prevF2 = false;
+
+    // M19: lazy DXR renderer for the ray-tracing toggle. Rendered at a reduced internal
+    // resolution (perf) + upscaled to the window by present_overlay_windowed. Scene rebuilt
+    // when the chunk center changes; accumulation resets when the camera moves.
+    std::unique_ptr<br::render_dxr::DxrRenderer> dxr;
+    uint32_t dxrW = 0, dxrH = 0;
+    contracts::ChunkKey dxrCenter{0, static_cast<int64_t>(1) << 40, 0};
+    float lastCamX = 1e9f, lastCamY = 1e9f, lastCamZ = 1e9f, lastYaw = 1e9f, lastPitch = 1e9f;
 
     struct Keys { bool up=false, down=false, left=false, right=false, enter=false, esc=false; } prev;
     auto edge = [](bool now, bool& p) { const bool e = now && !p; p = now; return e; };
@@ -775,6 +823,9 @@ int run_game(const Options& o) {
         const bool f11 = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
         if (f11 && !prevF11) { apply_fullscreen(!isFull); anchor = recenter(); }
         prevF11 = f11;
+        const bool f2 = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;  // M19: toggle ray tracing
+        if (f2 && !prevF2) model.settings.rt ^= 1;
+        prevF2 = f2;
 
         // Gamepad (M16): Start pauses from play / activates in a menu (movement below).
         const app::GamepadState pad = poll_gamepad();
@@ -838,9 +889,29 @@ int run_game(const Options& o) {
             sm->update(center);
             contracts::CameraPose cam = wanderer_camera(s, aspect);
             apply_head_bob(cam, s);  // M18 head-bob (view-only)
-            uint32_t drawn = 0;
-            if (!renderer.render_chunks_windowed(cam, sm->resident(), 8u, s.tick, &drawn)) {
-                std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); ShowCursor(TRUE); return 1;
+            if (model.settings.rt) {
+                // M19 ray-traced path: DXR at 2/3 internal res -> present (upscaled).
+                const uint32_t rw = (curW * 2u) / 3u, rh = (curH * 2u) / 3u;
+                if (!dxr || dxrW != rw || dxrH != rh) {
+                    dxr = std::make_unique<br::render_dxr::DxrRenderer>();
+                    if (dxr->init(rw, rh)) { dxrW = rw; dxrH = rh; dxrCenter = contracts::ChunkKey{0, static_cast<int64_t>(1) << 40, 0}; }
+                    else { model.settings.rt = 0; dxr.reset(); }  // DXR unavailable -> raster fallback
+                }
+                if (dxr) {
+                    if (center != dxrCenter) { dxr->build_scene(sm->resident()); dxrCenter = center; lastYaw = 1e9f; }
+                    const bool moved = (cam.pos[0] != lastCamX || cam.pos[1] != lastCamY || cam.pos[2] != lastCamZ ||
+                                        cam.yaw != lastYaw || cam.pitch != lastPitch);
+                    lastCamX = cam.pos[0]; lastCamY = cam.pos[1]; lastCamZ = cam.pos[2]; lastYaw = cam.yaw; lastPitch = cam.pitch;
+                    dxr->render_pt_frame(cam, 4u, static_cast<uint32_t>(texSeed) + static_cast<uint32_t>(frames), moved);
+                    std::vector<uint8_t> rt;
+                    if (dxr->readback(rt)) renderer.present_overlay_windowed(rt.data(), dxrW, dxrH);
+                }
+            }
+            if (!model.settings.rt) {
+                uint32_t drawn = 0;
+                if (!renderer.render_chunks_windowed(cam, sm->resident(), 8u, s.tick, &drawn)) {
+                    std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); ShowCursor(TRUE); return 1;
+                }
             }
         } else {
             accum = 0.0f;  // sim time doesn't advance in menus
@@ -858,6 +929,7 @@ int run_game(const Options& o) {
     // M16: persist the current settings + window state for next launch.
     cfg.master = model.settings.master_pct; cfg.sfx = model.settings.sfx_pct;
     cfg.mouse = model.settings.mouse_pct; cfg.director = model.settings.director;
+    cfg.renderer = model.settings.rt;  // M19 persist the ray-tracing toggle
     cfg.fullscreen = isFull ? 1 : 0; cfg.seed = model.seed;
     if (!isFull) { cfg.width = static_cast<int>(curW); cfg.height = static_cast<int>(curH); }
     app::save_config(cfgPath, app::sanitize(cfg));

@@ -1826,6 +1826,78 @@ function Invoke-GateM18 {
     Write-Note 'M18 gate: humanlike head-bob (view-only) + run. Phase III begins; the walk feels alive.'
 }
 
+function Invoke-GateM19 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green (incl. config renderer round-trip + menu)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m19'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+
+    # Exit gate: ray tracing ON in the live windowed loop — every frame DXR-traced,
+    # presented to the swapchain (upscaled), debug-clean, with plausible lighting.
+    Assert-Gate 'ray tracing ON (--play --rt): DXR frames presented, debug-clean, lit' {
+        $png = Join-Path $tmp 'rt.png'
+        $r = Invoke-AppCapture @('--play', '--rt', '--seconds', '5', '--seed', '3', '--width', '1280', '--height', '720', '--out', $png)
+        if ($r.Exit -ne 0) { throw "--play --rt exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "ray-traced walk had debug-layer messages" }
+        if ((Get-Metric $r.Out 'rt_frames') -lt 30) { throw "ray-tracing path did not run (rt_frames=$((Get-Metric $r.Out 'rt_frames')))" }
+        $luma = Get-MetricFloat $r.Out 'rt_luma_mean'
+        if ($luma -lt 10.0 -or $luma -gt 250.0) { throw "ray-traced frame luma $luma out of band [10,250]" }
+        Write-Note ("ray tracing ON: $((Get-Metric $r.Out 'rt_frames')) DXR frames, luma {0:N1}, debug-clean" -f $luma)
+    }
+
+    # Exit gate: ray tracing OFF (the default) — raster walk, debug-clean.
+    Assert-Gate 'ray tracing OFF (--play): raster walk debug-clean' {
+        $r = Invoke-AppCapture @('--play', '--seconds', '3', '--seed', '3', '--width', '1280', '--height', '720')
+        if ($r.Exit -ne 0) { throw "--play exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "raster walk had debug-layer messages" }
+        if ((Get-Metric $r.Out 'rt_frames') -ne 0) { throw "ray tracing ran when it should be OFF by default" }
+    }
+
+    # Default-off means no regression: the raster golden is bit-identical, and the
+    # menu goldens (incl. the new RAY TRACING settings row) match.
+    Assert-Gate 'regression: M5 raster golden bit-identical (RT default off)' {
+        $shot = Join-Path $tmp 'm5.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        if ([double](& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1) -ne 0.0) { throw "M5 golden regressed" }
+    }
+    Assert-Gate 'menu goldens bit-match incl. the RAY TRACING settings row' {
+        foreach ($sc in @('splash', 'mainmenu', 'pause', 'settings')) {
+            $png = Join-Path $tmp "$sc.png"
+            $r = Invoke-AppCapture @('--menu-shot', '--screen', $sc, '--sel', '0', '--width', '1280', '--height', '720', '--out', $png)
+            if ($r.Exit -ne 0) { throw "menu-shot $sc exited $($r.Exit)" }
+            if ([double](& $hashdiff diff $png (Join-Path $RepoRoot "goldens\m15\$sc.png") | Select-Object -Last 1) -ne 0.0) { throw "menu golden '$sc' regressed" }
+        }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M19 gate: real-time ray-tracing toggle (default off, no regression). The lighting can go physical.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -1851,6 +1923,7 @@ try {
         'M16'   { Invoke-GateM16 }
         'M17'   { Invoke-GateM17 }
         'M18'   { Invoke-GateM18 }
+        'M19'   { Invoke-GateM19 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

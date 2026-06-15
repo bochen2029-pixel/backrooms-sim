@@ -202,8 +202,9 @@ void build_menu_overlay(std::vector<uint8_t>& rgba, uint32_t width, uint32_t hei
             std::snprintf(rows[1], 32, "SFX  %d", m.settings.sfx_pct);
             std::snprintf(rows[2], 32, "MOUSE  %d", m.settings.mouse_pct);
             std::snprintf(rows[3], 32, "DIRECTOR  %s", m.settings.director ? "ON" : "OFF");
-            std::snprintf(rows[4], 32, "BACK");
-            const char* labels[kSettingsItems] = {rows[0], rows[1], rows[2], rows[3], rows[4]};
+            std::snprintf(rows[4], 32, "RAY TRACING  %s", m.settings.rt ? "ON" : "OFF");
+            std::snprintf(rows[5], 32, "BACK");
+            const char* labels[kSettingsItems] = {rows[0], rows[1], rows[2], rows[3], rows[4], rows[5]};
             items(labels, nullptr, kSettingsItems, m.settings_sel, height * 2 / 5);
             break;
         }

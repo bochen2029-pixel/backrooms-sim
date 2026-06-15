@@ -1679,9 +1679,15 @@ bool upload_overlay(Renderer::Impl& d, const uint8_t* rgba, std::string& err) {
     return true;
 }
 
-bool ensure_overlay_pipeline(Renderer::Impl& d, std::string& err) {
-    if (d.ovlReady) return true;
-    d.ovlW = d.width; d.ovlH = d.height;
+bool ensure_overlay_pipeline(Renderer::Impl& d, uint32_t srcW, uint32_t srcH, std::string& err) {
+    // The overlay texture is the SOURCE size (M19: may be < window for upscaled RT);
+    // rebuild it if the requested source size changed. The PSO/root sig are reusable.
+    if (d.ovlReady && d.ovlW == srcW && d.ovlH == srcH) return true;
+    if (d.ovlReady && (d.ovlW != srcW || d.ovlH != srcH)) {
+        d.ovlTex.Reset(); d.ovlUpload.Reset(); d.ovlSrvHeap.Reset();  // resize the source texture
+    }
+    const bool first = !d.ovlReady;
+    d.ovlW = srcW; d.ovlH = srcH;
     const D3D12_HEAP_PROPERTIES defHeap = heap_props(D3D12_HEAP_TYPE_DEFAULT);
     D3D12_RESOURCE_DESC hd = {};
     hd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -1700,6 +1706,8 @@ bool ensure_overlay_pipeline(Renderer::Impl& d, std::string& err) {
     sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sd.Texture2D.MipLevels = 1;
     d.device->CreateShaderResourceView(d.ovlTex.Get(), &sd, d.ovlSrvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    if (!first) { d.ovlReady = true; return true; }  // resize only rebuilds the texture + SRV
 
     D3D12_DESCRIPTOR_RANGE range = {};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; range.NumDescriptors = 1;
@@ -1748,8 +1756,9 @@ bool ensure_overlay_pipeline(Renderer::Impl& d, std::string& err) {
 bool Renderer::present_overlay_windowed(const uint8_t* rgba, uint32_t width, uint32_t height) {
     Impl& d = *impl_;
     if (!d.windowed || !d.swapchain) { last_error_ = "present_overlay_windowed needs a window"; return false; }
-    if (width != d.width || height != d.height) { last_error_ = "overlay size mismatch"; return false; }
-    if (!ensure_overlay_pipeline(d, last_error_)) return false;
+    // M19: the overlay may be a smaller source (e.g. an upscaled ray-traced frame);
+    // the fullscreen-triangle sampler upscales it to the window. width/height = source.
+    if (!ensure_overlay_pipeline(d, width, height, last_error_)) return false;
     if (!upload_overlay(d, rgba, last_error_)) return false;
 
     if (FAILED(d.alloc->Reset())) { last_error_ = "allocator reset failed"; return false; }

@@ -29,12 +29,13 @@ struct Settings {
     int sfx_pct = 90;     // 0..100 SFX volume
     int mouse_pct = 50;   // 0..100 mouse sensitivity (scaled by the shell)
     int director = 0;     // 0/1 Director on/off
+    int rt = 0;           // 0/1 ray tracing on/off (M19; default off = no regression)
 };
 
 // Item counts per screen — shared so the renderer and the logic never disagree.
 constexpr int kMainItems = 4;      // New Game, Continue, Settings, Quit
 constexpr int kPauseItems = 3;     // Resume, Settings, Quit to Menu
-constexpr int kSettingsItems = 5;  // Master, SFX, Mouse, Director, Back
+constexpr int kSettingsItems = 6;  // Master, SFX, Mouse, Director, Ray Tracing, Back
 
 struct MenuModel {
     Screen screen = Screen::Splash;
@@ -58,6 +59,7 @@ inline void adjust_setting(Settings& s, int sel, int dir) {
         case 1: s.sfx_pct = clampi(s.sfx_pct + dir * 5, 0, 100); break;
         case 2: s.mouse_pct = clampi(s.mouse_pct + dir * 5, 0, 100); break;
         case 3: s.director = dir > 0 ? 1 : 0; break;
+        case 4: s.rt = dir > 0 ? 1 : 0; break;
         default: break;  // "Back" item has no value
     }
 }
