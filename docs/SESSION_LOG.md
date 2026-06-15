@@ -4,7 +4,7 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
-## Session 33 — screensaver FIX: natural hallway navigation (the Stroller)  ✅ — `gate M30` green
+## Session 33 — screensaver FIX: natural hallway navigation (Stroller) + organic head-bob  ✅ — `gate M30` green
 
 **Operator-reported bug:** the screensaver's autonomous camera was "completely useless" — it bumped wall to
 wall by blind probing and, because the camera faces the travel direction, it *stared at* each wall it hit and
@@ -32,6 +32,18 @@ on its floor (`final_level` 0 — pit-avoidance holds). Full ctest 100/100; M30 
 0.94 faceplant). Switching to **decide-once-per-cell-at-centre + a close-range safety-net re-pick** fixed both
 the stuck and the small exploration span (now ranges 60–106 m). The cardinal-heading invariant is what keeps
 it corridor-centred (a cardinal move never drifts sideways) and makes the camera look straight down halls.
+
+**Follow-up (same session) — an ORGANIC head-bob (ADR-061).** Operator: "it needs to realistically bob up and
+down — a human isn't perfectly level, like a sine wave but not a *perfect* sine wave." The shared M18 `head_bob`
+is a clean cosine (metronomic) + is pinned by tests + shared with the game, so I added a screensaver-only
+`apply_organic_bob` (view-only, odometer-driven like M18): two-dips-per-stride base + **left/right asymmetry**
+(~13% dominant-leg limp) + a **2nd harmonic** (non-cosine dip shape) + three **slow incommensurate modulators**
+(vigor / asymmetry / a not-quite-level lean, periods ~48/94/126 m → quasi-periodic, never exactly repeats) + a
+small **pitch nod** (~1.5°, the head nods + is never level). Vertical stays ≤ 0 (head only dips), ~6 cm walk
+(a touch deeper than M18's 5 cm). Measured via `--strollcheck` (5 seeds): bob **~7.4 cm peak**, dip spread
+**~5.3 cm** (dips clearly vary = organic), nod **~1.5°**. The M30 gate's `stroll_ok` now also requires
+`bob_amp > 3 cm` + `dip_spread > 0.8 cm`. The game keeps the crisp M18 bob. Amplitudes are easy to tune if the
+operator wants more/less. `gate M30` exits 0; ctest 100/100.
 
 ---
 

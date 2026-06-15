@@ -395,6 +395,54 @@ void apply_head_bob(contracts::CameraPose& cam, const br::core::WorldState& s) {
     cam.pos[2] += rz * bob.dx;
 }
 
+// A richer, ORGANIC head-bob for the SCREENSAVER. The shared head_bob (above) is a clean cosine/sine
+// -- correct, but metronomic. A real gait is NOT a perfect sine: the two footfalls per stride differ
+// slightly (a dominant leg), the vigor drifts over time, the dip shape isn't a pure cosine, and the
+// head nods + never sits perfectly level. This layers all of that on -- still driven purely by the
+// deterministic odometer/speed (view-only, reproducible, never touches WorldState), with three SLOW
+// INCOMMENSURATE modulators so the motion is quasi-periodic (it never exactly repeats). The vertical
+// term stays <= 0 (the head only ever dips). Screensaver-only; the game keeps the crisp M18 bob.
+void apply_organic_bob(contracts::CameraPose& cam, const br::core::WorldState& s) {
+    const float hspeed = std::sqrt(s.wanderer.vel.x * s.wanderer.vel.x + s.wanderer.vel.z * s.wanderer.vel.z);
+    const float lo = 0.1f, hi = br::core::kWalkSpeed * 0.6f;             // ease the bob in/out with speed
+    float t = (hi > lo) ? (hspeed - lo) / (hi - lo) : 0.0f;
+    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    const float ramp = t * t * (3.0f - 2.0f * t);
+    if (ramp <= 0.0f) return;                                            // standing still -> no bob
+
+    const float kTwoPi = 6.28318530718f;
+    const float d = s.odometer;                                          // gait phase from walked distance
+    const bool running = hspeed > (br::core::kWalkSpeed + br::core::kRunSpeed) * 0.5f;
+    const float ph = d * (running ? 0.42f : 0.31f) * kTwoPi;             // stride cadence (cycles / m)
+
+    // Slow, incommensurate gait modulators (periods ~48 m / ~94 m / ~126 m of walking) -> the bob's
+    // vigor, its left/right asymmetry, and its sway all drift independently: never a clean repeat.
+    const float vigor = 1.0f + 0.13f * std::sin(d * 0.13f);              // +/-13% amplitude wander
+    const float asym  = 0.13f * std::sin(d * 0.067f + 1.7f);            // a subtle dominant-leg limp (drifts)
+    const float drift = std::sin(d * 0.05f + 0.5f);                      // a slow not-quite-level lean
+
+    const float ampV = (running ? 0.082f : 0.058f) * ramp * vigor;       // ~6 cm walk: clearly felt, still natural
+    const float ampL = (running ? 0.052f : 0.034f) * ramp;
+
+    // Vertical: two dips/stride, but alternate their depth (asymmetry) + a small 2nd harmonic so the
+    // dip shape is not a pure cosine. Always <= 0.
+    const float dip   = 0.5f * (1.0f - std::cos(2.0f * ph));             // 0..1, two humps per cycle
+    const float which = std::sin(ph);                                    // -1..1, weights one footfall vs the next
+    const float shape = dip * (1.0f - asym * which);                     // deepen one dip, lighten the other
+    const float h2    = 0.10f * 0.5f * (1.0f - std::cos(4.0f * ph));     // subtle non-sinusoidal shaping
+    float dy = -ampV * (shape + h2);
+    if (dy > 0.0f) dy = 0.0f;
+
+    const float dx  = ampL * (std::sin(ph) + 0.15f * std::sin(d * 0.09f));            // figure-8 sway + slow wander
+    const float nod = (running ? 0.020f : 0.013f) * ramp * (0.6f * std::sin(2.0f * ph) + 0.4f * drift);  // step nod + lean
+
+    cam.pos[1] += dy;
+    const float rx = std::cos(s.wanderer.yaw), rz = -std::sin(s.wanderer.yaw);
+    cam.pos[0] += rx * dx;
+    cam.pos[2] += rz * dx;
+    cam.pitch += nod;                                                    // the head nods + is never perfectly level
+}
+
 // Defined below in the Director-helpers anonymous namespace; forward-declared here in
 // that SAME anonymous namespace (multiple `namespace {}` blocks in a TU are one and the
 // same) so the interactive --play / --game loops can resolve the KEEL host:port for the
@@ -1662,10 +1710,28 @@ int run_strollcheck(const Options& o) {
     uint64_t faceplant = 0;
     float dist = 0.0f; Vec3 prev = s.wanderer.pos;
     float minx = prev.x, maxx = prev.x, minz = prev.z, maxz = prev.z;
+    // Organic head-bob tracking: the deepest dip (amplitude), the SPREAD of footfall-dip depths
+    // (varying dips => organic, not a perfect repeating sine), and the pitch-nod range.
+    float bobLo = 0.0f, nodLo = 1.0e9f, nodHi = -1.0e9f;
+    float dipMin = 1.0e9f, dipMax = -1.0e9f, by0 = 0.0f, by1 = 0.0f;
+    int bsamp = 0;
     for (uint32_t t = 0; t < ticks; ++t) {
         const contracts::ChunkKey here = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
         if (here != cached) rebuild(here);
         tick(s, bot.step(s, o.seed, col), col);
+        // Sample the organic bob on a zeroed camera to read the pure vertical offset + nod.
+        contracts::CameraPose bc{}; bc.pos[1] = 0.0f; bc.pitch = 0.0f;
+        apply_organic_bob(bc, s);
+        const float by = bc.pos[1];
+        if (by < bobLo) bobLo = by;
+        if (bc.pitch < nodLo) nodLo = bc.pitch;
+        if (bc.pitch > nodHi) nodHi = bc.pitch;
+        if (bsamp >= 2 && by1 < by0 && by1 < by && by1 < -0.020f) {  // a real footfall dip (>2 cm local min, not a harmonic ripple)
+            const float depth = -by1;
+            if (depth < dipMin) dipMin = depth;
+            if (depth > dipMax) dipMax = depth;
+        }
+        by0 = by1; by1 = by; ++bsamp;
         const float fx = std::sin(s.wanderer.yaw), fz = std::cos(s.wanderer.yaw);  // the CAMERA facing
         const float r = kWandererRadius + 0.1f;
         bool wallClose = false;
@@ -1684,13 +1750,22 @@ int run_strollcheck(const Options& o) {
     }
     const double facer = static_cast<double>(faceplant) / static_cast<double>(ticks);
     const float span = std::max(maxx - minx, maxz - minz);
+    const float bobAmpCm = -bobLo * 100.0f;                                        // deepest dip
+    const float dipSpreadCm = (dipMax > dipMin) ? (dipMax - dipMin) * 100.0f : 0.0f;  // dips vary => organic
+    const float nodDeg = (nodHi > nodLo) ? (nodHi - nodLo) * 57.29578f : 0.0f;
     std::printf("seed: %llu\n", static_cast<unsigned long long>(o.seed));
     std::printf("ticks: %u\n", ticks);
     std::printf("distance_m: %.1f\n", static_cast<double>(dist));
     std::printf("explore_span_m: %.1f\n", static_cast<double>(span));
     std::printf("faceplant_ratio: %.4f\n", facer);
+    std::printf("bob_amp_cm: %.2f\n", static_cast<double>(bobAmpCm));
+    std::printf("dip_spread_cm: %.2f\n", static_cast<double>(dipSpreadCm));
+    std::printf("nod_deg: %.2f\n", static_cast<double>(nodDeg));
     std::printf("final_level: %d\n", contracts::level_from_y(s.wanderer.pos.y));
-    const bool ok = (dist > static_cast<float>(ticks) * 0.012f) && (span > 40.0f) && (facer < 0.15);
+    // Natural: covers ground + explores + ~never faceplants; AND a clear, organic vertical bob (it
+    // bobs visibly, and the footfall dips VARY in depth -> not a metronomic perfect sine).
+    const bool ok = (dist > static_cast<float>(ticks) * 0.012f) && (span > 40.0f) && (facer < 0.15) &&
+                    (bobAmpCm > 3.0f) && (dipSpreadCm > 0.8f);
     std::printf("stroll_ok: %d\n", ok ? 1 : 0);
     return ok ? 0 : 6;
 }
@@ -4173,7 +4248,7 @@ int run_screensaver(const Options& o) {
         }
 
         contracts::CameraPose cam = wanderer_camera(s, aspect);
-        apply_head_bob(cam, s);
+        apply_organic_bob(cam, s);   // screensaver: a richer, non-metronomic human gait bob
         renderer.set_post(true, static_cast<uint32_t>(texSeed), duration<float>(now - t0).count(), false);  // VHS, animated
         app::build_shoggoth_mesh(shogBody, shog.pos, shog.writhe, 1.4f);
         std::vector<contracts::ResidentChunk> withShog = sm->resident();
