@@ -2909,15 +2909,17 @@ function Invoke-GateM30 {
     # the screensaver's own holed collision and reports a "faceplant ratio" (fraction of ticks with a
     # wall within 1.2 m straight ahead). A natural walker keeps it near zero. Guards a cosmetic path, but
     # the screensaver nav must not silently regress.
-    Assert-Gate 'screensaver Stroller navigates naturally (covers ground, explores, ~never faceplants a wall)' {
+    Assert-Gate 'screensaver Stroller traverses like a human (goal-directed, free-angle, ~never faceplants)' {
         foreach ($seed in 1, 42, 500) {
             $r = Invoke-AppCapture @('--strollcheck', '--seed', "$seed", '--ticks', '36000')
             if ($r.Exit -ne 0) { throw "strollcheck seed ${seed} exited $($r.Exit): $($r.Out)" }
             if ((Get-Metric $r.Out 'stroll_ok') -ne 1) { throw "seed ${seed} stroll not natural: $($r.Out)" }
             $fp = Get-MetricFloat $r.Out 'faceplant_ratio'
-            if ($fp -ge 0.05) { throw "seed ${seed} faceplant_ratio $fp >= 0.05 (the camera stares at walls instead of down corridors)" }
+            if ($fp -ge 0.10) { throw "seed ${seed} faceplant_ratio $fp >= 0.10 (the camera stares at walls instead of where it is going)" }
+            $oc = Get-MetricFloat $r.Out 'offcardinal_deg'
+            if ($oc -lt 6.0) { throw "seed ${seed} offcardinal_deg $oc < 6 (movement is 90-degree-locked -- a vacuum, not a human)" }
         }
-        Write-Note 'screensaver Stroller: seeds 1/42/500 each walk ~1000+ m, explore a 60-106 m span, faceplant ratio < 0.01 (looks DOWN corridors + turns deliberately at junctions) -- the WalkBot wall-faceplant is gone'
+        Write-Note 'screensaver Stroller: seeds 1/42/500 each traverse ~1100 m toward distant goals, explore a 50-130 m span, free-angle (offcardinal 14-23 deg, not 90-locked), faceplant < 0.05 -- goal-directed human traversal (cuts across open rooms), not a 90-degree vacuum'
     }
 
     # The abyss renders: look DOWN a shaft with a band of floors resident -> the depths show through

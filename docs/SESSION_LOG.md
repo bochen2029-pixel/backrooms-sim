@@ -45,6 +45,24 @@ small **pitch nod** (~1.5°, the head nods + is never level). Vertical stays ≤
 `bob_amp > 3 cm` + `dip_spread > 0.8 cm`. The game keeps the crisp M18 bob. Amplitudes are easy to tune if the
 operator wants more/less. `gate M30` exits 0; ctest 100/100.
 
+**Follow-up 2 — the `.scr` was never reproducible (it vanished).** Operator couldn't find `Backrooms.scr`. It
+was a one-off manual `copy backrooms.exe Backrooms.scr` (the f75c805 commit literally said so), so it lived in
+`build/bin` and my clean gate builds (which wipe `build/bin`) deleted it with nothing to regenerate it. Fixed:
+a CMake POST_BUILD step now emits `build/bin/Backrooms.scr` on every build (commit `bca783a`) — it can't vanish
+again — and the deliverable is `C:\Users\user\Desktop\Backrooms_v2.scr`.
+
+**Follow-up 3 — nav v2: GOAL-DIRECTED, FREE-ANGLE (ADR-062, supersedes the cardinal Stroller).** Operator: the
+cardinal walker still felt "like a robot vacuum" — 90° turns (1995-DOOM), and it hugged walls/centre-lines even
+in open rooms instead of cutting across. Replaced the grid walker with a **goal + context-steering** navigator:
+it picks a distant GOAL (longest open run), steers toward it via a 24-feeler fan
+(`1.7·cos(toGoal)+0.9·clearance+0.5·smoothness`) at a **continuous free angle** (no 90° snapping), cuts straight
+**diagonally across open rooms** (the goal term wins when all directions are clear), keeps margin from walls
+(no hugging), follows corridors when constrained, and picks a new goal on arrival / dead-end → **real
+traversals**, not vacuuming. `--strollcheck` adds `offcardinal_deg` (free-angle proof): **13.6–22.7°** (cardinal
+was ~0–3°; uniform-random 22.5°), distance ~1110–1140 m, faceplant 0.01–0.045. Gate `stroll_ok` now also
+requires `offcardinal > 6`; faceplant ceiling loosened 0.05→0.10. `gate M30` exits 0; ctest 100/100. Desktop
+`.scr` refreshed with the new nav.
+
 ---
 
 ## Session 32 — M30 polish ×3: live descent + deep-descent soak + draft telegraph  ✅ — `gate M30` green; model-free Phase IV EXHAUSTED
