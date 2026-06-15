@@ -26,6 +26,11 @@ public:
     // Fire a footstep transient (intensity 0..1).
     void trigger_footstep(float intensity);
 
+    // M30 telegraph (decision 6): swell a low "draft" wind as the wanderer nears an open shaft
+    // (intensity 0..1, smoothed click-free). Presentation only -- a DEDICATED noise stream, so the
+    // bed's rng_ is untouched and the offline --render-wav stays bit-identical when draft stays 0.
+    void set_draft(float intensity);
+
     // Render `frames` interleaved stereo float samples (writes 2*frames floats).
     void render(const contracts::AudioListener& listener, float* out, uint32_t frames);
 
@@ -66,6 +71,10 @@ private:
 
     uint32_t sr_;
     core::Pcg64 rng_;
+    core::Pcg64 wind_rng_;       // M30: dedicated draft-noise stream -> rng_ (and the offline WAV) untouched
+    float draft_target_ = 0.0f;  // M30: 0..1 shaft-proximity telegraph, set per block from the engine
+    float draft_amp_ = 0.0f;     // M30: click-free smoothed draft amplitude
+    float wind_lp_ = 0.0f;       // M30: one-pole lowpass state -> a low whoosh
 
     double hum_phase_[4] = {0, 0, 0, 0};
     double lfo_phase_ = 0.0;

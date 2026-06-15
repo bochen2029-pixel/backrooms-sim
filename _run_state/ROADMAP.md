@@ -104,8 +104,9 @@ as the oracle, `m<N>-green` as the revert anchor, SESSION_LOG/PROGRESS/memory as
   through real down-stair holes + shaft voids in-game; + a pillar-over-void generation fix; all level-0 goldens
   bit-identical) · ✅ multi-floor fog-to-black abyss render (`1a067bb`) · ✅ deep-descent soak (`--descentsoak`,
   ADR-058, `gate M30` green — repeated deep falls hold determinism + bounded residency/memory over the long
-  haul; the ROADMAP §3 DONE criterion) · ⏳ remaining: the draft-audio telegraph (decision 6, off the sim hash).
-  **Deps:** M27, M28.
+  haul; the ROADMAP §3 DONE criterion) · ✅ draft-audio telegraph (ADR-059, `[m30][audio]` — a low draft wind
+  swells as you near an open shaft, decision 6; dedicated `wind_rng_` keeps the offline `--render-wav`
+  bit-identical). **All M30 first-pass + polish items are now DONE.** **Deps:** M27, M28.
 
 ### Deferred / leftover (decide-and-document, or operator-gate)
 - `[?] M31` · **floating-origin rebase** for *true*-unbounded XYZ (fixes the float horizon in 2-D too).

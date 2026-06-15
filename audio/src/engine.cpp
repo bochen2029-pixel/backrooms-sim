@@ -65,6 +65,7 @@ const char* AudioEngine::backend() const { return device_ ? device_->backend().c
 // headless soak (which never sets them) behaves exactly as before.
 void AudioEngine::render_block(Synth& synth, float* buf) {
     synth.set_reverb_seconds(reverb_.load(std::memory_order_relaxed));
+    synth.set_draft(draft_.load(std::memory_order_relaxed));  // M30 telegraph (0 by default -> inert)
     const float sfx = sfx_.load(std::memory_order_relaxed);
     uint32_t credits = footstep_credits_.exchange(0, std::memory_order_relaxed);
     while (credits-- > 0) synth.trigger_footstep(0.8f * sfx);

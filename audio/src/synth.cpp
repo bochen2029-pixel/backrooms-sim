@@ -18,7 +18,8 @@ int scaled(int len44, uint32_t sr) {
 }
 }  // namespace
 
-Synth::Synth(uint64_t seed, uint32_t sample_rate) : sr_(sample_rate), rng_(seed) {
+Synth::Synth(uint64_t seed, uint32_t sample_rate)
+    : sr_(sample_rate), rng_(seed), wind_rng_(seed ^ 0x77696e6473ULL) {  // "winds" -> a separate stream
     for (int i = 0; i < 4; ++i) {
         combL_[i].buf.assign(static_cast<size_t>(scaled(kCombLen[i], sr_)), 0.0f);
         combR_[i].buf.assign(static_cast<size_t>(scaled(kCombLen[i] + kStereoSpread, sr_)), 0.0f);
@@ -51,6 +52,12 @@ void Synth::set_reverb_seconds(float rt60) {
     }
 }
 
+void Synth::set_draft(float intensity) {
+    if (intensity < 0.0f) intensity = 0.0f;
+    if (intensity > 1.0f) intensity = 1.0f;
+    draft_target_ = intensity;  // render() smooths draft_amp_ toward this (no clicks)
+}
+
 void Synth::trigger_footstep(float intensity) {
     if (intensity < 0.0f) intensity = 0.0f;
     if (intensity > 1.0f) intensity = 1.0f;
@@ -75,6 +82,9 @@ void Synth::render(const contracts::AudioListener& listener, float* out, uint32_
     const float foot_lp = std::exp(-2.0f * 3.14159265f * 900.0f / static_cast<float>(sr_));
     // Footstep loudness eases off when the wanderer is still.
     const float move = (listener.speed > 0.1f) ? 1.0f : 0.4f;
+    // M30 draft telegraph: a low whoosh (lowpassed noise ~ 480 Hz) that swells as draft_amp_ rises.
+    const float wind_coef = std::exp(-2.0f * 3.14159265f * 480.0f / static_cast<float>(sr_));
+    const float draft_smooth = 1.0f - std::exp(-1.0f / (0.04f * static_cast<float>(sr_)));  // ~40 ms ramp (no clicks)
 
     for (uint32_t i = 0; i < frames; ++i) {
         // Fluorescent hum (slow amplitude flutter via a ~0.17 Hz LFO).
@@ -104,7 +114,15 @@ void Synth::render(const contracts::AudioListener& listener, float* out, uint32_
         }
         foot *= 1.6f * move;
 
-        const float dry = hum + hvac + foot;
+        // M30 draft telegraph: a dedicated lowpassed-noise whoosh, gated by the smoothed draft
+        // amplitude. Uses wind_rng_ (not rng_), so the bed is byte-for-byte unchanged; when no draft
+        // is set (the offline --render-wav path) draft_amp_ stays 0 and the term is exactly 0.
+        draft_amp_ += (draft_target_ - draft_amp_) * draft_smooth;
+        const float wn = static_cast<float>(wind_rng_.next_double()) * 2.0f - 1.0f;
+        wind_lp_ = wind_lp_ * wind_coef + wn * (1.0f - wind_coef);
+        const float wind = wind_lp_ * draft_amp_ * 3.2f;  // gain -> the swell is clearly audible at full draft
+
+        const float dry = hum + hvac + foot + wind;
         const float send = hum * 0.25f + foot * 0.9f;  // bed is mostly dry
 
         float wetL = 0.0f, wetR = 0.0f;

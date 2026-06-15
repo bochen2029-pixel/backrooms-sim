@@ -49,17 +49,32 @@ frame 64; growth ~3 MB, even negative on seed 7 — no leak; <32 MB threshold), 
 `--ticks` (determinism holds under async streaming). So the vertical paths hold **determinism + bounded
 memory over the long haul** — a Phase-IV DONE criterion checked off. ADR-058.
 
+**Also this session — the open-shaft draft TELEGRAPH (decision 6; M30 polish now COMPLETE).** Locked design
+decision 6 says shaft entry is *accidental but ALWAYS telegraphed* — a draft warns you ~1 cell out (no
+fail-state, so the cue is the only safeguard). Added a low "draft" wind voice to the `Synth` (`set_draft`,
+a ~480 Hz lowpassed whoosh, click-free-smoothed) on a **dedicated `wind_rng_`** so the bed's `rng_` — and
+the deterministic offline `--render-wav` — are byte-for-byte untouched (the wind term is `×draft_amp`, exactly
+0 when no draft is set). `AudioEngine::set_draft` plumbs it lock-free; the shell computes
+`draft_intensity_near_shaft` (scan the 3×3 for a shaft whose floor is open at this level, ramp 0→1 from ~8 m
+to ~1 m) and feeds the mixer each frame in `run_play`/`run_game`/`run_screensaver` (the gated offline audio
+paths never call it). Proven: a new `[m30][audio]` test (wind swells RMS >1.2×, 60 Hz bed survives, deterministic
+×2, **draft=0 byte-identical to baseline**) + `--render-wav` still bit-identical ×2 + wavcheck OK (the m6
+invariant holds); ctest 100/100. ADR-059. The despair gradient is now whole — you hear the void before you reach it.
+
 **Gotchas.** (1) A down-hole co-located with a level-0 up-stair is a stacked stair-junction: the up-stairwell
 steps catch you on level 0, so that particular cell isn't a clean fall (traversable, nothing stuck). The proof
 picks a clean hole (fixture choice, like `--ascend` picks an interior up-stair); in-game these are a small
 fraction of down-holes. (2) The SESSION_LOG's own `$seed:` PowerShell parse trap bit the new gate block — use
 `${seed}:`. (Files: `gen/layout.h` + `layout.cpp` + `chunk.cpp`, `app/src/main.cpp`, `scripts/gate.ps1`.)
 
-**Next (model-free, round-robin):** the last tracked M30 polish is the **telegraph audio** (draft/wind near a
-shaft, locked design decision 6, off the sim hash) → then the Phase-IV completion sweep (ROADMAP §3): all the
-DONE criteria now hold *except* M29 (`m29-green` is model-blocked, ISSUE-5) — so the remaining gate is whether
-to write `.brstate/DONE` with M29 accepted-as-blocked, or hold for the sidecar. M29 Increment 2 + `m29-green`
-the moment `llama-server :8080` is up. Per `_run_state/ROADMAP.md` §2/§3.
+**Next — all model-free M30 work is now DONE** (live descent + deep-descent soak + telegraph audio; the fog
+render + first-pass shaft/fall were already in). The Phase-IV §3 DONE criteria now hold **except M29**
+(`m29-green` is model-blocked, ISSUE-5 — the code + determinism are done + committed; it needs `llama-server
+:8080` up for the live-brain `valid_intents>=1` assertion). So the remaining decision is the DONE gate itself:
+write `.brstate/DONE` with **M29 explicitly accepted-as-blocked** (operator-adjacent — M29 isn't `[x]`, so
+strictly the DONE definition isn't met), or **hold** for the sidecar. Per the standing "never block, route
+around operator-only acts" directive, the model-free roadmap is exhausted; a future session finishes M29 the
+moment `:8080` is up (one gate run). Otherwise → perpetual-polish (ROADMAP §4). Per `_run_state/ROADMAP.md` §2/§3.
 
 ---
 

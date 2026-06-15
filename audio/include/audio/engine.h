@@ -49,6 +49,8 @@ public:
     // Playback mix controls (presentation only; never touch the offline render).
     void set_master_volume(float v) { master_.store(v, std::memory_order_relaxed); }
     void set_sfx_volume(float v) { sfx_.store(v, std::memory_order_relaxed); }
+    // M30: shaft-proximity draft telegraph (0..1). Lock-free; presentation only.
+    void set_draft(float v) { draft_.store(v, std::memory_order_relaxed); }
 
     uint64_t underruns() const { return underruns_.load(std::memory_order_relaxed); }
     uint64_t blocks_rendered() const { return blocks_.load(std::memory_order_relaxed); }
@@ -76,6 +78,7 @@ private:
     std::atomic<uint32_t> footstep_credits_{0};
     std::atomic<float> master_{1.0f};
     std::atomic<float> sfx_{1.0f};
+    std::atomic<float> draft_{0.0f};  // M30: shaft-proximity draft telegraph (0 = silent, the default)
 
     std::atomic<uint64_t> underruns_{0};
     std::atomic<uint64_t> blocks_{0};

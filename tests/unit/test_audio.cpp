@@ -94,6 +94,36 @@ TEST_CASE("the fluorescent hum puts energy at 60 Hz", "[m6][audio]") {
     REQUIRE(p60 > p1000 * 50.0);  // the mains tone dominates a quiet upper band
 }
 
+TEST_CASE("the draft telegraph swells a low wind, leaves the bed intact, stays deterministic (M30)", "[m30][audio]") {
+    const uint32_t sr = contracts::kAudioSampleRate, frames = sr / 2;  // 0.5 s
+    auto rms = [](const std::vector<float>& x) {
+        double s = 0.0; for (float v : x) s += static_cast<double>(v) * v;
+        return std::sqrt(s / static_cast<double>(x.size()));
+    };
+    // Baseline: no draft ever set.
+    audio::Synth dry(9u, sr);
+    std::vector<float> b0(2 * frames); dry.render(still_listener(), b0.data(), frames);
+    // Draft on: a steady full draft swells the wind.
+    audio::Synth windy(9u, sr); windy.set_draft(1.0f);
+    std::vector<float> b1(2 * frames); windy.render(still_listener(), b1.data(), frames);
+    REQUIRE(rms(b1) > rms(b0) * 1.2);  // the draft is audibly present
+
+    // Determinism: the draft path is reproducible for a fixed seed + call sequence.
+    audio::Synth windy2(9u, sr); windy2.set_draft(1.0f);
+    std::vector<float> b2(2 * frames); windy2.render(still_listener(), b2.data(), frames);
+    REQUIRE(b1 == b2);
+
+    // The 60 Hz bed survives under the draft (the telegraph ADDS, never replaces).
+    std::vector<float> mono(frames);
+    for (uint32_t i = 0; i < frames; ++i) mono[i] = 0.5f * (b1[2 * i] + b1[2 * i + 1]);
+    REQUIRE(goertzel_power(mono, 60.0, sr) > goertzel_power(mono, 1500.0, sr) * 10.0);
+
+    // draft = 0 is INERT: byte-identical to never touching it -> the offline --render-wav stays bit-identical.
+    audio::Synth z(9u, sr); z.set_draft(0.0f);
+    std::vector<float> bz(2 * frames); z.render(still_listener(), bz.data(), frames);
+    REQUIRE(bz == b0);
+}
+
 TEST_CASE("room probe: a larger room reverberates longer", "[m6][audio]") {
     const auto small = square_room(3.0f);
     const auto big = square_room(25.0f);

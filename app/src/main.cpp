@@ -432,6 +432,30 @@ static void build_walk_collision(std::vector<br::core::Aabb>& out, uint64_t seed
         }
 }
 
+// M30 telegraph (locked design decision 6 -- shaft entry is accidental but ALWAYS telegraphed): a draft
+// swells as the wanderer nears an OPEN shaft on the current floor (you can stumble in, but you were
+// warned ~1-2 cells out). Scans the 3x3 chunks for a shaft whose floor is open at this level (i.e. one
+// you could fall into), returns 0..1 by nearest shaft-cell distance. Pure presentation -- off the sim
+// hash (fed only to the real-time mixer); a dead audio device just means silence, never a stall.
+static float draft_intensity_near_shaft(uint64_t seed, int32_t level, float px, float pz) {
+    const float cs = br::gen::kCellSize;
+    const contracts::ChunkKey c = contracts::chunk_key_at(level, px, pz);
+    float best = 1.0e9f;
+    for (int64_t dx = -1; dx <= 1; ++dx)
+        for (int64_t dz = -1; dz <= 1; ++dz) {
+            const br::gen::ShaftSpec sh = br::gen::shaft_at(seed, c.cx + dx, c.cz + dz);
+            if (!br::gen::shaft_floor_open(sh, level)) continue;  // not a shaft you can fall into here
+            const float sxc = static_cast<float>(c.cx + dx) * contracts::kChunkSize + (static_cast<float>(sh.cell_i) + 0.5f) * cs;
+            const float szc = static_cast<float>(c.cz + dz) * contracts::kChunkSize + (static_cast<float>(sh.cell_j) + 0.5f) * cs;
+            const float d = std::sqrt((px - sxc) * (px - sxc) + (pz - szc) * (pz - szc));
+            if (d < best) best = d;
+        }
+    const float kFar = 8.0f, kNear = 1.0f;  // start ~2 cells out, full at the lip
+    if (best >= kFar) return 0.0f;
+    if (best <= kNear) return 1.0f;
+    return (kFar - best) / (kFar - kNear);
+}
+
 int run_play(const Options& o) {
     using namespace br::core;
     using namespace std::chrono;
@@ -562,6 +586,7 @@ int run_play(const Options& o) {
         }
 
         const int32_t curLevel = contracts::level_from_y(s.wanderer.pos.y);
+        if (audioOn) eng.set_draft(draft_intensity_near_shaft(o.seed, curLevel, s.wanderer.pos.x, s.wanderer.pos.z));  // M30 telegraph
         const int32_t extraLevel = (s.wanderer.pos.y - contracts::level_base_y(curLevel) > 2.0f)
                                        ? curLevel + 1 : curLevel - 1;  // M28: climbing -> above, else see down
         const contracts::ChunkKey center = contracts::chunk_key_at(curLevel, s.wanderer.pos.x, s.wanderer.pos.z);
@@ -1082,6 +1107,7 @@ int run_game(const Options& o) {
                 prevSteps = steps;
             }
             const int32_t curLevel = contracts::level_from_y(s.wanderer.pos.y);
+            if (audioOn) eng.set_draft(draft_intensity_near_shaft(texSeed, curLevel, s.wanderer.pos.x, s.wanderer.pos.z));  // M30 telegraph
             const int32_t extraLevel = (s.wanderer.pos.y - contracts::level_base_y(curLevel) > 2.0f)
                                            ? curLevel + 1 : curLevel - 1;  // M28: climbing -> above, else see down
             const contracts::ChunkKey center = contracts::chunk_key_at(curLevel, s.wanderer.pos.x, s.wanderer.pos.z);
@@ -3967,6 +3993,7 @@ int run_screensaver(const Options& o) {
         }
         // M28/M30 streaming: open the abyss band downward over a shaft, else the 2-floor see-through.
         const int32_t curLevel = contracts::level_from_y(s.wanderer.pos.y);
+        if (audioOn) eng.set_draft(draft_intensity_near_shaft(texSeed, curLevel, s.wanderer.pos.x, s.wanderer.pos.z));  // M30 telegraph
         const int32_t extraLevel = (s.wanderer.pos.y - contracts::level_base_y(curLevel) > 2.0f) ? curLevel + 1 : curLevel - 1;
         const contracts::ChunkKey center = contracts::chunk_key_at(curLevel, s.wanderer.pos.x, s.wanderer.pos.z);
         const br::gen::ShaftSpec shaft = br::gen::shaft_at(texSeed, center.cx, center.cz);
