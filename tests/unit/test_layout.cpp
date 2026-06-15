@@ -115,3 +115,45 @@ TEST_CASE("vertical connectivity: no floor is ever sealed across a stack slab (M
         if (!validate_vertical_connectivity(seed, 0, 8, 0)) sawSealed = true;
     REQUIRE(sawSealed);
 }
+
+TEST_CASE("shaft_at: a rare, deep, deterministic vertical void (M30)", "[m30][shafts]") {
+    const uint64_t seed = 0x5AF7u;
+    const int G = br::gen::kCellsPerChunk;
+    long present = 0, total = 0;
+    for (int64_t cx = -100; cx < 100; ++cx)
+        for (int64_t cz = -100; cz < 100; ++cz) {
+            const br::gen::ShaftSpec s = br::gen::shaft_at(seed, cx, cz);
+            ++total;
+            if (!s.present) continue;
+            ++present;
+            REQUIRE(s.cell_i >= 0); REQUIRE(s.cell_i < G);
+            REQUIRE(s.cell_j >= 0); REQUIRE(s.cell_j < G);
+            REQUIRE(s.depth >= br::gen::kShaftDepthMin);
+            REQUIRE(s.depth <= br::gen::kShaftDepthMax);
+            REQUIRE(s.top_level >= -br::gen::kShaftLevelBand);
+            REQUIRE(s.top_level <= br::gen::kShaftLevelBand);
+            // The void spans EXACTLY [top - depth, top] -- you fall in at top, land on (top - depth).
+            REQUIRE(br::gen::shaft_passes(s, s.top_level));
+            REQUIRE(br::gen::shaft_passes(s, s.top_level - s.depth));
+            REQUIRE_FALSE(br::gen::shaft_passes(s, s.top_level + 1));
+            REQUIRE_FALSE(br::gen::shaft_passes(s, s.top_level - s.depth - 1));
+        }
+    // VERY RARE: they exist, but far below the stair density (~1/13). ~1/1500 here.
+    INFO("present " << present << " / " << total);
+    REQUIRE(present > 0);
+    const double frac = static_cast<double>(present) / static_cast<double>(total);
+    REQUIRE(frac < 0.005);
+
+    // DETERMINISTIC, and a different seed relocates the shafts.
+    const br::gen::ShaftSpec a = br::gen::shaft_at(seed, 7, -3);
+    const br::gen::ShaftSpec b = br::gen::shaft_at(seed, 7, -3);
+    REQUIRE(a.present == b.present);
+    REQUIRE(a.top_level == b.top_level);
+    REQUIRE(a.depth == b.depth);
+    bool variesBySeed = false;
+    for (int64_t cx = -100; cx < 100 && !variesBySeed; ++cx)
+        for (int64_t cz = -100; cz < 100 && !variesBySeed; ++cz)
+            if (br::gen::shaft_at(seed, cx, cz).present != br::gen::shaft_at(seed ^ 0x9E37u, cx, cz).present)
+                variesBySeed = true;
+    REQUIRE(variesBySeed);
+}

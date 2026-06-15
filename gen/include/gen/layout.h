@@ -78,4 +78,28 @@ StairSpec stair_at(uint64_t world_seed, int32_t level, int64_t cx, int64_t cz);
 // radius >= kStairSuperblock is enough for the per-superblock backstop to guarantee success.
 bool validate_vertical_connectivity(uint64_t world_seed, int32_t lvl_lo, int32_t lvl_hi, int radius);
 
+// M30 (Phase IV): open shafts -- a rare vertical VOID that drops you DOWN several floors (the
+// "despair gradient": you sink faster than you climb). Far rarer than stairs (~1 per
+// kShaftDensityN chunks -- the design's ~1.3 km cadence). Each shaft is a fixed column (cx,cz)
+// with a hashed cell, top level, and depth (kShaftDepthMin..Max floors). Pure/total per column;
+// any level decides LOCALLY whether the void passes through it (shaft_passes) -- no neighbour
+// query, the Z-analogue of the stair seam. (Geometry/soft-catch fall/fog render come next in M30.)
+constexpr int kShaftDensityN  = 1500;   // ~1 shaft per N chunks (very rare; ~1.3 km area cadence)
+constexpr int kShaftDepthMin  = 5;      // floors dropped (locked design: deep 5..10)
+constexpr int kShaftDepthMax  = 10;
+constexpr int32_t kShaftLevelBand = 30; // top level hashed into [-band, band] (near-origin; M31 widens)
+struct ShaftSpec {
+    bool present = false;
+    int cell_i = 0, cell_j = 0;         // its cell in the G x G grid (0..G-1)
+    int32_t top_level = 0;              // the floor you can fall in from
+    int32_t depth = 0;                  // floors it drops (kShaftDepthMin..kShaftDepthMax)
+};
+ShaftSpec shaft_at(uint64_t world_seed, int64_t cx, int64_t cz);
+
+// Does the shaft's void occupy `level`'s space at its column? The void spans the inclusive
+// range [top_level - depth, top_level]: you fall in at top_level and land on (top_level - depth).
+inline bool shaft_passes(const ShaftSpec& s, int32_t level) {
+    return s.present && level <= s.top_level && level >= s.top_level - s.depth;
+}
+
 }  // namespace br::gen

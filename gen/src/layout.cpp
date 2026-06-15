@@ -225,4 +225,21 @@ bool validate_vertical_connectivity(uint64_t world_seed, int32_t lvl_lo, int32_t
     return count == total;
 }
 
+ShaftSpec shaft_at(uint64_t world_seed, int64_t cx, int64_t cz) {
+    ShaftSpec s;
+    // Very rare per column (level-independent placement -> tag-separated column hashes).
+    if (stair_hash(world_seed, 0, cx, cz, 0x5AF70ULL) % static_cast<uint64_t>(kShaftDensityN) != 0u)
+        return s;
+    s.present = true;
+    const uint64_t hc = stair_hash(world_seed, 0, cx, cz, 0xDEE9ULL);
+    s.cell_i = static_cast<int>(hc % static_cast<uint64_t>(G));
+    s.cell_j = static_cast<int>((hc / static_cast<uint64_t>(G)) % static_cast<uint64_t>(G));
+    const uint64_t hl = stair_hash(world_seed, 0, cx, cz, 0xAB99ULL);
+    const uint64_t span = static_cast<uint64_t>(2 * kShaftLevelBand + 1);
+    s.top_level = static_cast<int32_t>(hl % span) - kShaftLevelBand;
+    s.depth = kShaftDepthMin +
+              static_cast<int32_t>((hl / span) % static_cast<uint64_t>(kShaftDepthMax - kShaftDepthMin + 1));
+    return s;
+}
+
 }  // namespace br::gen
