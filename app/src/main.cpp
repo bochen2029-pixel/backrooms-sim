@@ -491,7 +491,13 @@ int run_play(const Options& o) {
         const int32_t extraLevel = (s.wanderer.pos.y - contracts::level_base_y(curLevel) > 2.0f)
                                        ? curLevel + 1 : curLevel - 1;  // M28: climbing -> above, else see down
         const contracts::ChunkKey center = contracts::chunk_key_at(curLevel, s.wanderer.pos.x, s.wanderer.pos.z);
-        sm.update(center, extraLevel);
+        const br::gen::ShaftSpec shaft = br::gen::shaft_at(o.seed, center.cx, center.cz);  // M30: open the abyss band over a shaft
+        if (shaft.present && curLevel > shaft.top_level - shaft.depth && curLevel <= shaft.top_level) {
+            const int32_t below = curLevel - shaft.top_level + shaft.depth;  // floors of void beneath
+            sm.update(center, curLevel - ((below < 4) ? below : 4), curLevel);
+        } else {
+            sm.update(center, extraLevel);  // M28: the wanderer's floor + one adjacent
+        }
         contracts::CameraPose cam = wanderer_camera(s, aspect);
         apply_head_bob(cam, s);  // M18 head-bob (view-only)
         if (rtOn) {  // M19: ray-traced path (DXR at 2/3 res, upscaled present)
@@ -1006,7 +1012,13 @@ int run_game(const Options& o) {
             const int32_t extraLevel = (s.wanderer.pos.y - contracts::level_base_y(curLevel) > 2.0f)
                                            ? curLevel + 1 : curLevel - 1;  // M28: climbing -> above, else see down
             const contracts::ChunkKey center = contracts::chunk_key_at(curLevel, s.wanderer.pos.x, s.wanderer.pos.z);
-            sm->update(center, extraLevel);
+            const br::gen::ShaftSpec shaft = br::gen::shaft_at(texSeed, center.cx, center.cz);  // M30: open the abyss band over a shaft
+            if (shaft.present && curLevel > shaft.top_level - shaft.depth && curLevel <= shaft.top_level) {
+                const int32_t below = curLevel - shaft.top_level + shaft.depth;  // floors of void beneath
+                sm->update(center, curLevel - ((below < 4) ? below : 4), curLevel);
+            } else {
+                sm->update(center, extraLevel);  // M28: the wanderer's floor + one adjacent
+            }
             contracts::CameraPose cam = wanderer_camera(s, aspect);
             apply_head_bob(cam, s);  // M18 head-bob (view-only)
             if (model.settings.rt) {

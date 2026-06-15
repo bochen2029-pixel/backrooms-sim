@@ -2862,6 +2862,18 @@ function Invoke-GateM30 {
         Write-Note 'soft-catch fall: seeds 1/7/42 fall the full shaft depth (10/9/9 floors) + land, bounded, bit-identical x2 -- the despair gradient'
     }
 
+    # The abyss renders: look DOWN a shaft with a band of floors resident -> the depths show through
+    # the void (then black where the bounded ring ends = fog-to-black), debug-clean + bounded.
+    Assert-Gate 'abyss render: floors show down a shaft (fog-to-black), bounded + debug-clean' {
+        foreach ($seed in 1, 7) {
+            $r = Invoke-AppCapture @('--abyss', '--seed', "$seed", '--radius', '3', '--width', '480', '--height', '270')
+            if ($r.Exit -ne 0) { throw "abyss seed $seed exited $($r.Exit): $($r.Out)" }
+            # abyss_ok = (debug-clean) AND (resident_deep == (renderDepth+1) x resident_shallow) AND (abyss_diff > 0.5).
+            if ((Get-Metric $r.Out 'abyss_ok') -ne 1) { throw "abyss seed $seed not ok: $($r.Out)" }
+        }
+        Write-Note 'abyss render: looking down a shaft, a band of floors (bounded, e.g. 245 = 5x49) shows the depths through the void (abyss_diff ~21-60), debug-clean -- fog-to-black past the bounded ring'
+    }
+
     # Shafts now exist worldwide; multi-level renders stay debug-clean, and the rare voids
     # (~1/1500) miss the level-0 golden views -> M5 stays bit-identical.
     Assert-Gate 'shaft world renders debug-clean; M5 golden bit-identical (shafts miss the view)' {
