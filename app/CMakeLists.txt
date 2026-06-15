@@ -29,10 +29,12 @@ set_target_properties(backrooms PROPERTIES OUTPUT_NAME "backrooms")
 
 # Windows screensaver: a .scr IS just the exe renamed (it self-detects /s /p /c). Emit Backrooms.scr
 # next to the exe on EVERY build so it is reproducible -- it used to be a one-off manual copy, so a
-# clean build (which wipes build/bin) had nothing to regenerate it and it vanished.
+# clean build (which wipes build/bin) had nothing to regenerate it and it vanished. The copy goes via
+# a NON-FATAL helper: the .scr may be locked because the screensaver is running, and that must never
+# fail the build (we keep the running copy and refresh on the next free build).
 if(WIN32)
   add_custom_command(TARGET backrooms POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:backrooms> $<TARGET_FILE_DIR:backrooms>/Backrooms.scr
-    COMMENT "screensaver: backrooms.exe -> Backrooms.scr"
+    COMMAND ${CMAKE_COMMAND} -DSRC=$<TARGET_FILE:backrooms> -DDST=$<TARGET_FILE_DIR:backrooms>/Backrooms.scr -P ${CMAKE_SOURCE_DIR}/scripts/make_scr.cmake
+    COMMENT "screensaver: backrooms.exe -> Backrooms.scr (skipped if the .scr is in use)"
     VERBATIM)
 endif()

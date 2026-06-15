@@ -70,6 +70,22 @@ cursor recentred each frame — mirrors `run_play`), ESC exits; the idle mouse-m
 playing. The holed floor means you can even fall down shafts/stairs live, and the Shoggoth keeps hunting. Build
 clean, ctest 100/100 (interactive path, mirrors the proven `--play` loop). Desktop `.scr` refreshed.
 
+**Follow-up 5 — nav v3: X-RAY BFS PATHFINDING (ADR-063) + a build-tolerance fix.** Operator: even the v2
+steerer felt like a "robot vacuum" -- with only local feelers it walked into dead-ends and turned around
+(back-and-forth). They asked it to *cheat* with X-ray vision + a pre-computed path. Replaced the local steerer
+with a **global planner + local steerer**: `Stroller::plan` BFS-floods the DETERMINISTIC maze (`app::maze_open`,
+the same generator -- reusing the Shoggoth's proven query) to a far STRONGLY-forward reachable cell, and a
+~9 m look-ahead lead along that path feeds the v2 24-feeler fan for the actual heading. The path is reachable
+by construction, so it **never blindly hits a dead-end**. Two follow-a-path bugs fixed along the way: pure
+pursuit *cut corners into walls* (feed the lead to the fan, don't aim straight), and advancing `path_i` by
+*proximity* let it **stall behind** the walker so the lead pointed backward and it ping-ponged (advance by
+**progress** instead). New `--strollcheck` metrics `stall_frac` (5 s net-progress) + `uturns`: before
+stall_frac **0.42–0.68** (real back-and-forth) -> after **0.10–0.35**, distance ~970–1120 m, faceplant
+0.07–0.22. Gate guards `stall_frac < 0.45` + `faceplant < 0.30`. **Also fixed:** my own `.scr` POST_BUILD
+copy broke the build when the screensaver was RUNNING (locked file) -- now a NON-FATAL `cmake -P` helper
+(`scripts/make_scr.cmake`) keeps the running copy + refreshes on the next free build. `gate M30` green; ctest
+100/100; Desktop `.scr` refreshed.
+
 ---
 
 ## Session 32 — M30 polish ×3: live descent + deep-descent soak + draft telegraph  ✅ — `gate M30` green; model-free Phase IV EXHAUSTED

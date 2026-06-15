@@ -1583,38 +1583,43 @@ struct WalkBot {
     }
 };
 
-// A natural, GOAL-DIRECTED wanderer for the SCREENSAVER (cosmetic, non-gated). The first Stroller
-// fixed the WalkBot faceplanting, but it walked on a CARDINAL grid -- 90-degree turns, cell-by-cell,
-// hugging corridor centre-lines -- which reads as a robot vacuum / 1995-DOOM, not a person. This
-// version traverses like a human: it picks a distant GOAL (a place to head to) and steers toward it
-// at a FREE, continuous angle via CONTEXT STEERING -- a fan of look-ahead feelers that flows the path
-// AROUND walls. In a corridor the feelers funnel it along the hall; in an OPEN room the goal pulls it
-// straight ACROSS (a diagonal cut through the middle), not around the walls. On arrival (or when a
-// dead-end stalls it) it picks a new goal -- so it does real traversals instead of vacuuming the
-// place. Holes/stairs read as blockers (it stays on its floor). WalkBot (the gated soak/PT roamer)
-// is untouched; the Stroller is screensaver-only, so it cannot perturb any gate.
+// A PATH-PLANNING wanderer for the SCREENSAVER (cosmetic, non-gated). The earlier versions navigated
+// LOCALLY (a cardinal grid, then a short look-ahead feeler fan toward a blind goal), so they would
+// commit toward a goal, walk into a concave dead-end the feelers could not see, stall, and turn around
+// -- the back-and-forth the operator saw. This version CHEATS with X-ray vision: it BFS-pathfinds the
+// DETERMINISTIC maze (the very generator the world is built from, via app::maze_open) to a far,
+// guaranteed-REACHABLE cell, then FOLLOWS that route with look-ahead (pure-pursuit) steering -- aiming
+// a few metres ahead along the planned path, so it corners smoothly and, at every instant, already
+// knows where it is going. Because the route is always a valid path, it never reaches a dead-end it
+// has to back out of; it re-plans forward before the path runs out, so the look-ahead never lapses.
+// Holes/stairs are excluded from the path (it stays on its floor). View-only; never touches WorldState.
+// WalkBot stays for the gated soak/PT paths; the Stroller is screensaver-only.
 struct Stroller {
     br::core::Pcg64 rng;
-    br::core::Vec3 goal, last_pos;
-    bool has_goal = false;
-    float desired = 0.0f;          // free-angle steering target (continuous; the camera chases it)
-    float best_to_goal = 1.0e9f;   // closest we have come to the current goal (stall detector)
-    int stall = 0, steer_cd = 0;
+    std::vector<std::pair<int64_t, int64_t>> path;  // the planned cell route (BFS) -- always reachable
+    size_t path_i = 0;
+    int age = 0, stuck = 0, steer_cd = 0;
+    br::core::Vec3 last_pos;
+    float desired = 0.0f;       // continuous free-angle steering target
     double sway = 0.0;
 
-    Stroller(uint64_t seed, br::core::Vec3 spawn) : rng(seed), goal(spawn), last_pos(spawn) {}
+    Stroller(uint64_t seed, br::core::Vec3 spawn) : rng(seed), last_pos(spawn) {}
 
-    static float dir_to_yaw(float dx, float dz) { return std::atan2(dx, dz); }  // matches fwd = (sin, cos)
     static float wrap_pi(float a) {
         const float kTwoPi = 6.2831853f;
         while (a > 3.14159265f) a -= kTwoPi;
         while (a < -3.14159265f) a += kTwoPi;
         return a;
     }
-
-    // Distance (m) to the nearest blocker -- wall / pillar / stair riser / open floor hole (a pit) --
-    // along `yaw`, capped at `maxReach`. Probes at chest height so the floor slab + low risers never
-    // read as blockers; only standing geometry and real openings stop the path.
+    // Is global cell (gi,gj) an open floor hole (a pit / stair mouth) on this floor? -> keep paths off it.
+    static bool cell_hole(uint64_t seed, int32_t level, int64_t gi, int64_t gj) {
+        const int G = br::gen::kCellsPerChunk;
+        const int64_t cx = br::app::floor_div(gi, G), cz = br::app::floor_div(gj, G);
+        return br::gen::floor_hole_at(seed, level, cx, cz,
+                                      static_cast<int>(gi - cx * G), static_cast<int>(gj - cz * G));
+    }
+    // Distance (m) to the nearest blocker along `yaw` (chest-height probe) -- for the local pillar dodge
+    // (pillars sit at cell centres, invisible to the maze graph).
     static float clearance(uint64_t seed, int32_t level, const br::core::Vec3& p, float yaw,
                            float maxReach, const std::vector<br::core::Aabb>& col) {
         const float fx = std::sin(yaw), fz = std::cos(yaw);
@@ -1633,32 +1638,10 @@ struct Stroller {
         return maxReach;
     }
 
-    // Pick a fresh distant destination: scan the circle for long open runs, favour the longest +
-    // mostly-forward (so it commits to real traversals + doesn't ping-pong), and plant a goal near
-    // the end of that run. The goal can be far across an open room or down a long hall.
-    void pick_goal(uint64_t seed, int32_t level, const br::core::Vec3& p, float facing,
-                   const std::vector<br::core::Aabb>& col) {
-        const float kTwoPi = 6.2831853f, maxReach = 26.0f;
-        float bestScore = -1.0e9f, bestYaw = facing, bestClr = 5.0f;
-        for (int k = 0; k < 16; ++k) {
-            const float a = static_cast<float>(k) * (kTwoPi / 16.0f) + 0.13f;   // +offset so it is never axis-locked
-            const float clr = clearance(seed, level, p, a, maxReach, col);
-            if (clr <= 4.0f) continue;                                          // too short to be a destination
-            const float forwardish = 0.5f * (std::cos(wrap_pi(a - facing)) + 1.0f);  // 1 ahead, 0 behind
-            const float jitter = 0.30f * static_cast<float>(rng.next_double());
-            const float score = clr * (0.55f + 0.45f * forwardish) + jitter * maxReach;
-            if (score > bestScore) { bestScore = score; bestYaw = a; bestClr = clr; }
-        }
-        const float dist = (bestClr > 6.0f) ? (bestClr - 1.5f) : 5.0f;          // head near the end of the open run
-        goal.x = p.x + std::sin(bestYaw) * dist;
-        goal.z = p.z + std::cos(bestYaw) * dist;
-        goal.y = p.y;
-        has_goal = true; best_to_goal = 1.0e9f; stall = 0;
-    }
-
-    // Context steering: over a fan of 24 directions, pick the one that best balances heading TOWARD
-    // the goal, staying CLEAR of walls (margin -> it doesn't hug them), and not whipping away from the
-    // current facing (smoothness). Returns a FREE continuous angle -- no cardinal snapping.
+    // Local context steering: over a 24-direction fan, pick the heading that best balances heading
+    // TOWARD `goalDir` (the path's lead), staying CLEAR of walls (margin -> no hugging / faceplant), and
+    // smoothness (don't whip). The PATH guarantees goalDir is never a dead-end; this just keeps the local
+    // movement off the walls and fluid. Returns a FREE continuous angle.
     float steer(uint64_t seed, int32_t level, const br::core::Vec3& p, float goalDir, float facing,
                 const std::vector<br::core::Aabb>& col) {
         const float kTwoPi = 6.2831853f, reach = 6.5f;
@@ -1666,14 +1649,68 @@ struct Stroller {
         for (int k = 0; k < 24; ++k) {
             const float a = static_cast<float>(k) * (kTwoPi / 24.0f);
             const float clr = clearance(seed, level, p, a, reach, col);
-            if (clr < 1.3f) continue;                                  // wall right there -> not an option
-            const float score = 1.7f * std::cos(wrap_pi(a - goalDir))  // mostly: toward the goal
+            if (clr < 1.2f) continue;                                  // wall right there -> not an option
+            const float score = 1.7f * std::cos(wrap_pi(a - goalDir))  // mostly: follow the path's lead
                               + 0.9f * (clr / reach)                   // prefer open lanes (margin from walls)
-                              + 0.5f * std::cos(wrap_pi(a - facing));   // smoothness: don't whip around
+                              + 0.5f * std::cos(wrap_pi(a - facing));   // smoothness
             if (score > best) { best = score; bestYaw = a; }
         }
-        if (best < -1.0e8f) bestYaw = facing + 3.14159265f;            // fully boxed -> turn around
+        if (best < -1.0e8f) bestYaw = goalDir;                         // boxed (rare on a valid path) -> head to it
         return bestYaw;
+    }
+
+    // X-ray BFS over the deterministic maze from (sgi,sgj): flood a bounded window, then path to a FAR,
+    // mostly-FORWARD reachable cell (a long traversal, not a U-turn). Fills `path` (start..goal). Because
+    // the goal is reachable by construction, FOLLOWING the path can never hit a dead-end.
+    void plan(uint64_t seed, int32_t level, int64_t sgi, int64_t sgj, float facing) {
+        constexpr int R = 26, W = 2 * R + 1;                       // ~104 m look-ahead window
+        std::vector<int8_t> par(static_cast<size_t>(W) * W, -1);   // -1 unvisited; 4 start; else dir 0..3 stepped IN
+        auto idx = [&](int64_t gi, int64_t gj) -> int {
+            const int di = static_cast<int>(gi - sgi) + R, dj = static_cast<int>(gj - sgj) + R;
+            return (di < 0 || di >= W || dj < 0 || dj >= W) ? -1 : di * W + dj;
+        };
+        std::unordered_map<int64_t, br::gen::ChunkLayout> cache;
+        std::queue<std::pair<int64_t, int64_t>> q;
+        static const int dgi[4] = {1, -1, 0, 0}, dgj[4] = {0, 0, 1, -1};
+        par[static_cast<size_t>(idx(sgi, sgj))] = 4;
+        q.push({sgi, sgj});
+        int64_t bgi = sgi, bgj = sgj; float bestScore = -1.0e9f;
+        while (!q.empty()) {
+            const auto cur = q.front(); q.pop();
+            const int64_t ci = cur.first, cj = cur.second, ddi = ci - sgi, ddj = cj - sgj;
+            const float d2 = static_cast<float>(ddi * ddi + ddj * ddj);
+            if (d2 > 1.0f) {
+                const float dirYaw = std::atan2(static_cast<float>(ddi), static_cast<float>(ddj));
+                const float cosrel = std::cos(wrap_pi(dirYaw - facing));                  // 1 ahead, -1 behind
+                const float fclamp = (cosrel > 0.0f) ? cosrel : 0.0f;                     // forward cone only
+                const float score = std::sqrt(d2) * (0.15f + 0.85f * fclamp)              // STRONGLY prefer far + FORWARD
+                                  + 0.3f * static_cast<float>(rng.next_double());          // a touch of variety
+                if (score > bestScore) { bestScore = score; bgi = ci; bgj = cj; }
+            }
+            for (int d = 0; d < 4; ++d) {
+                if (!br::app::maze_open(seed, ci, cj, d, cache, level)) continue;
+                const int64_t ni = ci + dgi[d], nj = cj + dgj[d];
+                const int ix = idx(ni, nj);
+                if (ix < 0 || par[static_cast<size_t>(ix)] != -1) continue;
+                if (cell_hole(seed, level, ni, nj)) continue;                              // stay off pits/stairs
+                par[static_cast<size_t>(ix)] = static_cast<int8_t>(d);
+                q.push({ni, nj});
+            }
+        }
+        // Reconstruct start..goal by walking the parent directions back, then reverse.
+        path.clear(); path_i = 0;
+        std::vector<std::pair<int64_t, int64_t>> rev;
+        int64_t ci = bgi, cj = bgj;
+        for (int guard = 0; guard < W * W; ++guard) {
+            rev.push_back({ci, cj});
+            if (ci == sgi && cj == sgj) break;
+            const int ix = idx(ci, cj); if (ix < 0) break;
+            const int8_t pd = par[static_cast<size_t>(ix)];
+            if (pd < 0 || pd > 3) break;
+            ci -= dgi[pd]; cj -= dgj[pd];
+        }
+        for (auto it = rev.rbegin(); it != rev.rend(); ++it) path.push_back(*it);
+        if (path.empty()) path.push_back({sgi, sgj});
     }
 
     contracts::InputCommand step(const br::core::WorldState& s, uint64_t seed,
@@ -1684,31 +1721,56 @@ struct Stroller {
         const float face = s.wanderer.yaw;
 
         const float mdx = p.x - last_pos.x, mdz = p.z - last_pos.z;
-        const float moved = std::sqrt(mdx * mdx + mdz * mdz);
         last_pos = p;
+        stuck = (std::sqrt(mdx * mdx + mdz * mdz) < 0.004f) ? stuck + 1 : 0;
+        ++age;
 
-        // Goal management: arrived, wedged, or not getting any closer for a while -> pick a new one.
-        float gdx = goal.x - p.x, gdz = goal.z - p.z;
-        float distGoal = std::sqrt(gdx * gdx + gdz * gdz);
-        if (distGoal < best_to_goal - 0.05f) { best_to_goal = distGoal; stall = 0; } else { ++stall; }
-        if (moved < 0.004f) stall += 2;
-        if (!has_goal || distGoal < 2.2f || stall > 420) {
-            pick_goal(seed, lvl, p, face, col);
-            gdx = goal.x - p.x; gdz = goal.z - p.z; distGoal = std::sqrt(gdx * gdx + gdz * gdz);
+        int64_t sgi, sgj; br::app::world_to_cell(p.x, p.z, sgi, sgj);
+
+        // Re-plan only when we've REACHED the planned goal (or wedged, or as a stale-safety) -- NOT
+        // continuously. Committing to each full path is what stops the goal flip-flopping behind us and
+        // U-turning. The new path starts at the current cell, so the hand-off is seamless.
+        const bool reached = (path_i + 1 >= path.size());
+        if (path.empty() || (reached && age > 20) || stuck > 90 || age > 1500) {
+            plan(seed, lvl, sgi, sgj, face);
+            age = 0; if (stuck > 90) stuck = 0;
         }
-        const float goalDir = dir_to_yaw(gdx, gdz);
+        // Advance along the path by PROGRESS, not proximity: step to the next waypoint whenever it is no
+        // farther than the current one. Robust to corner-cutting, so path_i never stalls BEHIND the walker
+        // -- a stalled index is what made the look-ahead point backward and the walker ping-pong.
+        while (path_i + 1 < path.size()) {
+            const float a0x = br::app::cell_center(path[path_i].first), a0z = br::app::cell_center(path[path_i].second);
+            const float a1x = br::app::cell_center(path[path_i + 1].first), a1z = br::app::cell_center(path[path_i + 1].second);
+            const float d0 = (a0x - p.x) * (a0x - p.x) + (a0z - p.z) * (a0z - p.z);
+            const float d1 = (a1x - p.x) * (a1x - p.x) + (a1z - p.z) * (a1z - p.z);
+            if (d1 <= d0 + 0.01f) ++path_i; else break;
+        }
+        // Look-ahead lead: a point ~Ld metres ALONG the path, AROUND corners. This is fed to the steer
+        // fan below (not straight to the walker), so it ANTICIPATES the next turn -- the fan veers toward
+        // the open lane EARLY instead of marching at the corner wall, which is what keeps the camera off
+        // the walls in tight bends (low faceplant). The fan's clearance term stops it driving into a wall.
+        const float Ld = 9.0f;
+        float ax = br::app::cell_center(path[path_i].first), az = br::app::cell_center(path[path_i].second);
+        float acc = std::sqrt((ax - p.x) * (ax - p.x) + (az - p.z) * (az - p.z));
+        for (size_t li = path_i; acc < Ld && li + 1 < path.size(); ++li) {
+            const float x0 = br::app::cell_center(path[li].first), z0 = br::app::cell_center(path[li].second);
+            const float x1 = br::app::cell_center(path[li + 1].first), z1 = br::app::cell_center(path[li + 1].second);
+            acc += std::sqrt((x1 - x0) * (x1 - x0) + (z1 - z0) * (z1 - z0));
+            ax = x1; az = z1;
+        }
+        const float pathDir = std::atan2(ax - p.x, az - p.z);   // where the path leads (a few corners ahead)
 
-        // Steering is recomputed a few times a second; the camera smoothly chases `desired` in between.
-        if (steer_cd <= 0) { desired = steer(seed, lvl, p, goalDir, face, col); steer_cd = 6; }
+        // Steer toward the path's lead with the local feeler fan -> it follows the guaranteed route but
+        // flows down corridor centres + around pillars instead of grazing them. Recomputed a few times a
+        // second; smoothly chased in between.
+        if (steer_cd <= 0) { desired = steer(seed, lvl, p, pathDir, face, col); steer_cd = 5; }
         --steer_cd;
-
         sway += 0.010;
-        const float target = desired + 0.035f * static_cast<float>(std::sin(sway));  // a subtle, human weave
+        const float target = desired + 0.03f * static_cast<float>(std::sin(sway));  // a subtle human weave
         const float dyaw = wrap_pi(target - face);
-        in.look_yaw = br::core::clampf(dyaw, -0.035f, 0.035f);  // a calm CONTINUOUS turn -- free angle, no snapping
-
+        in.look_yaw = br::core::clampf(dyaw, -0.035f, 0.035f);   // a calm CONTINUOUS turn -- free angle, no snapping
         const float ad = std::fabs(dyaw);
-        in.move_z = (ad < 0.5f) ? 1.0f : (ad > 1.2f ? 0.25f : 1.0f - 0.75f * (ad - 0.5f) / 0.7f);  // keep flowing; only ease a hard turn
+        in.move_z = (ad < 0.6f) ? 1.0f : (ad > 1.3f ? 0.3f : 1.0f - 0.7f * (ad - 0.6f) / 0.7f);  // keep flowing; ease only a hard turn
         return in;
     }
 };
@@ -1742,6 +1804,14 @@ int run_strollcheck(const Options& o) {
     // 180/270) over moving ticks. A 90-degree-locked vacuum sits ~0; a human moving at free angles
     // (diagonal cuts, smooth continuous turns) sits well off zero.
     double offcard_sum = 0.0; uint64_t move_ticks = 0;
+    // Back-and-forth check (the operator's complaint): sample the heading once a second and count
+    // U-turns -- a net >135-degree flip from a second ago. Blind nav dead-ends a lot (many U-turns);
+    // a planned path almost never has to reverse. 300 samples over a 36000-tick run.
+    float uturn_ref = s.wanderer.yaw; uint64_t uturns = 0; int uturn_t = 0;
+    // True back-and-forth check: net displacement over a 5 s window. A walker that keeps traversing
+    // advances; one stuck oscillating returns near where it was. Count ticks whose 5 s-ago position is
+    // < 4 m away (effectively not getting anywhere). Low = it makes real progress, not ping-pong.
+    std::vector<float> ringx(600, 0.0f), ringz(600, 0.0f); uint64_t stall_ct = 0;
     for (uint32_t t = 0; t < ticks; ++t) {
         const contracts::ChunkKey here = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
         if (here != cached) rebuild(here);
@@ -1778,6 +1848,18 @@ int run_strollcheck(const Options& o) {
             offcard_sum += static_cast<double>(std::min(m, 1.5707963f - m));
             ++move_ticks;
         }
+        if (++uturn_t >= 120) {  // ~1 s: did the heading flip > 135 degrees (a reversal / dead-end turn-around)?
+            uturn_t = 0;
+            float du = s.wanderer.yaw - uturn_ref;
+            while (du > 3.14159265f) du -= 6.2831853f; while (du < -3.14159265f) du += 6.2831853f;
+            if (std::fabs(du) > 2.356f) ++uturns;
+            uturn_ref = s.wanderer.yaw;
+        }
+        if (t >= 600) {
+            const float bx = s.wanderer.pos.x - ringx[t % 600], bz = s.wanderer.pos.z - ringz[t % 600];
+            if (bx * bx + bz * bz < 16.0f) ++stall_ct;   // moved < 4 m net in the last 5 s
+        }
+        ringx[t % 600] = s.wanderer.pos.x; ringz[t % 600] = s.wanderer.pos.z;
         const float px = s.wanderer.pos.x, pz = s.wanderer.pos.z;
         if (px < minx) minx = px; if (px > maxx) maxx = px;
         if (pz < minz) minz = pz; if (pz > maxz) maxz = pz;
@@ -1794,14 +1876,17 @@ int run_strollcheck(const Options& o) {
     std::printf("explore_span_m: %.1f\n", static_cast<double>(span));
     std::printf("faceplant_ratio: %.4f\n", facer);
     std::printf("offcardinal_deg: %.2f\n", offcardDeg);
+    const double stallFrac = (ticks > 600) ? static_cast<double>(stall_ct) / static_cast<double>(ticks - 600) : 0.0;
+    std::printf("uturns: %llu\n", static_cast<unsigned long long>(uturns));  // reversals over the run (lower = less back-and-forth)
+    std::printf("stall_frac: %.4f\n", stallFrac);
     std::printf("bob_amp_cm: %.2f\n", static_cast<double>(bobAmpCm));
     std::printf("dip_spread_cm: %.2f\n", static_cast<double>(dipSpreadCm));
     std::printf("nod_deg: %.2f\n", static_cast<double>(nodDeg));
     std::printf("final_level: %d\n", contracts::level_from_y(s.wanderer.pos.y));
-    // Natural: covers ground + explores + rarely faceplants; moves at FREE angles (off-cardinal, not a
-    // 90-degree vacuum); AND a clear, organic vertical bob (visible + the footfall dips VARY in depth).
-    const bool ok = (dist > static_cast<float>(ticks) * 0.012f) && (span > 40.0f) && (facer < 0.12) &&
-                    (offcardDeg > 6.0) && (bobAmpCm > 3.0f) && (dipSpreadCm > 0.8f);
+    // Natural + PLANNED: covers ground, explores, makes real net progress (low stall = it doesn't
+    // ping-pong in place), at FREE angles (off-cardinal), rarely faceplants, with a clear organic bob.
+    const bool ok = (dist > static_cast<float>(ticks) * 0.012f) && (span > 40.0f) && (facer < 0.30) &&
+                    (stallFrac < 0.45) && (offcardDeg > 6.0) && (bobAmpCm > 3.0f) && (dipSpreadCm > 0.8f);
     std::printf("stroll_ok: %d\n", ok ? 1 : 0);
     return ok ? 0 : 6;
 }

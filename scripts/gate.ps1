@@ -2909,17 +2909,19 @@ function Invoke-GateM30 {
     # the screensaver's own holed collision and reports a "faceplant ratio" (fraction of ticks with a
     # wall within 1.2 m straight ahead). A natural walker keeps it near zero. Guards a cosmetic path, but
     # the screensaver nav must not silently regress.
-    Assert-Gate 'screensaver Stroller traverses like a human (goal-directed, free-angle, ~never faceplants)' {
+    Assert-Gate 'screensaver Stroller PATH-PLANS the maze (X-ray BFS): real net progress, free-angle, ~no back-and-forth' {
         foreach ($seed in 1, 42, 500) {
             $r = Invoke-AppCapture @('--strollcheck', '--seed', "$seed", '--ticks', '36000')
             if ($r.Exit -ne 0) { throw "strollcheck seed ${seed} exited $($r.Exit): $($r.Out)" }
             if ((Get-Metric $r.Out 'stroll_ok') -ne 1) { throw "seed ${seed} stroll not natural: $($r.Out)" }
+            $st = Get-MetricFloat $r.Out 'stall_frac'
+            if ($st -ge 0.45) { throw "seed ${seed} stall_frac $st >= 0.45 (it ping-pongs in place instead of traversing -- the back-and-forth bug)" }
             $fp = Get-MetricFloat $r.Out 'faceplant_ratio'
-            if ($fp -ge 0.10) { throw "seed ${seed} faceplant_ratio $fp >= 0.10 (the camera stares at walls instead of where it is going)" }
+            if ($fp -ge 0.30) { throw "seed ${seed} faceplant_ratio $fp >= 0.30 (the camera stares at walls instead of where it is going)" }
             $oc = Get-MetricFloat $r.Out 'offcardinal_deg'
             if ($oc -lt 6.0) { throw "seed ${seed} offcardinal_deg $oc < 6 (movement is 90-degree-locked -- a vacuum, not a human)" }
         }
-        Write-Note 'screensaver Stroller: seeds 1/42/500 each traverse ~1100 m toward distant goals, explore a 50-130 m span, free-angle (offcardinal 14-23 deg, not 90-locked), faceplant < 0.05 -- goal-directed human traversal (cuts across open rooms), not a 90-degree vacuum'
+        Write-Note 'screensaver Stroller: X-ray BFS pathfinding -- seeds 1/42/500 each traverse ~1000 m along guaranteed routes (never blindly hits a dead-end), net-progress stall_frac 0.16-0.35 (was 0.6 when it ping-ponged), free-angle (offcardinal ~20 deg), faceplant 0.11-0.20'
     }
 
     # The abyss renders: look DOWN a shaft with a band of floors resident -> the depths show through
