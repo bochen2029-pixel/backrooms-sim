@@ -72,7 +72,7 @@ struct Options {
     bool headless = false, windowed = false, scene = false, sim = false, stream = false;
     bool walkbot = false, topdown = false, version = false, shot = false;
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
-    bool biomeat = false, descend = false, ascend = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
+    bool biomeat = false, descend = false, ascend = false, vstream = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
     bool soak = false, crash_test = false, director_probe = false;
     bool director_record = false, director_replay = false;
@@ -153,6 +153,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--biomeat") == 0) o.biomeat = true;
         else if (std::strcmp(a, "--descend") == 0) o.descend = true;
         else if (std::strcmp(a, "--ascend") == 0) o.ascend = true;
+        else if (std::strcmp(a, "--vstream") == 0) o.vstream = true;
         else if (std::strcmp(a, "--post") == 0) o.post = true;
         else if (std::strcmp(a, "--dxr-probe") == 0) o.dxr_probe = true;
         else if (std::strcmp(a, "--dxr-test") == 0) o.dxr_test = true;
@@ -2732,6 +2733,84 @@ int run_ascend(const Options& o) {
     return climbed ? 0 : 6;
 }
 
+// ----- M28: vertical-streaming see-through proof (headless) -------------------
+// Finds a level-0 up-stair, points a camera up at its ceiling hole, and renders the
+// scene twice: with TWO floors resident (level 0 + 1) and with one. Both must be
+// debug-clean; two-floor residency must be exactly 2x the one-floor ring (bounded);
+// and the renders must DIFFER (the floor above shows through the hole = see-through).
+int run_vstream(const Options& o) {
+    using namespace br::core;
+    int64_t scx = 0, scz = 0;
+    int ci = 0, cj = 0;
+    bool found = false;
+    for (int64_t r = 0; r < 64 && !found; ++r)
+        for (int64_t cz = -r; cz <= r && !found; ++cz)
+            for (int64_t cx = -r; cx <= r && !found; ++cx) {
+                const br::gen::StairSpec st = br::gen::stair_at(o.seed, 0, cx, cz);
+                if (st.present && st.cell_i >= 1 && st.cell_i <= 6 && st.cell_j >= 1 && st.cell_j <= 6) {
+                    scx = cx; scz = cz; ci = st.cell_i; cj = st.cell_j; found = true;
+                }
+            }
+    if (!found) { std::printf("no_stair_found: 1\n"); return 6; }
+
+    const float cs = br::gen::kCellSize;
+    // Stand on the clear low approach (-X of the risers, which start 0.3 m in) and look
+    // straight up through the ceiling hole the up-stair cuts -> level 1 shows through it.
+    const float camx = static_cast<float>(scx) * contracts::kChunkSize + static_cast<float>(ci) * cs + 0.15f;
+    const float camz = static_cast<float>(scz) * contracts::kChunkSize + (static_cast<float>(cj) + 0.5f) * cs;
+    const float camy = contracts::level_base_y(0) + kWandererHalfHeight + 0.02f + kEyeHeight;
+    contracts::CameraPose cam{};
+    cam.pos[0] = camx; cam.pos[1] = camy; cam.pos[2] = camz;
+    cam.yaw = 0.0f; cam.pitch = 1.5f;  // look straight up through the ceiling hole
+    cam.fov_y = 1.2217305f;
+    cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+    const contracts::ChunkKey center = contracts::chunk_key_at(0, camx, camz);
+
+    auto render_levels = [&](int32_t extra, std::vector<uint8_t>& rgba, size_t& resident, uint32_t& dbg) -> bool {
+        Renderer renderer;
+        if (!renderer.init_headless(o.width, o.height)) { std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return false; }
+        renderer.set_texture_seed(o.seed);
+        br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+        sm.update(center, extra);
+        sm.wait_idle();
+        sm.update(center, extra);
+        resident = sm.resident_count();
+        uint32_t drawn = 0;
+        const size_t target = sm.resident_count();
+        for (int w = 0; w < 1200 && static_cast<size_t>(drawn) < target; ++w)
+            if (!renderer.render_chunks(cam, sm.resident(), 64u, 0u, &drawn)) { std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); return false; }
+        if (!renderer.render_chunks(cam, sm.resident(), 64u, 0u, &drawn)) { std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); return false; }
+        FrameImage img;
+        if (!renderer.readback(img)) { std::fprintf(stderr, "readback: %s\n", renderer.last_error().c_str()); return false; }
+        rgba = img.rgba;
+        dbg = renderer.debug_error_count();
+        return true;
+    };
+
+    std::vector<uint8_t> rgba2, rgba1;
+    size_t res2 = 0, res1 = 0;
+    uint32_t dbg2 = 0, dbg1 = 0;
+    if (!render_levels(1, rgba2, res2, dbg2)) return 1;   // level 0 + 1: see up through the ceiling hole
+    if (!render_levels(0, rgba1, res1, dbg1)) return 1;   // level 0 only (extra == center.level -> single ring)
+
+    double acc = 0.0;
+    const size_t n = (rgba1.size() < rgba2.size()) ? rgba1.size() : rgba2.size();
+    for (size_t i = 0; i < n; ++i) {
+        const int d = static_cast<int>(rgba1[i]) - static_cast<int>(rgba2[i]);
+        acc += (d < 0) ? -d : d;
+    }
+    const double see_through = (n > 0) ? acc / static_cast<double>(n) : 0.0;
+
+    std::printf("stair_chunk: %lld %lld cell %d %d\n", static_cast<long long>(scx), static_cast<long long>(scz), ci, cj);
+    std::printf("resident_1level: %llu\n", static_cast<unsigned long long>(res1));
+    std::printf("resident_2level: %llu\n", static_cast<unsigned long long>(res2));
+    std::printf("see_through_diff: %.4f\n", see_through);
+    std::printf("debug_error_count: %u\n", dbg1 + dbg2);
+    const bool ok = (dbg1 == 0 && dbg2 == 0) && (res1 > 0) && (res2 == res1 * 2) && (see_through > 0.5);
+    std::printf("vstream_ok: %d\n", ok ? 1 : 0);
+    return ok ? 0 : 6;
+}
+
 // ----- M9 DXR capability probe: device tier + DXC shader compilation ----------
 int run_dxr_probe(const Options&) {
     const br::render_dxr::DxrCaps c = br::render_dxr::probe_caps();
@@ -3350,6 +3429,7 @@ int main(int argc, char** argv) {
     if (o.biomeat)    return run_biomeat(o);
     if (o.descend)    return run_descend(o);
     if (o.ascend)     return run_ascend(o);
+    if (o.vstream)    return run_vstream(o);
     if (o.dxr_probe)  return run_dxr_probe(o);
     if (o.dxr_test)   return run_dxr_test(o);
     if (o.dxr_depth)  return run_dxr_depth(o);

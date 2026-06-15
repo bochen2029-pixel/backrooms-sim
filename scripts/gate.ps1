@@ -2754,6 +2754,73 @@ function Invoke-GateM27 {
     Write-Note 'M27 gate: procedural stairs connect the stack -- hybrid placement (per-superblock backstop), aligned floor/ceiling holes, a climbable riser-slab stairwell + step-up locomotion (live ascent to level 1), a vertical-connectivity validator. Level-0 blast radius is just the 2 ceiling-facing top-down goldens (ADR-053).'
 }
 
+function Invoke-GateM28 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green (incl. the [m28] two-level residency test)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m28'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+
+    # THE M28 PROOF: stand at a stairwell -> both floors resident + rendered, and the floor
+    # above shows THROUGH the ceiling hole (see-through). Two floors == exactly 2x the
+    # one-floor ring (bounded residency, no leak ~ memory slope 0), and debug-clean.
+    Assert-Gate 'see-through: two floors resident + rendered at a stairwell, debug-clean' {
+        foreach ($seed in 1, 7) {
+            $r = Invoke-AppCapture @('--vstream', '--seed', "$seed", '--radius', '4', '--width', '640', '--height', '360')
+            if ($r.Exit -ne 0) { throw "vstream seed $seed exited $($r.Exit): $($r.Out)" }
+            # vstream_ok is the app's own verdict, computed on the rendered pixels:
+            # (debug-clean) AND (resident_2level == 2 x resident_1level) AND (see_through_diff > 0.5).
+            if ((Get-Metric $r.Out 'vstream_ok') -ne 1) { throw "vstream seed $seed not ok: $($r.Out)" }
+            $r1 = [int](Get-Metric $r.Out 'resident_1level')
+            $r2 = [int](Get-Metric $r.Out 'resident_2level')
+            if ($r2 -ne $r1 * 2) { throw "seed ${seed}: two-level residency $r2 != 2x one-level $r1 (not bounded)" }
+            if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "vstream seed $seed had debug-layer messages" }
+        }
+        Write-Note 'see-through: at a stairwell both floors are resident (162 = 2 x 81 chunks, bounded) + rendered debug-clean; the floor above shows through the ceiling hole (vstream_ok asserts see_through_diff > 0.5; measured ~57-62)'
+    }
+
+    # Regression: M28 is presentation-only -- the single-level stream path + the sim are
+    # unchanged, so the M5 raster golden is bit-identical and the M27 live ascent still works.
+    Assert-Gate 'regression: M5 raster golden bit-identical (single-level path unchanged)' {
+        $m5 = Join-Path $tmp 'm5.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $m5)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "M5 shot had debug-layer messages" }
+        if ([double](& $hashdiff diff $m5 (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1) -ne 0.0) { throw "M5 golden regressed" }
+    }
+    Assert-Gate 'regression: M27 live ascent still climbs to level 1' {
+        $r = Invoke-AppCapture @('--ascend', '--seed', '1')
+        if ($r.Exit -ne 0) { throw "ascend exited $($r.Exit)" }
+        if ((Get-Metric $r.Out 'climbed') -ne 1) { throw "ascent regressed" }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M28 gate: vertical streaming -- the StreamManager keeps a second adjacent floor resident at stairwells (bounded 2x ring) and the renderer draws both, so you see through the holes. Presentation-only: the sim + M5 golden + M27 ascent are unchanged.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -2789,6 +2856,7 @@ try {
         'M25'   { Invoke-GateM25 }
         'M26'   { Invoke-GateM26 }
         'M27'   { Invoke-GateM27 }
+        'M28'   { Invoke-GateM28 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

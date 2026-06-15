@@ -24,12 +24,19 @@ and press on. Minimal meta — no scaffolding-on-scaffolding; the bulk of effort
   `validate_vertical_connectivity` (Z flood-fill). Proven: live ascent to level 1 (`--ascend`, bit-id ×2),
   `--descend` still ↓ to -1, walk-bot 1 km × 0 stuck, only the 2 m4 top-down goldens re-baselined
   (ADR-053). Commits `e7543bf` → `70f0eef` → the gate commit.
-- 🔨 **NEXT = M28 (vertical streaming + see-through).** Two-floor residency at a stairwell so the live
-  ascent crosses the seam seamlessly (currently the live walk streams a single level via
-  `level_from_y(pos.y)` — the ascent works headlessly but a live climb needs both floors resident at the
-  seam) + render down through a floor hole. **Gate:** stand at a stairwell, both floors resident +
-  rendered, debug-clean, memory-slope ~0. **Deps:** M27 (done). See `_run_state/ROADMAP.md` §2. Then
-  **M29** (per-floor Shoggoth; needs KEEL sidecar :7071), **M30** (open shafts).
+- ✅ **M28 (vertical streaming + see-through) DONE — `m28-green`, gate exits 0, tagged + pushed.**
+  `StreamManager::update(center, extra_level)` keeps a 2nd ring at one adjacent level (climbing → above,
+  else below); 1-arg path delegates → single-level bit-identical. See-through automatic (verts baked at
+  `level_base_y`, cache keyed by full `ChunkKey`). Proven via `--vstream` (both floors resident `2x` ring
+  bounded + rendered debug-clean, floor above visible through the hole `see_through_diff ~57-62`); M5 golden
+  + M27 ascent intact. `[m28]` test. ADR-054. Commits `050d08c` → `--vstream`+gate → gate commit.
+- 🔨 **NEXT = M29 (per-floor Shoggoth).** Confine the Shoggoth to its level, seed it per `(seed, level)`,
+  and let descending a stair escape it (it can't follow across the seam); record→replay across a descent
+  **bit-exact with the model OFFLINE** (the M21 sacred gate, extended to verticality). **NEEDS the KEEL
+  sidecar at :7071** (`C:\keel-sidecar-7071\start.cmd`; NEVER :7070) for the live-brain path — but the
+  determinism gate runs model-offline. Study M20/M21's shoggoth (`app/src/main.cpp` run_shoggoth*, the
+  event-log→effective-tick design) before changing it. **Deps:** M27. See `_run_state/ROADMAP.md` §2. Then
+  **M30** (open shafts & the abyss — telegraphed bounded soft-catch fall + fog render + deep-descent soak).
 
 ## THE LOOP (per ROADMAP §0)
 pick next step → tight change manifest (≤400 LOC; sim core `/fp:strict`, seeded PCG64, no wall-clock;

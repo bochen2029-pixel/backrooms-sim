@@ -80,9 +80,14 @@ as the oracle, `m<N>-green` as the revert anchor, SESSION_LOG/PROGRESS/memory as
   live ascent climbs to level 1, bit-identical ×2 (`--ascend`); `--descend` still reaches level -1;
   2-D connectivity holds with holes; walk-bot 1 km × 0 stuck; blast radius = only the 2 ceiling-facing
   top-down goldens, re-baselined via goldgen (**ADR-053**). **Deps:** M26.
-- `[ ] M28` · **Vertical streaming + see-through.** Two-floor residency at stairwells (current level + the
-  connected adjacent level near a stair); look up/down a stairwell debug-clean; bounded memory (INV-4).
-  **Gate:** stand at a stairwell, both floors resident + rendered, debug-clean, memory-slope ~0. **Deps:** M27.
+- `[x] M28` · **Vertical streaming + see-through** (`m28-green`). `StreamManager::update(center, extra_level)`
+  keeps a second concentric ring at one adjacent level (chosen by stance: climbing → `level+1`, else
+  `level-1` to see down); the 1-arg path delegates to single-level so run_game/soak/tests stay bit-identical.
+  See-through is automatic (each chunk renders at its baked world-Y; cache keyed by full `ChunkKey`).
+  **Gate PASSED:** `[m28]` two-level residency (exactly `2x` ring, bounded, evicts on switch); `--vstream`
+  proves both floors resident + rendered debug-clean at a stairwell with the floor above visible through the
+  hole (`see_through_diff ~57-62`); M5 golden bit-identical + M27 ascent intact (presentation-only). ADR-054.
+  **Deps:** M27.
 - `[ ] M29` · **Per-floor Shoggoth.** Confined to its level; seeded per `(seed, level)`; descending (stairs
   or a shaft) **escapes** the current one; each floor has its own. **Gate:** the shoggoth never leaves its
   level; record→replay across a descent **bit-exact, model offline**. **Deps:** M27. **Needs the KEEL

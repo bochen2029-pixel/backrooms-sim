@@ -4,6 +4,42 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 30 — M28: Vertical streaming + see-through  ✅ COMPLETE — 🏷️ `m28-green`
+
+`gate.ps1 -Milestone M28` exits 0; tagged `m28-green` + pushed. **You can stand at a stairwell and see the
+floor above through the hole** — two floors are resident + rendered at once. Third Phase IV milestone.
+
+**Done (M28).** `StreamManager::update(center, extra_level)` keeps TWO concentric rings — the wanderer's
+level and one adjacent level — picking the adjacent level by stance: in the upper part of the 4 m level cell
+(`pos.y - level_base_y > 2`, i.e. climbing) it pre-loads `level+1` (seamless arrival); otherwise `level-1`
+(see DOWN through floor holes — the despair gradient). The 1-arg `update(center)` delegates to
+`update(center, center.level)`, so `run_game`/soak/tests stay **bit-identical** (only the live walk opts in).
+**See-through needed no renderer change:** chunk verts are already baked at their `level_base_y` and the GPU
+upload cache is keyed by the full `ChunkKey`, so two levels at the same `(cx,cz)` draw at their true world-Y
+and the M27 aligned holes line up to look straight through. Presentation-only — the ring never touches
+`WorldState` (INV-1), residency is bounded by `2*(2r+1)^2` (INV-4), collision stays single-level.
+
+**Gate.** clean build (no warnings) + full ctest (96; incl. a new `[m28]` test: two-level residency is
+exactly `2x` the one-level ring, evicts the old adjacent level on switch, 1-arg path single-level) + **the
+see-through proof** (`--vstream`: stand at a real stairwell, render one-floor vs two-floor; residency
+`162 = 2x81` bounded, both debug-clean, the two-floor render differs by `see_through_diff ~57-62` = the floor
+above is visibly drawn through the ceiling hole) + **regressions** (M5 raster golden **bit-identical**; M27
+live ascent still climbs to level 1) + INV-5/inventory.
+
+**3 green increments** (`050d08c` two-level residency in StreamManager + run_play/run_game + `[m28]` test ·
+`--vstream` see-through mode + `Invoke-GateM28` · this gate). **No new dependency; no golden change**
+(presentation-only — the second ring is off in every fixed-scene/golden render). ADR-054.
+
+**Gotchas.** (1) The first `--vstream` camera sat at the stair-cell centre — **inside** the staircase
+geometry — so the upward view was blocked and `see_through_diff` was 0; moved it to the clear low-approach
+strip (−X of the risers) looking straight up. (2) PowerShell parse trap: `"...$seed: ..."` reads `$seed:` as
+a drive/scope-qualified variable — write `${seed}:` (or avoid `:` right after a `$var`).
+
+**Next: M29 — per-floor Shoggoth** (confined to its level, seeded per `(seed, level)`, descend a stair to
+escape it; record→replay bit-exact with the model offline). **Needs the KEEL sidecar :7071.** Per ROADMAP §2.
+
+---
+
 ## Session 29 — M27: Procedural stairs (the stack is connected + climbable)  ✅ COMPLETE — 🏷️ `m27-green`
 
 `gate.ps1 -Milestone M27` exits 0; tagged `m27-green` + pushed. **The floors are now joined** — a wanderer
