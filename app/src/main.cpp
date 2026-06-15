@@ -74,6 +74,7 @@ struct Options {
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
     bool biomeat = false, descend = false, ascend = false, vstream = false, shaftfall = false, abyss = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
     bool livedescent = false;   // M30: headless proof that the live-walk holed floor lets you fall through a down-stair hole + land
+    bool descentsoak = false;   // M30: deep-descent soak (repeated deep falls; bounded memory/residency + determinism)
     bool screensaver = false, scr_config = false;   // Windows .scr: /s run, /p <hwnd> preview, /c config
     std::string scr_preview;                         // /p <hwnd>: parent HWND to render the preview into
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
@@ -170,6 +171,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--vstream") == 0) o.vstream = true;
         else if (std::strcmp(a, "--shaftfall") == 0) o.shaftfall = true;
         else if (std::strcmp(a, "--livedescent") == 0) o.livedescent = true;
+        else if (std::strcmp(a, "--descentsoak") == 0) o.descentsoak = true;
         else if (std::strcmp(a, "--abyss") == 0) o.abyss = true;
         else if (std::strcmp(a, "--post") == 0) o.post = true;
         else if (std::strcmp(a, "--dxr-probe") == 0) o.dxr_probe = true;
@@ -3043,6 +3045,131 @@ int run_livedescent(const Options& o) {
     return (solid_holds && descended) ? 0 : 6;
 }
 
+// ----- M30: DEEP-DESCENT SOAK (headless, long-haul) ---------------------------
+// The ROADMAP §3 DONE criterion: "a deep-descent soak holds determinism + bounded memory."
+// Repeatedly falls the wanderer down a deep shaft (5..10 floors) using the FULL live machinery
+// -- the holed per-cell floor (build_walk_collision, per-level rebuild), the abyss band-residency
+// (StreamManager::update(center, lo, hi)), and a headless render each frame -- so every descent
+// churns level transitions, streaming load/evict, collision rebuilds, and GPU uploads. On landing
+// it teleports back to the shaft top and falls again (N cycles), which is what stresses the new
+// vertical paths over the long haul. Asserts: many cycles completed (each reaches the bottom = no
+// stuck), residency stays BOUNDED (the band never balloons), process memory is FLAT (no leak), and
+// -- run under --ticks -- the world hash is reproducible (the gate runs it twice). Model-free.
+int run_descentsoak(const Options& o) {
+    using namespace std::chrono;
+    using namespace br::core;
+    // The deepest interior shaft near origin -> the deepest single drop we can soak deterministically.
+    int64_t scx = 0, scz = 0; br::gen::ShaftSpec sh; bool found = false;
+    for (int64_t r = 0; r < 200 && !found; ++r)
+        for (int64_t cz = -r; cz <= r && !found; ++cz)
+            for (int64_t cx = -r; cx <= r && !found; ++cx) {
+                const br::gen::ShaftSpec c = br::gen::shaft_at(o.seed, cx, cz);
+                if (c.present && c.cell_i >= 1 && c.cell_i <= 6 && c.cell_j >= 1 && c.cell_j <= 6) {
+                    scx = cx; scz = cz; sh = c; found = true;
+                }
+            }
+    if (!found) { std::printf("no_shaft_found: 1\n"); return 6; }
+
+    Renderer renderer;
+    if (!renderer.init_headless(o.width, o.height)) { std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1; }
+    renderer.set_texture_seed(o.seed);
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    const float aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+
+    const float cs = br::gen::kCellSize;
+    const float cellx = static_cast<float>(scx) * contracts::kChunkSize + (static_cast<float>(sh.cell_i) + 0.5f) * cs;
+    const float cellz = static_cast<float>(scz) * contracts::kChunkSize + (static_cast<float>(sh.cell_j) + 0.5f) * cs;
+    const int32_t topL = sh.top_level;
+    const int32_t botL = sh.top_level - sh.depth;
+    const int32_t kBand = 4;  // floors streamed below the wanderer for the abyss (bounds residency)
+
+    WorldState s(o.seed);
+    auto spawn_top = [&]() {
+        s.wanderer.pos = Vec3{ cellx, contracts::level_base_y(topL) + kWandererHalfHeight + 0.5f, cellz };
+        s.wanderer.vel = Vec3{ 0.0f, 0.0f, 0.0f };
+    };
+    spawn_top();
+
+    std::vector<Aabb> col;
+    contracts::ChunkKey cached{ 0x7fffffff, 0, 0 };  // sentinel -> rebuild on first tick
+    auto rebuild = [&](contracts::ChunkKey c) { build_walk_collision(col, o.seed, c); cached = c; };
+
+    const bool wall = (o.seconds > 0);
+    const uint64_t tick_target = (o.ticks > 0) ? o.ticks : 60000u;
+    const auto start = steady_clock::now();
+    const auto wall_end = start + seconds(static_cast<long long>(o.seconds));
+    const uint32_t tpf = (o.ticks_per_frame > 0) ? o.ticks_per_frame : 8u;
+
+    uint64_t frame = 0, cycles = 0, stuck = 0, mem_first = 0, mem_last = 0;
+    size_t max_resident = 0;
+    uint64_t cycle_start_tick = 0;
+    bool reached_bottom_each = true;
+    const contracts::InputCommand grav{};  // pure gravity -- no input
+
+    for (;;) {
+        if (wall) { if ((frame & 63u) == 0 && steady_clock::now() >= wall_end) break; }
+        else if (s.tick >= tick_target) break;
+
+        for (uint32_t k = 0; k < tpf; ++k) {
+            const contracts::ChunkKey here = contracts::chunk_key_at(
+                contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
+            if (here != cached) rebuild(here);
+            tick(s, grav, col);
+            // Landed at the shaft bottom -> count a cycle, teleport back to the top, fall again.
+            if (s.wanderer.on_ground && contracts::level_from_y(s.wanderer.pos.y) <= botL) {
+                ++cycles;
+                spawn_top();
+                cached = contracts::ChunkKey{ 0x7fffffff, 0, 0 };  // force a rebuild at the top
+                cycle_start_tick = s.tick;
+            } else if (s.tick - cycle_start_tick > 4000u) {
+                // Should fall + land in well under 4000 ticks; if not, it's stuck mid-shaft.
+                ++stuck; cycle_start_tick = s.tick;
+            }
+        }
+
+        // Abyss band: stream the current floor + up to kBand below (clamped to the shaft bottom).
+        const int32_t curL = contracts::level_from_y(s.wanderer.pos.y);
+        const int32_t loL = ((curL - kBand) > botL) ? (curL - kBand) : botL;
+        const contracts::ChunkKey center = contracts::chunk_key_at(curL, s.wanderer.pos.x, s.wanderer.pos.z);
+        sm.update(center, loL, curL);
+        if (sm.resident_count() > max_resident) max_resident = sm.resident_count();
+
+        const contracts::CameraPose cam = wanderer_camera(s, aspect);
+        uint32_t drawn = 0;
+        if (!renderer.render_chunks(cam, sm.resident(), 16u, s.tick, &drawn)) { std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); return 1; }
+        const uint64_t mem = renderer.process_private_bytes();
+        if (frame == 0 || frame == 64) mem_first = mem;  // baseline AFTER warmup (frame 64) -> measures steady-state growth, not allocator warmup
+        mem_last = mem;
+        ++frame;
+    }
+
+    if (stuck > 0) reached_bottom_each = false;
+    const double mem_growth_mb = (static_cast<double>(mem_last) - static_cast<double>(mem_first)) / (1024.0 * 1024.0);
+    // Residency is bounded by the band: (kBand+1) levels x the (2r+1)^2 ring, + a small slack for
+    // in-flight/transition chunks. A leak or an unbounded ring would blow past this.
+    const size_t ring = static_cast<size_t>(2 * o.radius + 1) * static_cast<size_t>(2 * o.radius + 1);
+    const size_t resident_cap = static_cast<size_t>(kBand + 2) * ring;
+
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("shaft_chunk: %lld %lld cell %d %d\n",
+                static_cast<long long>(scx), static_cast<long long>(scz), sh.cell_i, sh.cell_j);
+    std::printf("shaft_depth: %d\n", sh.depth);
+    std::printf("frames: %llu\n", static_cast<unsigned long long>(frame));
+    std::printf("descent_cycles: %llu\n", static_cast<unsigned long long>(cycles));
+    std::printf("stuck_windows: %llu\n", static_cast<unsigned long long>(stuck));
+    std::printf("max_resident: %llu\n", static_cast<unsigned long long>(max_resident));
+    std::printf("resident_cap: %llu\n", static_cast<unsigned long long>(resident_cap));
+    std::printf("mem_first_mb: %.2f\n", static_cast<double>(mem_first) / (1024.0 * 1024.0));
+    std::printf("mem_last_mb: %.2f\n", static_cast<double>(mem_last) / (1024.0 * 1024.0));
+    std::printf("mem_growth_mb: %.2f\n", mem_growth_mb);
+    std::printf("final_hash: %016llx\n", static_cast<unsigned long long>(world_state_hash(s)));
+    const bool ok = reached_bottom_each && (cycles >= 5) &&
+                    (max_resident > 0 && max_resident <= resident_cap) &&
+                    (mem_growth_mb < 32.0);  // post-warmup steady-state growth (~3 MB observed); a real leak is 100s of MB
+    std::printf("descentsoak_ok: %d\n", ok ? 1 : 0);
+    return ok ? 0 : 6;
+}
+
 // ----- M30: headless ABYSS render proof (look DOWN an open shaft) -------------
 // Finds a shaft, points a camera down its void from the top floor, and renders with a BAND
 // of floors resident (the abyss) vs just the top floor. The band shows several floors down
@@ -3890,6 +4017,7 @@ int main(int argc, char** argv) {
     if (o.vstream)    return run_vstream(o);
     if (o.shaftfall)  return run_shaftfall(o);
     if (o.livedescent) return run_livedescent(o);
+    if (o.descentsoak) return run_descentsoak(o);
     if (o.abyss)      return run_abyss(o);
     if (o.dxr_probe)  return run_dxr_probe(o);
     if (o.dxr_test)   return run_dxr_test(o);

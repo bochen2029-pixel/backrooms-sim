@@ -39,15 +39,27 @@ inventory. Hand-verified beyond the gate: live descent robust across **15 seeds*
 bit-identical — m4 top-downs, m5 shots (seeds 1/7/42), m7 biomes **including parking_garage (the pillar biome)**
 — so the pillar fix touched no golden view; **zero re-baseline**.
 
+**Also this session — the deep-descent SOAK (`--descentsoak`, ROADMAP §3 DONE criterion).** A long-haul
+headless soak that repeatedly falls the wanderer down a deep shaft using the FULL live machinery (holed
+`build_walk_collision` + abyss band-residency + a headless render each frame), teleporting back to the top
+on each landing to churn level transitions / streaming load-evict / collision rebuilds. Gate-proven (seeds
+1/42, `--ticks 12000`): ~50–66 descent cycles each (every one reaches the bottom — no stuck), residency
+**bounded** (245 ≤ 294 = (kBand+2)×ring), process memory **flat post-warmup** (the baseline is sampled at
+frame 64; growth ~3 MB, even negative on seed 7 — no leak; <32 MB threshold), and **bit-identical ×2** under
+`--ticks` (determinism holds under async streaming). So the vertical paths hold **determinism + bounded
+memory over the long haul** — a Phase-IV DONE criterion checked off. ADR-058.
+
 **Gotchas.** (1) A down-hole co-located with a level-0 up-stair is a stacked stair-junction: the up-stairwell
 steps catch you on level 0, so that particular cell isn't a clean fall (traversable, nothing stuck). The proof
 picks a clean hole (fixture choice, like `--ascend` picks an interior up-stair); in-game these are a small
 fraction of down-holes. (2) The SESSION_LOG's own `$seed:` PowerShell parse trap bit the new gate block — use
 `${seed}:`. (Files: `gen/layout.h` + `layout.cpp` + `chunk.cpp`, `app/src/main.cpp`, `scripts/gate.ps1`.)
 
-**Next (model-free, round-robin):** M30 **telegraph audio** (draft/wind near a shaft, off the sim hash) → a
-**deep-descent soak** (now unblocked — you can fall live) → the Phase-IV completion sweep (ROADMAP §3). M29
-Increment 2 + `m29-green` the moment `llama-server :8080` is up (ISSUE-5). Per `_run_state/ROADMAP.md` §2.
+**Next (model-free, round-robin):** the last tracked M30 polish is the **telegraph audio** (draft/wind near a
+shaft, locked design decision 6, off the sim hash) → then the Phase-IV completion sweep (ROADMAP §3): all the
+DONE criteria now hold *except* M29 (`m29-green` is model-blocked, ISSUE-5) — so the remaining gate is whether
+to write `.brstate/DONE` with M29 accepted-as-blocked, or hold for the sidecar. M29 Increment 2 + `m29-green`
+the moment `llama-server :8080` is up. Per `_run_state/ROADMAP.md` §2/§3.
 
 ---
 

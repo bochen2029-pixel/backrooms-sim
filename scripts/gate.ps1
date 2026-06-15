@@ -2882,6 +2882,27 @@ function Invoke-GateM30 {
         Write-Note 'live descent: the holed per-cell floor drops the wanderer through a real down-stair hole to the floor below + soft-catches him, bit-identical x2 -- the despair gradient is now LIVE in-game, not just visible'
     }
 
+    # DEEP-DESCENT SOAK (ROADMAP §3 DONE criterion: "a deep-descent soak holds determinism + bounded
+    # memory"). Repeatedly falls the wanderer down a deep shaft with the FULL live machinery (holed
+    # build_walk_collision + abyss band-residency + a headless render each frame). Over many descent
+    # cycles, residency stays BOUNDED (the band never balloons), process memory is FLAT post-warmup (no
+    # leak), each cycle reaches the bottom (no stuck), and -- run under --ticks -- the world hash is
+    # reproducible. Catches leaks / determinism drift / unbounded streaming in the new vertical paths.
+    Assert-Gate 'deep-descent soak: many deep falls, bounded residency + flat memory + deterministic' {
+        foreach ($seed in 1, 42) {
+            $r1 = Invoke-AppCapture @('--descentsoak', '--seed', "$seed", '--ticks', '12000', '--radius', '3', '--width', '320', '--height', '180')
+            if ($r1.Exit -ne 0) { throw "descentsoak seed ${seed} exited $($r1.Exit): $($r1.Out)" }
+            if ((Get-Metric $r1.Out 'descentsoak_ok') -ne 1) { throw "seed ${seed} descent soak not ok: $($r1.Out)" }
+            $cyc = [int](Get-Metric $r1.Out 'descent_cycles')
+            if ($cyc -lt 5) { throw "seed ${seed} only $cyc descent cycles (expected many deep falls)" }
+            $mr = [int](Get-Metric $r1.Out 'max_resident'); $cap = [int](Get-Metric $r1.Out 'resident_cap')
+            if ($mr -gt $cap) { throw "seed ${seed} residency $mr exceeded the band cap $cap (unbounded streaming)" }
+            $r2 = Invoke-AppCapture @('--descentsoak', '--seed', "$seed", '--ticks', '12000', '--radius', '3', '--width', '320', '--height', '180')
+            if ((Get-MetricStr $r1.Out 'final_hash') -ne (Get-MetricStr $r2.Out 'final_hash')) { throw "seed ${seed} descent-soak hash not reproducible (determinism broke under streaming)" }
+        }
+        Write-Note 'deep-descent soak: seeds 1/42 fall a deep shaft ~50-66 times each (bit-identical x2), residency bounded (245 <= 294 = (kBand+2)x ring), process memory flat post-warmup (<32 MB) -- the vertical paths hold determinism + bounded memory over the long haul'
+    }
+
     # The abyss renders: look DOWN a shaft with a band of floors resident -> the depths show through
     # the void (then black where the bounded ring ends = fog-to-black), debug-clean + bounded.
     Assert-Gate 'abyss render: floors show down a shaft (fog-to-black), bounded + debug-clean' {
@@ -2923,7 +2944,7 @@ function Invoke-GateM30 {
         & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
         if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
     }
-    Write-Note 'M30 gate: open shafts -- a rare deep vertical void (shaft_at, ~1/1500) cut through the floors, a soft-catch fall the full depth (5..10), debug-clean, deterministic. The draft-audio telegraph + multi-floor fog render + a deep-descent soak are tracked M30 polish (ROADMAP).'
+    Write-Note 'M30 gate: open shafts -- a rare deep vertical void (shaft_at, ~1/1500) cut through the floors, a soft-catch fall the full depth (5..10), debug-clean, deterministic. Live in-game descent (holed walk floor) + multi-floor fog render + a deep-descent soak (bounded + deterministic) are DONE. Remaining M30 polish: the draft-audio telegraph (decision 6, ROADMAP).'
 }
 
 function Invoke-GateM29 {

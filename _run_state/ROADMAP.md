@@ -102,8 +102,10 @@ as the oracle, `m<N>-green` as the revert anchor, SESSION_LOG/PROGRESS/memory as
   miss the views) + M27/M28 regressions. ADR-055. **Polish status:** ✅ live in-game descent (ADR-057, `gate
   M30` green — the interactive walks build a HOLED per-cell floor via `build_walk_collision`, so you fall
   through real down-stair holes + shaft voids in-game; + a pillar-over-void generation fix; all level-0 goldens
-  bit-identical) · ✅ multi-floor fog-to-black abyss render (`1a067bb`) · ⏳ remaining: draft-audio telegraph
-  (decision 6, off the sim hash) + a deep-descent memory soak (now unblocked by live descent). **Deps:** M27, M28.
+  bit-identical) · ✅ multi-floor fog-to-black abyss render (`1a067bb`) · ✅ deep-descent soak (`--descentsoak`,
+  ADR-058, `gate M30` green — repeated deep falls hold determinism + bounded residency/memory over the long
+  haul; the ROADMAP §3 DONE criterion) · ⏳ remaining: the draft-audio telegraph (decision 6, off the sim hash).
+  **Deps:** M27, M28.
 
 ### Deferred / leftover (decide-and-document, or operator-gate)
 - `[?] M31` · **floating-origin rebase** for *true*-unbounded XYZ (fixes the float horizon in 2-D too).
