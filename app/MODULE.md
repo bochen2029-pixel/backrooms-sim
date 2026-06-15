@@ -142,6 +142,10 @@ state machine + organic ooze; `shoggoth_hash` for replay. `--shoggoth` is the he
 `app/shoggoth_body.h` (M20b) generates its procedural **warm-orange radial-tentacle body** (no
 assets) in world space, injected each frame as a synthetic `ResidentChunk` and drawn through the lit
 pipeline — visible first-person in `--play`/`--game`; `--shoggoth-shot` renders it to a PNG.
+`app/shoggoth_brain.h` (M21) is the creature's **KEEL brain**: `ShoggothSummary` → a shoggoth system
+prompt → `director::keel_complete` → a validated `ShoggothIntent` that biases the M20 navigator (the
+cascade). The LLM runs at record time only; intents enter via an event log → `--shoggoth-record` /
+`--shoggoth-replay` are **bit-identical with the model offline** (the sacred gate).
 
 **Settings & photo mode (M12).** Configuration is the **CLI flag surface** above
 (the de-facto settings interface; `scripts/run.ps1` is the one-command entry).

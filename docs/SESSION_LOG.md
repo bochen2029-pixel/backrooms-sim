@@ -4,6 +4,39 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 22 — M21: The Shoggoth's KEEL brain  ✅ COMPLETE — 🏷️ `m21-green`
+
+**`gate.ps1 -Milestone M21` exits 0; tagged `m21-green` + pushed. The monster thinks** — a
+local LLM drives the Shoggoth, and a recorded chase **replays bit-for-bit with the model
+offline** (the sacred gate, now for the creature).
+
+**Done (M21; commit `<wip>` + gate; ADR-047).**
+- **`app/shoggoth_brain.h`** — `ShoggothSummary` → a **shoggoth system prompt** →
+  **`director::keel_complete`** (reused verbatim) → a **validated** `ShoggothIntent
+  {action: hunt/stalk/lurk/flank/flee, aggression}` (reuses the Director's JSON reader; bad
+  input → safe `Hunt` default, never throws).
+- **The cascade** — the intent only sets the *goal bias + mood*; the **M20 deterministic BFS
+  navigator does the walking** every tick (`Hunt` = unchanged M20). LLM runs rarely (~2 s);
+  motion every tick. The intent folds into `shoggoth_hash` but lives outside WorldState.
+- **`--shoggoth-record`** (brain ON, live KEEL, logs intents at their ticks) / **`--shoggoth-replay`**
+  (model OFF, applies the logged intents) → **identical combined hash**. The model lives only
+  in the event log.
+- **`Invoke-GateM21`** — ctest (`[m21]`) + **THE SACRED GATE**: record with **≥1 real KEEL
+  inference** → replay model-off **bit-identical** (5 LLM intents, identical hash) + brain-off
+  M20 regression + M5 golden + INV-5/inventory. **gate.ps1 M21 exits 0.**
+
+**Gotchas / notes.** Fixed `parse_host_port` (it kept `http://` in the host — `rfind(':')`
+split at the port → `WinHttpConnect failed`); now strips the scheme + path. The KEEL sidecar
+at `:7071` must be up for the record (the Director's, reused). The intent default `Hunt` +
+aggression 0.5 reproduces M20 exactly, so existing `[m20]`/`--shoggoth` gates are unchanged.
+
+**Next: M22 — vision (deferred per operator: stop before M22).** A POV snapshot → qwen-VL
+(`mmproj-F16.gguf`) via a **backrooms-local KEEL copy** feeds richer intent to this same brain;
+first step is investigating the KEEL vision setup. *(Also pending: M21b live async brain in
+`--game`, M20b-in-DXR.)*
+
+---
+
 ## Session 21 — M20: The Shoggoth (deterministic maze-navigating chase)  ✅ COMPLETE — 🏷️ `m20-green`
 
 **`gate.ps1 -Milestone M20` exits 0; tagged `m20-green` + pushed. Something lives in the
