@@ -4,6 +4,36 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 28 — M26: Live multi-level (Phase IV foundation)  ✅ COMPLETE — 🏷️ `m26-green`
+
+`gate.ps1 -Milestone M26` exits 0; tagged `m26-green` + pushed. **The live walk is multi-level** — the
+infinite Backrooms now extends in Z (stacked floors). First Phase IV milestone (the Vertical Backrooms).
+
+**Done (M26).** The wanderer's current floor is kept **IMPLICIT** — derived from `pos.y` via
+`contracts::level_from_y` (the inverse of `level_base_y`) — so `world_state_hash` is unchanged and every
+existing replay stays bit-identical. `run_play`/`run_game` now stream/collide/generate at that level; the
+collision ground plane sits at `level_base_y(level)`; the raster fluorescent lights offset to the
+wanderer's floor. `--shot --level N` renders any floor (the proof vehicle). `level_from_y(0)=0` → all
+level-0 paths + the fixed-scene level-0 test modes are **byte-identical**.
+
+**Gate.** clean build + full ctest (`[m26]`: `level_from_y` round-trip · non-repeating biome by level ·
+INV-3 + valid geometry across ±16 levels) + **M5 raster golden bit-identical at level 0** + levels 7 and
+-3 render debug-clean + distinct (diffs 6.35 / 3.19 / 7.77) + brain-off M20 determinism + INV-5/inventory.
+
+**4 green increments** (`a273426` foundation · `a16c258` `[m26]` tests · `bd2cde0` per-level lights ·
+this `--level` proof + `Invoke-GateM26`). Non-repeating floors were already solved (per-level
+`chunk_seed`/`biome_at`, the M7 bones); M26 was integration (de-hardcode level 0), **no WorldState/hash
+change** — the load-bearing no-regression constraint.
+
+**Gotcha.** The fake `{-1e6,-1,-1e6}..{1e6,0,1e6}` ground plane became level-aware (`baseY=
+level_base_y(c.level)`); real per-chunk floor collision + holes come with M27.
+
+**Next: M27 — procedural stairs** (hybrid K=4: density + 4×4 superblock backstop · `stair_at` shared
+vertical-seam hash · cut floor/ceiling holes · stair-aware layout · vertical-connectivity validator).
+Per `_run_state/ROADMAP.md` §2.
+
+---
+
 ## Session 27 — M25: The Shoggoth's body in the RAY-TRACED path  ✅ COMPLETE — 🏷️ `m25-green`
 
 **`gate.ps1 -Milestone M25` exits 0; tagged `m25-green` + pushed. The creature is visible in BOTH

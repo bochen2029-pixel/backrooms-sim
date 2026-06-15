@@ -65,7 +65,7 @@ gate-green. M7 already left the bones: `ChunkKey.level`, `level_base_y`, per-lev
 as the oracle, `m<N>-green` as the revert anchor, SESSION_LOG/PROGRESS/memory as the checkpoint.
 
 ### Phase IV milestones (dependency-ordered)
-- `[ ] M26` · **Live multi-level.** De-hardcode `level` in run_play/run_game/run_walkbot/run_soak;
+- `[x] M26` · **Live multi-level** (`m26-green`). De-hardcode `level` in run_play/run_game/run_walkbot/run_soak;
   wanderer tracks its current floor; **level-aware collision** + real per-chunk floor collision
   (retire the fake `{-1e6,-1,-1e6}..{1e6,0,1e6}` ground plane); per-level light Y (`level_base_y(L)+
   kCeilingHeight`, currently pinned to 3.0). **Gate:** M5 raster golden **bit-identical** (no

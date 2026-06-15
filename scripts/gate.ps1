@@ -2584,6 +2584,76 @@ function Invoke-GateM25 {
     Write-Note 'M25 gate: the Shoggoth''s body renders in the ray-traced path too -- a dynamic creature BLAS (chunk BLASes cached, so RT frame-rate holds), shaded salmon. The creature is visible in BOTH renderers now.'
 }
 
+function Invoke-GateM26 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green (incl. the [m26] multi-level tests)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m26'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+
+    # No regression: the wanderer's level is kept IMPLICIT (derived from y), so world_state_hash
+    # is unchanged and level-0 geometry/lighting is byte-identical.
+    Assert-Gate 'regression: M5 raster golden bit-identical at level 0' {
+        $m5 = Join-Path $tmp 'lvl0.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $m5)
+        if ($r.Exit -ne 0) { throw "level-0 shot exited $($r.Exit)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "level-0 shot had debug-layer messages" }
+        if ([double](& $hashdiff diff $m5 (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1) -ne 0.0) { throw "M5 golden regressed at level 0" }
+    }
+
+    # The live multi-level path + per-level lights: an up-floor and a down-floor each render
+    # debug-clean and DISTINCT from level 0 and from each other (non-repeating floors in Z).
+    Assert-Gate 'multi-level render: levels 7 and -3 render debug-clean + distinct floors' {
+        $m5 = Join-Path $tmp 'lvl0.png'; $up = Join-Path $tmp 'lvl7.png'; $dn = Join-Path $tmp 'lvlm3.png'
+        $ru = Invoke-AppCapture @('--shot', '--level', '7', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $up)
+        if ($ru.Exit -ne 0) { throw "level-7 shot exited $($ru.Exit): $($ru.Out)" }
+        if ((Get-Metric $ru.Out 'debug_error_count') -ne 0) { throw "level-7 shot had debug-layer messages" }
+        $rd = Invoke-AppCapture @('--shot', '--level', '-3', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $dn)
+        if ($rd.Exit -ne 0) { throw "level--3 shot exited $($rd.Exit): $($rd.Out)" }
+        if ((Get-Metric $rd.Out 'debug_error_count') -ne 0) { throw "level--3 shot had debug-layer messages" }
+        $d7 = [double](& $hashdiff diff $up $m5 | Select-Object -Last 1)
+        $dm = [double](& $hashdiff diff $dn $m5 | Select-Object -Last 1)
+        $du = [double](& $hashdiff diff $up $dn | Select-Object -Last 1)
+        if ($d7 -le 1.0) { throw "level 7 not distinct from level 0 (diff $d7)" }
+        if ($dm -le 1.0) { throw "level -3 not distinct from level 0 (diff $dm)" }
+        if ($du -le 1.0) { throw "levels 7 and -3 not distinct from each other (diff $du)" }
+        Write-Note ("multi-level render: lvl7 vs lvl0={0:N2}, lvl-3 vs lvl0={1:N2}, lvl7 vs lvl-3={2:N2} (all distinct, debug-clean)" -f $d7, $dm, $du)
+    }
+
+    # Regression: the Shoggoth stays deterministic with the brain off (M20).
+    Assert-Gate 'regression: brain-off shoggoth deterministic (M20)' {
+        $h1 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '5')).Out 'shoggoth_hash'
+        $h2 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '5')).Out 'shoggoth_hash'
+        if ($h1 -ne $h2) { throw "shoggoth hash not reproducible with the brain off" }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M26 gate: the live walk is multi-level -- the wanderer''s floor is derived from y; chunks/collision/lights are per-level; distinct floors render debug-clean; level 0 stays byte-identical. The Phase IV foundation is in.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -2617,6 +2687,7 @@ try {
         'M23'   { Invoke-GateM23 }
         'M24'   { Invoke-GateM24 }
         'M25'   { Invoke-GateM25 }
+        'M26'   { Invoke-GateM26 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

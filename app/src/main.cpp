@@ -104,6 +104,7 @@ struct Options {
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
     uint32_t ticks_per_frame = 30, radius = 6, workers = 4, km = 1, pose = 0, spp = 256;
     uint32_t shot_every = 600;   // soak: write a screenshot every N rendered frames
+    int32_t level = 0;           // M26: spawn/scene level for --shot (Phase IV infinite-Z)
     uint64_t seed = 1u;
     std::string out, record, replay, hashlog, csv, audiolog, crash_dir, director_url, director_log;
 };
@@ -142,6 +143,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--walkbot") == 0) o.walkbot = true;
         else if (std::strcmp(a, "--topdown") == 0) o.topdown = true;
         else if (std::strcmp(a, "--shot") == 0) o.shot = true;
+        else if (std::strcmp(a, "--level") == 0) { if (i + 1 >= argc) return false; o.level = static_cast<int32_t>(std::strtol(argv[++i], nullptr, 10)); }
         else if (std::strcmp(a, "--pose") == 0) { if (!u32(o.pose)) return false; }
         else if (std::strcmp(a, "--render-wav") == 0) o.render_wav = true;
         else if (std::strcmp(a, "--footsteps") == 0) o.footsteps = true;
@@ -1298,7 +1300,7 @@ int run_shot(const Options& o) {
 
     // Eye at the proven-open spawn cell; vary only orientation across poses.
     const float ex = 16.0f, ez = 16.0f;
-    const float ey = br::core::kWandererHalfHeight + 0.02f + br::core::kEyeHeight;
+    const float ey = contracts::level_base_y(o.level) + br::core::kWandererHalfHeight + 0.02f + br::core::kEyeHeight;
     contracts::CameraPose cam{};
     cam.pos[0] = ex; cam.pos[1] = ey; cam.pos[2] = ez;
     cam.yaw = pz.yaw; cam.pitch = pz.pitch;
@@ -1306,7 +1308,7 @@ int run_shot(const Options& o) {
     cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
 
     br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
-    const auto center = contracts::chunk_key_at(0, ex, ez);
+    const auto center = contracts::chunk_key_at(o.level, ex, ez);  // M26: scene at the requested level
     sm.update(center);
     sm.wait_idle();
     sm.update(center);
