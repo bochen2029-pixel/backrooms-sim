@@ -4,6 +4,47 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 25 — M23: The Shoggoth HEARS (whisper.cpp)  ✅ COMPLETE — 🏷️ `m23-green`
+
+**`gate.ps1 -Milestone M23` exits 0; tagged `m23-green` + pushed. The monster has eyes AND ears** — it
+renders the soundscape at its vantage, whisper.cpp transcribes it into its brain, and the recorded chase
+**replays bit-for-bit with whisper AND the model offline** (the sacred gate, now with hearing). Phase III's
+sensory arc is complete: navigation → brain → live brain → vision → hearing.
+
+**Investigation (M23 STEP 1) — whisper works, but the Backrooms is non-speech.** `C:\whisper.cpp` is fully
+built (`whisper-cli.exe` + `whisper-server.exe` + DLLs; models `ggml-base.en.bin` + `ggml-large-v3-turbo.bin`
+in `C:\models`). CLI: `whisper-cli.exe -m <model> -f <wav> -otxt -np -l en` → `<wav>.txt`. A **live probe**
+on the rendered Backrooms soundscape (`--render-wav`: hum+footsteps+reverb) returned **`(upbeat music)`** —
+a coarse sound-event tag, NOT words (there's no speech to transcribe). Operator chose **M23-A** (ambient
+sound-tag hearing) over a heavier procedural-TTS "PA voice" loop. (whisper-server defaults to `:8080` = the
+llama-server's port, so the CLI is used.)
+
+**Done (M23-A; ADR-050).**
+- **`app/shoggoth_hearing.h`** (pure: `clean_transcript` + `render_shoggoth_hearing_prompt` = the M21 text
+  brain + a "your ears hear: <tag>" line).
+- **`run_shoggoth_hearing_record`** (`--shoggoth-hearing-record`): renders ~2.5 s of the soundscape AT THE
+  SHOGGOTH'S EARS (M6 `Synth`: the drone + the wanderer's footfalls scaled by proximity) → `whisper_transcribe`
+  (shells out to `whisper-cli.exe` via `CreateProcess`, reads `<wav>.txt`) → the tag into `keel_complete` →
+  `parse_shoggoth_intent` → `ShoggothEvent` log. Byte-identical chase to `--shoggoth-record` so
+  `--shoggoth-replay` reproduces it. `--whisper-exe` / `--whisper-model` default to the known paths.
+- **`Invoke-GateM23`** — clean build + full ctest (`[m23]` transcript-trim + hearing-prompt) + whisper
+  present + KEEL reachable + **THE SACRED GATE WITH EARS** (soundscape → whisper → ≥1 transcript → ≥1 intent
+  → record == replay whisper+model off) + 2 graceful no-ops (whisper missing → "silence" but runs; KEEL down
+  → 0 intents) + M21 text sacred gate + M20/M5/INV-5/inventory. **gate.ps1 M23 exits 0. Measured: 5 listens
+  → 5 transcripts (`(upbeat music)`) → 5 intents, record == replay (whisper + model off).**
+
+**Notes.** **No new build dependency** — whisper.cpp is an external process the app shells out to (runtime-
+optional, like a tool; nothing linked/vcpkg'd/shipped; absent → graceful no-op). Determinism is robust even
+though whisper's transcript depends on the audio: only the resulting INTENT is logged + replayed, so replay
+never runs whisper or the model. The combined hash is per-run (the model is stochastic), but record == replay
+holds every run.
+
+**Next: Phase III sensory arc COMPLETE.** Remaining optional: a richer "PA voice" hearing loop (procedural
+TTS of the Director's intercom captions → whisper hears words) and **M20b-in-DXR** (the in-world body renders
+in the raster path only). Both deferred / operator's call.
+
+---
+
 ## Session 24 — M22: The Shoggoth SEES (KEEL vision)  ✅ COMPLETE — 🏷️ `m22-green`
 
 **`gate.ps1 -Milestone M22` exits 0; tagged `m22-green` + pushed. The monster has eyes** — a virtual

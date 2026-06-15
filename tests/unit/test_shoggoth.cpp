@@ -10,6 +10,7 @@
 #include "shoggoth_brain.h"
 #include "shoggoth_brain_host.h"
 #include "shoggoth_vision.h"
+#include "shoggoth_hearing.h"
 #include "base64.h"
 
 using namespace br::app;
@@ -168,6 +169,24 @@ TEST_CASE("intent parsing tolerates a markdown-fenced or prose-wrapped reply (vi
     REQUIRE(ok); REQUIRE(a.action == ShoggothAction::Stalk);
     const auto b = parse_shoggoth_intent("Here is my choice: {\"action\":\"flee\",\"aggression\":0.2} -- run!", ok);
     REQUIRE(ok); REQUIRE(b.action == ShoggothAction::Flee);
+}
+
+TEST_CASE("a whisper transcript is trimmed of surrounding whitespace", "[m23][hearing]") {
+    REQUIRE(clean_transcript(" (upbeat music)\n") == "(upbeat music)");
+    REQUIRE(clean_transcript("\r\n  footsteps approaching  \n") == "footsteps approaching");
+    REQUIRE(clean_transcript("") == "");
+    REQUIRE(clean_transcript("   \n\t ") == "");
+}
+
+TEST_CASE("the hearing prompt carries what it heard, the situation, and the intent JSON", "[m23][shoggoth][hearing]") {
+    Shoggoth s = spawn_at(0.0f, 0.0f);
+    const ShoggothSummary sum = build_shoggoth_summary(s, br::core::Vec3{8.0f, 1.0f, 0.0f}, 7u);
+    const std::string p = render_shoggoth_hearing_prompt(sum, "(footsteps)");
+    REQUIRE(p.find("(footsteps)") != std::string::npos);   // what its ears picked up
+    REQUIRE(p.find("\"action\"") != std::string::npos);    // demands the intent schema
+    REQUIRE(p.find("flank") != std::string::npos);
+    const std::string q = render_shoggoth_hearing_prompt(sum, "");  // heard nothing -> "silence"
+    REQUIRE(q.find("silence") != std::string::npos);
 }
 
 TEST_CASE("the live async brain host has a clean lifecycle and an empty initial poll", "[m21b][shoggoth][brain]") {

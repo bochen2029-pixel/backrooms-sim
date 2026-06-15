@@ -56,6 +56,7 @@
 #include "shoggoth_brain.h"
 #include "shoggoth_brain_host.h"
 #include "shoggoth_vision.h"
+#include "shoggoth_hearing.h"
 #include "base64.h"
 
 namespace contracts = br::contracts;
@@ -90,6 +91,8 @@ struct Options {
     bool shoggoth_record = false, shoggoth_replay = false;  // M21 brain record/replay
     bool no_shoggoth_brain = false;     // M21b: kill switch for the live async brain in --play/--game
     bool shoggoth_vision_record = false;  // M22: the Shoggoth sees -- POV snapshot -> vision intent
+    bool shoggoth_hearing_record = false;  // M23: the Shoggoth hears -- soundscape -> whisper -> intent
+    std::string whisper_exe, whisper_model;  // M23: whisper.cpp CLI + model (defaults below)
     uint32_t eval_count = 100;          // --director-eval: scenario count
     uint32_t director_interval_s = 15;  // --soak --director: ambient seconds between summaries (wall clock)
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
@@ -187,6 +190,9 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--shoggoth-replay") == 0) o.shoggoth_replay = true;
         else if (std::strcmp(a, "--no-shoggoth-brain") == 0) o.no_shoggoth_brain = true;
         else if (std::strcmp(a, "--shoggoth-vision-record") == 0) o.shoggoth_vision_record = true;
+        else if (std::strcmp(a, "--shoggoth-hearing-record") == 0) o.shoggoth_hearing_record = true;
+        else if (std::strcmp(a, "--whisper-exe") == 0) { if (!str(o.whisper_exe)) return false; }
+        else if (std::strcmp(a, "--whisper-model") == 0) { if (!str(o.whisper_model)) return false; }
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -2081,6 +2087,117 @@ int run_shoggoth_vision_record(const Options& o) {
     return dbg == 0 ? 0 : 3;
 }
 
+// M23: render ~2.5 s of the Backrooms soundscape AT THE SHOGGOTH'S EARS to a WAV — the
+// fluorescent drone (the synth bed) plus the wanderer's footfalls, louder the nearer the
+// prey is. A separate synth stream, so it perturbs nothing. Deterministic; record-time only.
+bool shoggoth_listen_wav(const app::Shoggoth& sh, const br::core::Vec3& wanderer, uint64_t seed,
+                         const std::string& wav_path) {
+    using namespace br::core;
+    const uint32_t sr = contracts::kAudioSampleRate;
+    const uint32_t fpt = sr / 120u;
+    const uint32_t ticks = 300u;  // ~2.5 s clip
+    audio::Synth synth(seed ^ 0x5EE110D000000001ull, sr);
+    synth.set_reverb_seconds(0.8f);
+    contracts::AudioListener lis{};
+    lis.pos[0] = sh.pos.x; lis.pos[1] = sh.pos.y + kEyeHeight; lis.pos[2] = sh.pos.z;
+    lis.yaw = sh.yaw; lis.speed = 0.0f;
+    const float dx = wanderer.x - sh.pos.x, dz = wanderer.z - sh.pos.z;
+    const float dist = std::sqrt(dx * dx + dz * dz);
+    float prox = 1.0f - dist / 40.0f;  // near = 1, far (>=40 m) = 0
+    prox = prox < 0.0f ? 0.0f : (prox > 1.0f ? 1.0f : prox);
+    std::vector<int16_t> pcm; pcm.reserve(static_cast<size_t>(ticks) * fpt * 2u);
+    std::vector<float> block(static_cast<size_t>(fpt) * 2u);
+    for (uint32_t t = 0; t < ticks; ++t) {
+        if (prox > 0.05f && (t % 48u) == 0u) synth.trigger_footstep(0.3f + 0.7f * prox);  // the wanderer's tread
+        synth.render(lis, block.data(), fpt);
+        for (uint32_t i = 0; i < fpt * 2u; ++i) pcm.push_back(audio::to_pcm16(block[i] * 0.85f));
+    }
+    std::string err;
+    return audio::write_wav(wav_path, pcm, sr, static_cast<uint16_t>(contracts::kAudioChannels), err);
+}
+
+// M23: shell out to whisper.cpp's CLI to transcribe the WAV -> a sound-event tag. Writes
+// "<wav>.txt", which we read back + trim. A missing exe / failed run -> "" (graceful no-op,
+// the creature simply hears "silence"). RECORD-time only; whisper is never run at replay.
+std::string whisper_transcribe(const std::string& wav, const std::string& exe, const std::string& model) {
+    const std::string txt = wav + ".txt";
+    std::remove(txt.c_str());  // clear any stale transcript
+    const std::string cmd = "\"" + exe + "\" -m \"" + model + "\" -f \"" + wav +
+                            "\" -otxt -np -l en -nth 0.60";
+    STARTUPINFOA si{}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    std::vector<char> cl(cmd.begin(), cmd.end()); cl.push_back('\0');
+    if (!CreateProcessA(nullptr, cl.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                        nullptr, nullptr, &si, &pi))
+        return std::string();  // whisper-cli unavailable -> graceful no-op
+    WaitForSingleObject(pi.hProcess, 120000);
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    std::ifstream f(txt, std::ios::binary);
+    if (!f) return std::string();
+    std::string raw, line;
+    while (std::getline(f, line)) { raw += line; raw += '\n'; }
+    return app::clean_transcript(raw);
+}
+
+// M23: the Shoggoth HEARS. Identical chase to --shoggoth-record (so --shoggoth-replay
+// reproduces it) -- BUT each thought first renders the soundscape at the creature's ears,
+// runs whisper.cpp over it, and feeds the heard tag into the (text) brain. The validated
+// intent is logged exactly as in M21, so a replay with whisper AND the model OFFLINE is
+// bit-identical -- the sacred gate, now with ears. RECORD-time only.
+int run_shoggoth_hearing_record(const Options& o) {
+    using namespace br::core;
+    std::string host; int port; parse_host_port(o.director_url, host, port);
+    const std::string wexe = o.whisper_exe.empty() ? std::string("C:\\whisper.cpp\\whisper-cli.exe") : o.whisper_exe;
+    const std::string wmodel = o.whisper_model.empty() ? std::string("C:\\models\\ggml-base.en.bin") : o.whisper_model;
+    const uint64_t N = (o.ticks > 0) ? o.ticks : 1800u;
+    const uint64_t kBrainEvery = 240u;
+    const std::string wav = o.out.empty() ? std::string("runs/shoggoth_hearing.wav") : o.out;
+
+    MazeWalker w(o.seed);
+    app::Shoggoth sh;
+    sh.pos = w.s.wanderer.pos; sh.pos.x += 24.0f;
+    std::vector<app::ShoggothEvent> events;
+    uint64_t H = 1469598103934665603ull;
+    uint64_t thoughts = 0, valid = 0, listens = 0, heard_nonempty = 0;
+    std::string last_heard;
+    for (uint64_t t = 0; t < N; ++t) {
+        w.step();
+        if (t % kBrainEvery == 0) {
+            ++thoughts;
+            std::string heard;
+            if (shoggoth_listen_wav(sh, w.s.wanderer.pos, o.seed, wav)) {
+                ++listens;
+                heard = whisper_transcribe(wav, wexe, wmodel);
+                if (!heard.empty()) { ++heard_nonempty; last_heard = heard; }
+            }
+            const app::ShoggothSummary sum = app::build_shoggoth_summary(sh, w.s.wanderer.pos, t);
+            const br::director::KeelResponse resp = br::director::keel_complete(host, port, app::render_shoggoth_hearing_prompt(sum, heard), 15000);
+            bool ok = false;
+            const app::ShoggothIntent intent = resp.ok ? app::parse_shoggoth_intent(resp.content, ok) : app::ShoggothIntent{};
+            if (resp.ok && ok) {
+                ++valid;
+                sh.intent = intent;  // identical apply+log path as --shoggoth-record
+                events.push_back(app::ShoggothEvent{t, static_cast<int32_t>(intent.action), intent.aggression});
+                H = fold_bytes(H, &events.back(), sizeof(app::ShoggothEvent));
+            }
+        }
+        app::shoggoth_step(sh, w.s.wanderer.pos, o.seed, (t % 8u) == 0u);
+        H = fold_u64(H, app::shoggoth_hash(sh));
+    }
+    if (!o.director_log.empty()) {
+        if (!app::write_shoggoth_log(o.director_log, o.seed, N, events)) { std::fprintf(stderr, "record: failed to write %s\n", o.director_log.c_str()); return 1; }
+    }
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("ticks: %llu\n", static_cast<unsigned long long>(N));
+    std::printf("thoughts: %llu\n", static_cast<unsigned long long>(thoughts));
+    std::printf("listens: %llu\n", static_cast<unsigned long long>(listens));
+    std::printf("heard_nonempty: %llu\n", static_cast<unsigned long long>(heard_nonempty));
+    std::printf("valid_intents: %llu\n", static_cast<unsigned long long>(valid));
+    std::printf("last_heard: %s\n", last_heard.empty() ? "(silence)" : last_heard.c_str());
+    std::printf("combined_hash: %016llx\n", static_cast<unsigned long long>(H));
+    return 0;
+}
+
 // Replay: re-run the SAME chase (seed + ticks from the log), applying the recorded
 // intents at their ticks with KEEL never contacted. The combined hash must equal the
 // record's -> the shoggoth's "brain" lives only in the log (the sacred gate).
@@ -2940,6 +3057,7 @@ int main(int argc, char** argv) {
     if (o.shoggoth_shot) return run_shoggoth_shot(o);
     if (o.shoggoth_record) return run_shoggoth_record(o);
     if (o.shoggoth_vision_record) return run_shoggoth_vision_record(o);
+    if (o.shoggoth_hearing_record) return run_shoggoth_hearing_record(o);
     if (o.shoggoth_replay) return run_shoggoth_replay(o);
     if (o.game)       return run_game(o);
     if (o.soak)       return run_soak(o);

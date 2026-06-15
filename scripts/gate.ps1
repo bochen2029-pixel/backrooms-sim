@@ -2276,6 +2276,111 @@ function Invoke-GateM22 {
     Write-Note 'M22 gate: the Shoggoth SEES -- a POV snapshot feeds a local vision model (qwen-VL + mmproj), and the recorded chase still replays bit-exact with the model off. The monster has eyes.'
 }
 
+function Invoke-GateM23 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green (incl. the [m23] transcript + hearing-prompt tests)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m23'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+
+    # whisper.cpp must be present (the ears) and the KEEL sidecar up (the brain), else the
+    # "it hears + decides" assertion is vacuous.
+    Assert-Gate 'whisper.cpp CLI + model present (C:\whisper.cpp\whisper-cli.exe, ggml-base.en.bin)' {
+        if (-not (Test-Path 'C:\whisper.cpp\whisper-cli.exe')) { throw "whisper-cli.exe not found at C:\whisper.cpp" }
+        if (-not (Test-Path 'C:\models\ggml-base.en.bin')) { throw "ggml-base.en.bin not found at C:\models" }
+    }
+    Assert-Gate 'KEEL sidecar reachable (:7071, the brain endpoint)' {
+        $r = Invoke-AppCapture @('--director-probe', '--seed', '1')
+        if ($r.Exit -ne 0) { throw "director-probe exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'keel_ok') -ne 1) { throw "KEEL not reachable at :7071 (C:\keel-sidecar-7071\start.cmd)" }
+    }
+
+    # THE SACRED GATE, NOW WITH EARS: the Shoggoth renders the soundscape at its vantage,
+    # whisper.cpp transcribes it (a coarse sound tag, the Backrooms has no speech), the brain
+    # decides from what it HEARS + senses, and the recorded chase replays bit-identically with
+    # whisper AND the model OFFLINE -- the transcript never re-derived at replay (intent enters
+    # only via the event log). >=1 listen + >=1 whisper transcript + >=1 real intent or vacuous.
+    Assert-Gate 'sacred gate (hearing): soundscape -> whisper -> intent; record == replay model+whisper-off' {
+        $slog = Join-Path $tmp 's.log'; $wav = Join-Path $tmp 'listen.wav'
+        $rec = Invoke-AppCapture @('--shoggoth-hearing-record', '--director-url', 'http://127.0.0.1:7071', '--director-log', $slog, '--out', $wav, '--seed', '3', '--ticks', '1200')
+        if ($rec.Exit -ne 0) { throw "hearing record exited $($rec.Exit): $($rec.Out)" }
+        if ((Get-Metric $rec.Out 'listens') -lt 1) { throw "the shoggoth never listened (no WAV rendered)" }
+        if ((Get-Metric $rec.Out 'heard_nonempty') -lt 1) { throw "whisper produced no transcript -- is whisper-cli + the model OK?" }
+        $valid = Get-Metric $rec.Out 'valid_intents'
+        if ($valid -lt 1) { throw "the brain produced no valid intents -- is the KEEL sidecar up at :7071?" }
+        if (-not (Test-Path $wav)) { throw "the listen WAV was not written" }
+        $recHash = Get-MetricStr $rec.Out 'combined_hash'
+        $rep = Invoke-AppCapture @('--shoggoth-replay', '--director-log', $slog)
+        if ($rep.Exit -ne 0) { throw "replay exited $($rep.Exit): $($rep.Out)" }
+        if ((Get-Metric $rep.Out 'replay_events') -lt 1) { throw "replay applied no events from the log" }
+        if ((Get-MetricStr $rep.Out 'combined_hash') -ne $recHash) { throw "replay hash != record hash -- whisper/the model leaked into the sim" }
+        Write-Note "hearing sacred gate: $valid intents from $((Get-Metric $rec.Out 'heard_nonempty')) transcripts; record == replay ($recHash) whisper + model OFFLINE"
+    }
+
+    # Graceful no-op #1: whisper missing -> the creature hears "silence" but the chase + brain
+    # still run (heard_nonempty 0), exit 0.
+    Assert-Gate 'graceful no-op: whisper missing (bad exe) -> 0 transcripts, brain still runs, exit 0' {
+        $r = Invoke-AppCapture @('--shoggoth-hearing-record', '--director-url', 'http://127.0.0.1:7071', '--director-log', (Join-Path $tmp 'nw.log'), '--out', (Join-Path $tmp 'nw.wav'), '--whisper-exe', 'C:\nope\whisper-cli.exe', '--seed', '3', '--ticks', '480')
+        if ($r.Exit -ne 0) { throw "whisper-missing hearing record exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'heard_nonempty') -ne 0) { throw "transcripts appeared with whisper unavailable?!" }
+        Write-Note "graceful no-op: whisper down -> $((Get-Metric $r.Out 'listens')) listens, 0 transcripts, exit 0"
+    }
+
+    # Graceful no-op #2: KEEL down (dead URL) -> 0 intents, exit 0 (the creature keeps the M20 default).
+    Assert-Gate 'graceful no-op: KEEL down (dead URL) -> 0 intents, exit 0' {
+        $r = Invoke-AppCapture @('--shoggoth-hearing-record', '--director-url', '127.0.0.1:9999', '--director-log', (Join-Path $tmp 'nk.log'), '--out', (Join-Path $tmp 'nk.wav'), '--seed', '3', '--ticks', '480')
+        if ($r.Exit -ne 0) { throw "KEEL-down hearing record exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'valid_intents') -ne 0) { throw "intents applied with KEEL unreachable?!" }
+    }
+
+    # Regression: the M21 text-brain sacred gate still holds; M20 brain-off + the M5 golden.
+    Assert-Gate 'regression (M21 sacred gate): text-brain record == replay bit-identical, model off' {
+        $slog = Join-Path $tmp 't.log'
+        $rec = Invoke-AppCapture @('--shoggoth-record', '--director-url', 'http://127.0.0.1:7071', '--director-log', $slog, '--seed', '3', '--ticks', '1200')
+        if ($rec.Exit -ne 0) { throw "M21 record exited $($rec.Exit): $($rec.Out)" }
+        if ((Get-Metric $rec.Out 'valid_intents') -lt 1) { throw "M21 text brain produced no valid intents (KEEL down?)" }
+        $recHash = Get-MetricStr $rec.Out 'combined_hash'
+        $rep = Invoke-AppCapture @('--shoggoth-replay', '--director-log', $slog)
+        if ($rep.Exit -ne 0) { throw "M21 replay exited $($rep.Exit)" }
+        if ((Get-MetricStr $rep.Out 'combined_hash') -ne $recHash) { throw "M21 replay hash != record hash" }
+    }
+    Assert-Gate 'regression: brain-off shoggoth deterministic + M5 golden bit-identical' {
+        $h1 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '5')).Out 'shoggoth_hash'
+        $h2 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '5')).Out 'shoggoth_hash'
+        if ($h1 -ne $h2) { throw "shoggoth hash not reproducible with the brain off" }
+        $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+        $shot = Join-Path $tmp 'm5.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        if ([double](& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1) -ne 0.0) { throw "M5 golden regressed" }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M23 gate: the Shoggoth HEARS -- the soundscape at its ears -> whisper.cpp -> a sound tag into the brain, and the recorded chase still replays bit-exact with whisper + the model off. The monster has eyes AND ears.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -2306,6 +2411,7 @@ try {
         'M21'   { Invoke-GateM21 }
         'M21B'  { Invoke-GateM21b }
         'M22'   { Invoke-GateM22 }
+        'M23'   { Invoke-GateM23 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

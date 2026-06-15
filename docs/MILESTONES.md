@@ -309,11 +309,20 @@ the intent enters via the event log → `--shoggoth-replay` is bit-identical mod
 preserved — record == replay bit-identical, model off, snapshot never re-rendered. [x] Graceful no-op if
 the vision endpoint is down. [x] M0–M21b regression (incl. the M21 text sacred gate). → `m22-green`.
 
-## M23 — Shoggoth hears (whisper.cpp) *(later / speculative)*
-**Scope:** Nearby procedural audio → `C:\whisper.cpp` → text → the shoggoth's LLM context, so it
-"knows its true surroundings" (vision + hearing). Defer until M22 lands; then the sys-prompt drives
-"act like a real shoggoth" with the cheap deterministic navigation/locomotion doing the embodiment.
-**Exit gates:** [ ] Audio → transcript → context. [ ] Determinism preserved. [ ] Kill switch + no-op.
+## M23 — Shoggoth hears (whisper.cpp) ✅ DONE (`m23-green`, scope M23-A)
+**Scope:** The soundscape at the shoggoth's ears → `C:\whisper.cpp` → text → its brain context.
+**Investigation found** whisper.cpp built + ready (`whisper-cli.exe` + `ggml-base.en.bin`), but the
+Backrooms is **non-speech** — whisper returns coarse sound-event tags (a live probe on the rendered
+soundscape gave `(upbeat music)`), not words. The operator chose the coarse **M23-A** (ambient sound-tag
+hearing) over a heavier procedural-TTS "PA voice" loop. `app/shoggoth_hearing.h` (`clean_transcript` +
+`render_shoggoth_hearing_prompt`); `run_shoggoth_hearing_record` (`--shoggoth-hearing-record`) renders
+~2.5 s of the soundscape (M6 `Synth`, footfalls scaled by proximity) → `whisper-cli` (shelled out) → the
+tag into `keel_complete` → `parse_shoggoth_intent` → `ShoggothEvent` log. Record-time only; the intent
+enters via the event log → `--shoggoth-replay` is bit-identical with whisper AND the model offline.
+**Exit gates:** [x] Audio → transcript → context → intent (≥1 real). [x] Determinism preserved (record ==
+replay, whisper + model off, transcript never re-derived). [x] Graceful no-op — whisper missing (hears
+"silence", runs) AND KEEL down (0 intents). [x] M0–M22 regression (incl. M21 text + M22 vision sacred
+gates). → `m23-green`. *(Richer "PA voice" hearing via a procedural TTS — deferred.)*
 
 ---
 
