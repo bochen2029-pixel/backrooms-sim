@@ -775,6 +775,9 @@ bool DxrRenderer::build_scene(const std::vector<contracts::ResidentChunk>& chunk
         D3D12_RESOURCE_BARRIER uavb{}; uavb.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; uavb.UAV.pResource = result.Get();
         d.list->ResourceBarrier(1, &uavb);
 
+        // Audit fix: InstanceID is 24-bit; guard the shade-buffer offset rather than silently
+        // wrapping (bounded residency keeps this well under 16M, so this only ever trips on a bug).
+        if (vtxOffset > 0xFFFFFFu) { last_error_ = "DXR shade buffer exceeds 24-bit InstanceID"; return false; }
         D3D12_RAYTRACING_INSTANCE_DESC inst{};
         inst.Transform[0][0] = inst.Transform[1][1] = inst.Transform[2][2] = 1.0f;  // identity (world-space verts)
         inst.InstanceID = vtxOffset & 0xFFFFFFu;   // start vertex in shadeVb (24-bit)

@@ -138,7 +138,12 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
     // (a "wall" to ValidateChunkGeometry), abutting in X (no fat overlap), climbing
     // baseY -> baseY+kLevelHeight. generate_layout carves the stair cell open so the
     // low (-X) end is reachable; the stair cell is skipped by the pillar pass below.
-    if (upStair.present) {
+    // M30 audit fix: if an open shaft passes through the up-stair cell at this level, the shaft
+    // VOID takes precedence -- a stairwell built inside the void would conflict + block the fall.
+    // Skip the steps there (the superblock backstop guarantees other reachable up-stairs).
+    const bool shaftInStairCell = upStair.present && (shaftFloorOpen || shaftCeilOpen) &&
+                                  shaft.cell_i == upStair.cell_i && shaft.cell_j == upStair.cell_j;
+    if (upStair.present && !shaftInStairCell) {
         const int N = 8;
         const float ins = 0.3f;  // X inset clears the perimeter walls (no fat overlap)
         const float sx0 = ox + static_cast<float>(upStair.cell_i) * cs + ins;

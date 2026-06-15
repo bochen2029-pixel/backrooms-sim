@@ -145,6 +145,13 @@ completeness-critic pass every ~N build slices too, to catch drift early.)
   `valid_intents>=1` (the live brain) is unmet. **Unblocks:** start `:8080` (operator's normal setup) →
   autoloop `Ensure-Sidecar` starts `:7071` → `gate.ps1 -Milestone M29` → `m29-green`. Do NOT relax the
   valid-intents assertion (that would gut the sacred gate). M29-Inc1 (core+escape) is already `[m29]`-green.
+- **ISSUE-6 [polish/follow-on]** — the 2026-06-15 multi-agent QC audit (`docs/AUDIT_2026-06-15.md`; 82
+  findings; `core`/`gen` clean, 0 confirmed criticals). This run FIXED the real ones (DXR InstanceID
+  overflow guard, ARCHITECTURE §5 doc-drift, the stair+shaft same-cell geometry guard) and OVERTURNED the
+  3 "stream race" false-positives (`in_flight_` is main-thread-only). Open, low-impact, NOT blocking:
+  propagate the M29 `--level` descent-escape to the vision/hearing/PA record paths (level-0-only today;
+  model-dependent), plus the catalogued mediums/lows (dead `build_stairwell`, `ChunkContentHash` omits
+  collision, assorted doc-drift). Pull from the audit doc during perpetual-polish (§4).
 - *(Append new issues as discovered: `ISSUE-N [type] — description · what unblocks it`. If the loop
   STALLS — only `[G]`/`[!]`/`[?]` remain and none can advance — write `.brstate/STALLED` with the reason
   so the supervisor stops respawning; the operator clears the queue on his next look.)*

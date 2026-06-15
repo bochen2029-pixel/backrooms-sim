@@ -108,23 +108,23 @@ struct ChunkKey  { int32_t level; int64_t cx, cz; };
 ChunkData GenerateChunk(uint64_t worldSeed, ChunkKey key);
 uint64_t  ChunkContentHash(const ChunkData&);   // used by determinism gates
 
-// contracts/world_view_v1.h — renderer-facing snapshot, immutable per frame
-struct WorldView { CameraPose cam; std::span<const ResidentChunk> chunks;
-                   std::span<const LightInstance> lights; uint64_t tick; };
+// contracts/world_view_v1.h — core → renderer read-only snapshot, immutable per frame.
+// M2 carries the camera + the hardcoded test-room geometry (boxes); the live streaming
+// path instead passes resident chunks straight to render_chunks(cam, span<ResidentChunk>).
+struct WorldView { CameraPose camera; std::span<const BoxInstance> boxes; uint64_t tick; };
 ```
 
-### 5.2 Director JSON contract (sketch; full schemas in contracts/director_v1/)
+### 5.2 Director contract (illustrative; the authoritative C++ schemas live in contracts/director_v1.h)
 
-```json
-// WandererSummary v1 (sim → director)
-{ "v":1, "tick":123456, "minutes_walked":42.5, "odometer_m":3120,
-  "route_loops":3, "dwell_points":[{"chunk":[0,12,-4],"seconds":95}],
-  "biome_history":["ClassicYellow","Garage"], "recent_events":["LevelTransition"] }
+```jsonc
+// WandererSummary (sim → director) — derived deterministically from the hashed WorldState:
+{ "tick":123456, "biome":0, "distance_m":3120, "dwell_seconds":95,
+  "route_loops":3, "location_hash":"0x..." }
 
-// Directive v1 (director → sim; expiry mandatory; unions are closed)
-{ "v":1, "id":"d-0042", "expires_tick":131456, "type":"FlickerBurst",
-  "params":{"chunk":[0,12,-4],"intensity":0.7} }
-// Allowed types: FlickerBurst | DistantSoundCue | BiomeBias | IntercomLine | PlaceNote
+// Directive (director → sim) — presentation-only POD, applied via the recorded event log at a
+// deterministic effective_tick (raw model text never crosses the boundary; out-of-range = dropped whole):
+{ "kind":"FlickerSector", "sector":12, "biome":0, "intensity":0.7, "caption":"" }
+// DirectiveKind: None | FlickerSector | SoundCue | BiomeBias | Intercom | WandererNote
 ```
 
 Validation: directives failing schema or sanity lint (unknown type, expired on arrival, out-of-range params, contradiction with active set) are **rejected and logged**, never partially applied.
