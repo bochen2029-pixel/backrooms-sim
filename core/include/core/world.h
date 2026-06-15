@@ -27,6 +27,7 @@ constexpr float kWandererRadius = 0.35f;      // capsule XZ half-extent
 constexpr float kWandererHalfHeight = 0.90f;  // capsule Y half-extent (body 1.8 m)
 constexpr float kEyeHeight = 0.70f;           // eye above capsule center
 constexpr float kWalkSpeed = 4.0f;            // m/s
+constexpr float kRunSpeed = 6.8f;             // m/s (M18: kButtonRun held; ~1.7x walk)
 constexpr float kGravity = 18.0f;             // m/s^2
 constexpr float kJumpSpeed = 6.0f;            // m/s
 constexpr float kMaxPitch = 1.55334f;         // ~89 degrees

@@ -22,6 +22,7 @@ struct InputCommand {
 };
 
 constexpr uint8_t kButtonJump = 0x01;
+constexpr uint8_t kButtonRun = 0x02;   // M18: hold to run (raises move speed in the sim)
 
 // On-disk replay = ReplayHeader followed by `tick_count` InputCommand records
 // (POD, host-endian; the build targets a single x64 toolchain).

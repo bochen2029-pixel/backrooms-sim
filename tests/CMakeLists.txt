@@ -17,7 +17,8 @@ add_executable(unit_tests
   unit/test_director.cpp
   unit/test_menu.cpp
   unit/test_config.cpp
-  unit/test_gamepad.cpp)
+  unit/test_gamepad.cpp
+  unit/test_headbob.cpp)
 target_link_libraries(unit_tests PRIVATE
   backrooms_flags
   core gen stream telemetry audio render_d3d12 render_dxr director

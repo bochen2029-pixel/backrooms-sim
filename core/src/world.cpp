@@ -131,7 +131,10 @@ void tick(WorldState& s, const contracts::InputCommand& in,
     wish.y = 0.0f;
     const float wl = length(wish);
     if (wl > 1.0f) wish = wish * (1.0f / wl);
-    const Vec3 horiz = wish * kWalkSpeed;
+    // M18: run modifier (deterministic — through InputCommand, so replay/hash are
+    // unaffected when kButtonRun is unset, exactly as before).
+    const float move_speed = (in.buttons & contracts::kButtonRun) ? kRunSpeed : kWalkSpeed;
+    const Vec3 horiz = wish * move_speed;
     w.vel.x = horiz.x;
     w.vel.z = horiz.z;
 

@@ -1766,6 +1766,66 @@ function Invoke-GateM17 {
     Write-Note 'M17 gate: portable .zip + clean-env (bundled DXC, no SDK) + regression. Ship-ready -> v2.0.'
 }
 
+function Invoke-GateM18 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green (incl. head-bob curve + run determinism)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m18'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+
+    # Exit gate: the head-bob curve (pure, bounded, figure-8, 2 dips/cycle) and the
+    # kButtonRun move-speed modifier (deterministic odometer) — the [m18] suite.
+    Assert-Gate 'head-bob curve + run-speed determinism tests pass ([m18])' {
+        $ut = Join-Path (Get-BinDir) 'unit_tests.exe'
+        if (-not (Test-Path $ut)) { throw "unit_tests.exe not built" }
+        & $ut '[m18]' | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "head-bob/run tests failed (exit $LASTEXITCODE)" }
+    }
+
+    # Exit gate: the windowed walk (with head-bob + run wired in) stays debug-clean.
+    Assert-Gate 'windowed walk debug-clean with head-bob + run (--game --seconds 4)' {
+        $r = Invoke-AppCapture @('--game', '--seconds', '4', '--seed', '1', '--config', (Join-Path $tmp 'g.cfg'))
+        if ($r.Exit -ne 0) { throw "--game exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "windowed walk had debug-layer messages" }
+        if ((Get-Metric $r.Out 'frames') -lt 30) { throw "too few frames" }
+    }
+
+    # The head-bob is view-only and kButtonRun only changes the sim when held, so the
+    # raster golden + the existing replays/walk-bot (which never set it) are unchanged.
+    Assert-Gate 'regression: M5 lit shot golden bit-identical (head-bob is view-only)' {
+        $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+        $shot = Join-Path $tmp 'm5.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        if ([double](& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1) -ne 0.0) { throw "M5 golden regressed -- head-bob must be view-only" }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M18 gate: humanlike head-bob (view-only) + run. Phase III begins; the walk feels alive.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -1790,6 +1850,7 @@ try {
         'M15'   { Invoke-GateM15 }
         'M16'   { Invoke-GateM16 }
         'M17'   { Invoke-GateM17 }
+        'M18'   { Invoke-GateM18 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

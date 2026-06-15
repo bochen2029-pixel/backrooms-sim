@@ -50,6 +50,7 @@
 #include "hud.h"
 #include "config.h"
 #include "gamepad.h"
+#include "head_bob.h"
 
 namespace contracts = br::contracts;
 namespace audio = br::audio;
@@ -287,6 +288,18 @@ int run_clear(const Options& o) {
 // the streamed maze drawn to the window. --seconds N auto-exits (gate-runnable); 0
 // runs until the window closes or Esc. The sim path is unchanged (replay-determinism
 // holds); only input gathering + windowed present are new.
+// M18: offset the render camera by the humanlike head-bob (view-only — never touches
+// WorldState, so determinism + goldens are unaffected; the bob is driven by the
+// deterministic odometer + speed, so it's reproducible).
+void apply_head_bob(contracts::CameraPose& cam, const br::core::WorldState& s) {
+    const float hspeed = std::sqrt(s.wanderer.vel.x * s.wanderer.vel.x + s.wanderer.vel.z * s.wanderer.vel.z);
+    const app::BobOffset bob = app::head_bob(s.odometer, hspeed, br::core::kWalkSpeed, br::core::kRunSpeed);
+    cam.pos[1] += bob.dy;
+    const float rx = std::cos(s.wanderer.yaw), rz = -std::sin(s.wanderer.yaw);  // camera right vector
+    cam.pos[0] += rx * bob.dx;
+    cam.pos[2] += rz * bob.dx;
+}
+
 int run_play(const Options& o) {
     using namespace br::core;
     using namespace std::chrono;
@@ -362,6 +375,7 @@ int run_play(const Options& o) {
         if (GetAsyncKeyState('D') & 0x8000) in.move_x += 1.0f;
         if (GetAsyncKeyState('A') & 0x8000) in.move_x -= 1.0f;
         if (GetAsyncKeyState(VK_SPACE) & 0x8000) in.buttons |= contracts::kButtonJump;
+        if (GetAsyncKeyState(VK_SHIFT) & 0x8000) in.buttons |= contracts::kButtonRun;
 
         POINT cur; GetCursorPos(&cur);
         const float look_yaw = static_cast<float>(cur.x - anchor.x) * kSens;
@@ -391,7 +405,8 @@ int run_play(const Options& o) {
 
         const contracts::ChunkKey center = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
         sm.update(center);
-        const contracts::CameraPose cam = wanderer_camera(s, aspect);
+        contracts::CameraPose cam = wanderer_camera(s, aspect);
+        apply_head_bob(cam, s);  // M18 head-bob (view-only)
         uint32_t drawn = 0;
         if (!renderer.render_chunks_windowed(cam, sm.resident(), 8u, s.tick, &drawn)) {
             std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str());
@@ -453,6 +468,7 @@ app::GamepadState poll_gamepad() {
     g.rx = norm(st.Gamepad.sThumbRX); g.ry = norm(st.Gamepad.sThumbRY);
     g.a = (st.Gamepad.wButtons & XINPUT_GAMEPAD_A) != 0;
     g.start = (st.Gamepad.wButtons & XINPUT_GAMEPAD_START) != 0;
+    g.run = st.Gamepad.bLeftTrigger > 96 || (st.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0;
     return g;
 }
 
@@ -797,6 +813,7 @@ int run_game(const Options& o) {
             if (GetAsyncKeyState('D') & 0x8000) in.move_x += 1.0f;
             if (GetAsyncKeyState('A') & 0x8000) in.move_x -= 1.0f;
             if (GetAsyncKeyState(VK_SPACE) & 0x8000) in.buttons |= contracts::kButtonJump;
+            if (GetAsyncKeyState(VK_SHIFT) & 0x8000) in.buttons |= contracts::kButtonRun;
             if (pad.connected) {  // M16: gamepad adds to keyboard/mouse this tick
                 const contracts::InputCommand gp = app::gamepad_to_input(pad, kSens * 18.0f);
                 in.move_x += gp.move_x; in.move_z += gp.move_z;
@@ -819,7 +836,8 @@ int run_game(const Options& o) {
             }
             const contracts::ChunkKey center = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
             sm->update(center);
-            const contracts::CameraPose cam = wanderer_camera(s, aspect);
+            contracts::CameraPose cam = wanderer_camera(s, aspect);
+            apply_head_bob(cam, s);  // M18 head-bob (view-only)
             uint32_t drawn = 0;
             if (!renderer.render_chunks_windowed(cam, sm->resident(), 8u, s.tick, &drawn)) {
                 std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); ShowCursor(TRUE); return 1;

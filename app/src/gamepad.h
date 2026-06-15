@@ -21,6 +21,7 @@ struct GamepadState {
     float rx = 0.0f, ry = 0.0f;  // right stick (-1..1); ry +up
     bool a = false;              // jump
     bool start = false;          // pause / menu
+    bool run = false;            // hold to run (left trigger / shoulder)
 };
 
 // Radial dead zone on a stick: zero inside `dz`, smoothly rescaled outside so the
@@ -47,6 +48,7 @@ inline contracts::InputCommand gamepad_to_input(const GamepadState& g, float loo
     in.look_yaw = rxx * look_scale;
     in.look_pitch = ryy * look_scale;
     if (g.a) in.buttons |= contracts::kButtonJump;
+    if (g.run) in.buttons |= contracts::kButtonRun;
     return in;
 }
 
