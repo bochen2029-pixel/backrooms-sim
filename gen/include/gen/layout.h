@@ -69,4 +69,13 @@ struct StairSpec {
 };
 StairSpec stair_at(uint64_t world_seed, int32_t level, int64_t cx, int64_t cz);
 
+// M27: the vertical-connectivity validator (the Z-analogue of validate_connectivity).
+// Over a finite slab of the stack -- levels [lvl_lo, lvl_hi] x chunks in [-radius, radius]^2
+// -- treat each chunk as a node: horizontal neighbours are ALWAYS linked (every shared edge
+// carries a doorway), and (L,cx,cz)<->(L+1,cx,cz) is linked iff stair_at fires there. Returns
+// true iff the whole slab is ONE connected component -- i.e. no floor is vertically sealed
+// (every floor reaches every other within a bounded distance). Pure/total (hash evals only);
+// radius >= kStairSuperblock is enough for the per-superblock backstop to guarantee success.
+bool validate_vertical_connectivity(uint64_t world_seed, int32_t lvl_lo, int32_t lvl_hi, int radius);
+
 }  // namespace br::gen

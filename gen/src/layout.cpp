@@ -187,4 +187,42 @@ bool validate_connectivity(const ChunkLayout& L) {
     return count == G * G;
 }
 
+bool validate_vertical_connectivity(uint64_t world_seed, int32_t lvl_lo, int32_t lvl_hi, int radius) {
+    if (lvl_hi < lvl_lo || radius < 0) return false;
+    const int64_t R = radius;
+    const int64_t D = 2 * R + 1;
+    const int64_t plane = D * D;
+    const int64_t total = static_cast<int64_t>(lvl_hi - lvl_lo + 1) * plane;
+    auto idx = [&](int32_t L, int64_t cx, int64_t cz) -> int64_t {
+        return (static_cast<int64_t>(L - lvl_lo) * D + (cx + R)) * D + (cz + R);
+    };
+    std::vector<char> seen(static_cast<size_t>(total), 0);
+    std::vector<int64_t> stack;
+    stack.reserve(static_cast<size_t>(total));
+    const int64_t start = idx(lvl_lo, 0, 0);
+    seen[static_cast<size_t>(start)] = 1;
+    stack.push_back(start);
+    int64_t count = 0;
+    while (!stack.empty()) {
+        const int64_t n = stack.back();
+        stack.pop_back();
+        ++count;
+        const int32_t L = lvl_lo + static_cast<int32_t>(n / plane);
+        const int64_t rem = n % plane;
+        const int64_t cx = (rem / D) - R;
+        const int64_t cz = (rem % D) - R;
+        auto visit = [&](int32_t L2, int64_t x2, int64_t z2) {
+            const int64_t m = idx(L2, x2, z2);
+            if (!seen[static_cast<size_t>(m)]) { seen[static_cast<size_t>(m)] = 1; stack.push_back(m); }
+        };
+        if (cx > -radius) visit(L, cx - 1, cz);            // horizontal: doorways always link
+        if (cx <  radius) visit(L, cx + 1, cz);
+        if (cz > -radius) visit(L, cx, cz - 1);
+        if (cz <  radius) visit(L, cx, cz + 1);
+        if (L < lvl_hi && stair_at(world_seed, L, cx, cz).present)     visit(L + 1, cx, cz);  // up-stair
+        if (L > lvl_lo && stair_at(world_seed, L - 1, cx, cz).present) visit(L - 1, cx, cz);  // a stair from below
+    }
+    return count == total;
+}
+
 }  // namespace br::gen

@@ -95,3 +95,23 @@ TEST_CASE("stair_at: hard per-superblock coverage + sparse + deterministic + per
             variesByLevel = true;
     REQUIRE(variesByLevel);
 }
+
+TEST_CASE("vertical connectivity: no floor is ever sealed across a stack slab (M27)", "[m27][stairs]") {
+    using br::gen::validate_vertical_connectivity;
+    // Over a slab of levels x chunks, every floor must reach every other: horizontal
+    // doorways always link, and the per-superblock up-stair backstop guarantees a vertical
+    // link out of every floor within bounded distance (radius >= kStairSuperblock).
+    for (uint64_t seed : { 1u, 7u, 42u, 0x57A1Bu, 123u }) {
+        INFO("seed " << seed);
+        REQUIRE(validate_vertical_connectivity(seed, -5, 5, 6));   // 11 floors, 13x13 chunks
+    }
+    REQUIRE(validate_vertical_connectivity(99u, 0, 12, 5));        // a tall upward band
+    REQUIRE(validate_vertical_connectivity(99u, -12, 0, 5));       // and a deep downward band
+
+    // The validator is not vacuous: a single-chunk column (radius 0, no superblock backstop
+    // in view) is NOT guaranteed connected, so for at least one seed it must report sealed.
+    bool sawSealed = false;
+    for (uint64_t seed = 1; seed <= 40 && !sawSealed; ++seed)
+        if (!validate_vertical_connectivity(seed, 0, 8, 0)) sawSealed = true;
+    REQUIRE(sawSealed);
+}
