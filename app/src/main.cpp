@@ -57,6 +57,7 @@
 #include "shoggoth_brain_host.h"
 #include "shoggoth_vision.h"
 #include "shoggoth_hearing.h"
+#include "tts.h"
 #include "base64.h"
 
 namespace contracts = br::contracts;
@@ -93,6 +94,10 @@ struct Options {
     bool shoggoth_vision_record = false;  // M22: the Shoggoth sees -- POV snapshot -> vision intent
     bool shoggoth_hearing_record = false;  // M23: the Shoggoth hears -- soundscape -> whisper -> intent
     std::string whisper_exe, whisper_model;  // M23: whisper.cpp CLI + model (defaults below)
+    bool tts_say = false;                  // M24: procedural TTS -> WAV (the Backrooms PA voice)
+    bool tts_check = false;                 // M24: TTS -> whisper round-trip (intelligibility check)
+    bool shoggoth_pa_record = false;       // M24: PA voice spoken into the soundscape -> heard as words
+    std::string say_text;                  // M24: text for --tts-say / the PA line
     uint32_t eval_count = 100;          // --director-eval: scenario count
     uint32_t director_interval_s = 15;  // --soak --director: ambient seconds between summaries (wall clock)
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
@@ -193,6 +198,10 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--shoggoth-hearing-record") == 0) o.shoggoth_hearing_record = true;
         else if (std::strcmp(a, "--whisper-exe") == 0) { if (!str(o.whisper_exe)) return false; }
         else if (std::strcmp(a, "--whisper-model") == 0) { if (!str(o.whisper_model)) return false; }
+        else if (std::strcmp(a, "--tts-say") == 0) o.tts_say = true;
+        else if (std::strcmp(a, "--tts-check") == 0) o.tts_check = true;
+        else if (std::strcmp(a, "--shoggoth-pa-record") == 0) o.shoggoth_pa_record = true;
+        else if (std::strcmp(a, "--say") == 0) { if (!str(o.say_text)) return false; }
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -2198,6 +2207,119 @@ int run_shoggoth_hearing_record(const Options& o) {
     return 0;
 }
 
+// M24: render the shoggoth's soundscape WITH a spoken Backrooms PA announcement mixed in
+// — the fluorescent drone + the wanderer's footfalls as a quiet bed, the procedural TTS
+// PA voice over the top — so whisper.cpp reads the PA back as WORDS (M23 only ever got
+// coarse ambient tags). Deterministic; record-time only.
+bool shoggoth_pa_listen_wav(const app::Shoggoth& sh, const br::core::Vec3& wanderer, uint64_t seed,
+                            const std::string& pa_text, const std::string& wav_path) {
+    using namespace br::core;
+    const uint32_t sr = contracts::kAudioSampleRate;
+    const uint32_t fpt = sr / 120u;
+    const std::vector<int16_t> pa = app::synthesize_speech(pa_text, sr);  // mono PA voice
+    const uint32_t pa_off = static_cast<uint32_t>(0.25f * sr);            // a beat before it speaks
+    const uint32_t total = pa_off + static_cast<uint32_t>(pa.size()) + static_cast<uint32_t>(0.35f * sr);
+    audio::Synth synth(seed ^ 0x5EE110D000000001ull, sr);
+    synth.set_reverb_seconds(0.7f);
+    contracts::AudioListener lis{};
+    lis.pos[0] = sh.pos.x; lis.pos[1] = sh.pos.y + kEyeHeight; lis.pos[2] = sh.pos.z;
+    lis.yaw = sh.yaw; lis.speed = 0.0f;
+    const float dx = wanderer.x - sh.pos.x, dz = wanderer.z - sh.pos.z;
+    const float dist = std::sqrt(dx * dx + dz * dz);
+    float prox = 1.0f - dist / 40.0f;
+    prox = prox < 0.0f ? 0.0f : (prox > 1.0f ? 1.0f : prox);
+    std::vector<int16_t> pcm(static_cast<size_t>(total) * 2u, 0);
+    std::vector<float> block(static_cast<size_t>(fpt) * 2u);
+    uint32_t written = 0, tk = 0;
+    while (written < total) {
+        if (prox > 0.05f && (tk % 48u) == 0u) synth.trigger_footstep(0.3f + 0.7f * prox);
+        synth.render(lis, block.data(), fpt);
+        for (uint32_t i = 0; i < fpt && written < total; ++i, ++written) {
+            float l = block[2 * i] * 0.28f, r = block[2 * i + 1] * 0.28f;  // quiet ambient bed
+            const int64_t pidx = static_cast<int64_t>(written) - static_cast<int64_t>(pa_off);
+            if (pidx >= 0 && pidx < static_cast<int64_t>(pa.size())) {
+                const float pv = static_cast<float>(pa[static_cast<size_t>(pidx)]) / 32768.0f;
+                l += pv; r += pv;  // the PA voice, full level, centred over the bed
+            }
+            pcm[2 * written]     = audio::to_pcm16(l * 0.92f);
+            pcm[2 * written + 1] = audio::to_pcm16(r * 0.92f);
+        }
+        ++tk;
+    }
+    std::string err;
+    return audio::write_wav(wav_path, pcm, sr, static_cast<uint16_t>(contracts::kAudioChannels), err);
+}
+
+// M24: the Shoggoth hears the Backrooms PA VOICE. Identical chase to --shoggoth-record (so
+// --shoggoth-replay reproduces it) -- but each thought renders the soundscape with a spoken
+// PA announcement (procedural TTS) mixed in, runs whisper over it (recovering real WORDS),
+// and feeds the heard line to the brain. Intent logged as in M21 -> replay with whisper, the
+// TTS, AND the model OFFLINE is bit-identical. The richer hearing loop. RECORD-time only.
+int run_shoggoth_pa_record(const Options& o) {
+    using namespace br::core;
+    std::string host; int port; parse_host_port(o.director_url, host, port);
+    const std::string wexe = o.whisper_exe.empty() ? std::string("C:\\whisper.cpp\\whisper-cli.exe") : o.whisper_exe;
+    // The PA carries WORDS, so default to the stronger model for clean word recovery
+    // (M23's ambient tags were fine on base.en; speech wants large-v3-turbo).
+    const std::string wmodel = o.whisper_model.empty() ? std::string("C:\\models\\ggml-large-v3-turbo.bin") : o.whisper_model;
+    const uint64_t N = (o.ticks > 0) ? o.ticks : 1800u;
+    const uint64_t kBrainEvery = 240u;
+    const std::string wav = o.out.empty() ? std::string("runs/shoggoth_pa.wav") : o.out;
+    static const char* kPaLines[] = {
+        "WARNING. LEVEL THREE CONTAINMENT BREACH.",
+        "EVACUATE SECTOR FIVE.",
+        "DANGER. DO NOT RUN. STAY CALM.",
+        "ALERT. THE BIOME IS LOOPING.",
+        "WARNING. EVACUATE. DANGER LEVEL FIVE.",
+    };
+    const uint64_t kPaCount = 5u;
+
+    MazeWalker w(o.seed);
+    app::Shoggoth sh;
+    sh.pos = w.s.wanderer.pos; sh.pos.x += 24.0f;
+    std::vector<app::ShoggothEvent> events;
+    uint64_t H = 1469598103934665603ull;
+    uint64_t thoughts = 0, valid = 0, listens = 0, heard_nonempty = 0;
+    std::string last_heard;
+    for (uint64_t t = 0; t < N; ++t) {
+        w.step();
+        if (t % kBrainEvery == 0) {
+            const std::string pa = kPaLines[thoughts % kPaCount];
+            ++thoughts;
+            std::string heard;
+            if (shoggoth_pa_listen_wav(sh, w.s.wanderer.pos, o.seed, pa, wav)) {
+                ++listens;
+                heard = whisper_transcribe(wav, wexe, wmodel);
+                if (!heard.empty()) { ++heard_nonempty; last_heard = heard; }
+            }
+            const app::ShoggothSummary sum = app::build_shoggoth_summary(sh, w.s.wanderer.pos, t);
+            const br::director::KeelResponse resp = br::director::keel_complete(host, port, app::render_shoggoth_hearing_prompt(sum, heard), 15000);
+            bool ok = false;
+            const app::ShoggothIntent intent = resp.ok ? app::parse_shoggoth_intent(resp.content, ok) : app::ShoggothIntent{};
+            if (resp.ok && ok) {
+                ++valid;
+                sh.intent = intent;
+                events.push_back(app::ShoggothEvent{t, static_cast<int32_t>(intent.action), intent.aggression});
+                H = fold_bytes(H, &events.back(), sizeof(app::ShoggothEvent));
+            }
+        }
+        app::shoggoth_step(sh, w.s.wanderer.pos, o.seed, (t % 8u) == 0u);
+        H = fold_u64(H, app::shoggoth_hash(sh));
+    }
+    if (!o.director_log.empty()) {
+        if (!app::write_shoggoth_log(o.director_log, o.seed, N, events)) { std::fprintf(stderr, "record: failed to write %s\n", o.director_log.c_str()); return 1; }
+    }
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("ticks: %llu\n", static_cast<unsigned long long>(N));
+    std::printf("thoughts: %llu\n", static_cast<unsigned long long>(thoughts));
+    std::printf("listens: %llu\n", static_cast<unsigned long long>(listens));
+    std::printf("heard_nonempty: %llu\n", static_cast<unsigned long long>(heard_nonempty));
+    std::printf("valid_intents: %llu\n", static_cast<unsigned long long>(valid));
+    std::printf("last_heard: %s\n", last_heard.empty() ? "(silence)" : last_heard.c_str());
+    std::printf("combined_hash: %016llx\n", static_cast<unsigned long long>(H));
+    return 0;
+}
+
 // Replay: re-run the SAME chase (seed + ticks from the log), applying the recorded
 // intents at their ticks with KEEL never contacted. The combined hash must equal the
 // record's -> the shoggoth's "brain" lives only in the log (the sacred gate).
@@ -2291,6 +2413,61 @@ int run_render_wav(const Options& o) {
     std::printf("footsteps: %llu\n", static_cast<unsigned long long>(footstep_ticks.size()));
     std::printf("rms: %.5f\n", rms);
     std::printf("distance_m: %.1f\n", static_cast<double>(w.s.odometer));
+    return 0;
+}
+
+// ----- M24 procedural TTS: speak a line of text -> a 16 kHz mono WAV (the PA voice) ---
+int run_tts_say(const Options& o) {
+    const std::string text = o.say_text.empty()
+        ? std::string("WARNING. CONTAINMENT BREACH. LEVEL THREE.") : o.say_text;
+    const uint32_t sr = 16000u;  // whisper-native rate (best recovery)
+    const std::vector<int16_t> pcm = app::synthesize_speech(text, sr);
+    const std::string out = o.out.empty() ? std::string("runs/say.wav") : o.out;
+    std::string err;
+    if (!audio::write_wav(out, pcm, sr, 1u, err)) { std::fprintf(stderr, "wav: %s\n", err.c_str()); return 1; }
+    std::printf("text: %s\n", text.c_str());
+    std::printf("samples: %llu\n", static_cast<unsigned long long>(pcm.size()));
+    std::printf("sr: %u\n", sr);
+    std::printf("duration_s: %.2f\n", static_cast<double>(pcm.size()) / static_cast<double>(sr));
+    return 0;
+}
+
+// M24: the TTS->STT intelligibility check (the gate's keystone): synthesize a PA line,
+// run whisper over it (via the app's robust CreateProcess path), and report what was
+// heard + how many of the spoken words came back. Proves the procedural voice is readable.
+int run_tts_check(const Options& o) {
+    const std::string text = o.say_text.empty() ? std::string("EVACUATE SECTOR FIVE") : o.say_text;
+    const uint32_t sr = 16000u;
+    const std::vector<int16_t> pcm = app::synthesize_speech(text, sr);
+    const std::string wav = o.out.empty() ? std::string("runs/tts_check.wav") : o.out;
+    std::string werr;
+    if (!audio::write_wav(wav, pcm, sr, 1u, werr)) { std::fprintf(stderr, "wav: %s\n", werr.c_str()); return 1; }
+    const std::string wexe = o.whisper_exe.empty() ? std::string("C:\\whisper.cpp\\whisper-cli.exe") : o.whisper_exe;
+    const std::string wmodel = o.whisper_model.empty() ? std::string("C:\\models\\ggml-large-v3-turbo.bin") : o.whisper_model;
+    const std::string heard = whisper_transcribe(wav, wexe, wmodel);
+
+    // lowercase the transcript, then count how many spoken words (>=3 letters) are
+    // recovered as a prefix substring (e.g. "evacuate" -> "evac", "sector" -> "sect").
+    std::string low = heard;
+    for (char& c : low) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    auto contains = [&](const std::string& sub) { return low.find(sub) != std::string::npos; };
+    int spoken = 0, recovered = 0;
+    std::string w;
+    auto check_word = [&]() {
+        if (w.size() < 3) { w.clear(); return; }
+        ++spoken;
+        std::string key = w.substr(0, w.size() < 5 ? w.size() : 5);
+        for (char& c : key) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (contains(key)) ++recovered;
+        w.clear();
+    };
+    for (char c : text) { if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) w.push_back(c); else check_word(); }
+    check_word();
+
+    std::printf("said: %s\n", text.c_str());
+    std::printf("heard: %s\n", heard.empty() ? "(nothing)" : heard.c_str());
+    std::printf("spoken_words: %d\n", spoken);
+    std::printf("recovered_words: %d\n", recovered);
     return 0;
 }
 
@@ -3058,6 +3235,9 @@ int main(int argc, char** argv) {
     if (o.shoggoth_record) return run_shoggoth_record(o);
     if (o.shoggoth_vision_record) return run_shoggoth_vision_record(o);
     if (o.shoggoth_hearing_record) return run_shoggoth_hearing_record(o);
+    if (o.shoggoth_pa_record) return run_shoggoth_pa_record(o);
+    if (o.tts_say) return run_tts_say(o);
+    if (o.tts_check) return run_tts_check(o);
     if (o.shoggoth_replay) return run_shoggoth_replay(o);
     if (o.game)       return run_game(o);
     if (o.soak)       return run_soak(o);

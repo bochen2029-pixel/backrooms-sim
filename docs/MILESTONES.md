@@ -324,6 +324,17 @@ replay, whisper + model off, transcript never re-derived). [x] Graceful no-op �
 "silence", runs) AND KEEL down (0 intents). [x] M0–M22 regression (incl. M21 text + M22 vision sacred
 gates). → `m23-green`. *(Richer "PA voice" hearing via a procedural TTS — deferred.)*
 
+## M24 — Backrooms PA voice (procedural TTS the Shoggoth hears as words) ✅ DONE (`m24-green`)
+**Scope:** The richer hearing loop M23 deferred. A **from-scratch procedural formant TTS** (`app/tts.h`,
+Klatt/eSpeak-style, NO assets) speaks the Backrooms PA so whisper recovers real WORDS. text → phonemes
+(PA lexicon + letter-to-sound) → a sawtooth glottal source + 3-formant cascade, with a **declining pitch
+contour + jitter** (a flat monotone reads as singing to whisper). `--tts-say` / `--tts-check` round-trip it;
+`run_shoggoth_pa_record` (`--shoggoth-pa-record`) mixes a spoken PA over the soundscape → whisper (large-v3)
+→ the brain. Record-time only → `--shoggoth-replay` is bit-identical with the TTS, whisper, AND the model off.
+**Exit gates:** [x] The TTS is intelligible — whisper recovers >=2 spoken words (`--tts-check`, measured
+"Evacuate sector 5"). [x] PA -> whisper words -> intent -> record == replay all-offline. [x] Graceful no-ops
+(whisper missing, KEEL down). [x] M0-M23 regression. -> `m24-green`.
+
 ---
 
 ## Session protocol per milestone

@@ -4,6 +4,44 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 26 — M24: The Backrooms PA gets a VOICE (procedural TTS)  ✅ COMPLETE — 🏷️ `m24-green`
+
+**`gate.ps1 -Milestone M24` exits 0; tagged `m24-green` + pushed. The Backrooms speaks** — a from-scratch
+procedural formant TTS (no assets) gives the PA a voice whisper can read back as WORDS, so the Shoggoth's
+hearing is no longer just coarse ambient tags. The recorded chase still replays bit-for-bit with the TTS,
+whisper, AND the model offline.
+
+**Done (M24; ADR-051).**
+- **`app/tts.h`** — a pure header-only Klatt/eSpeak-style **formant speech synthesizer** (NO assets):
+  text → phonemes (a Backrooms-PA lexicon + a letter-to-sound fallback) → a sawtooth glottal source + a
+  3-formant cascade of 2-pole resonators → 16-bit PCM. `synthesize_speech(text, sr)`.
+- **The key to whisper-readability was PROSODY.** A flat monotone buzz transcribed as *singing*
+  ("♪ … my glory ♪"); a **declining pitch contour + per-period jitter** + the sawtooth source turned it
+  into speech. Measured (large-v3-turbo): "EVACUATE SECTOR FIVE" → **"Evacuate sector 5"**, "LEVEL THREE
+  CONTAINMENT BREACH" → **"Level 3 ... breach"**.
+- **`--tts-say`** writes a spoken line to a WAV; **`--tts-check`** round-trips text → TTS → whisper and
+  reports the words recovered (the gate's intelligibility metric).
+- **`run_shoggoth_pa_record`** (`--shoggoth-pa-record`) — mixes a spoken Backrooms PA announcement (the
+  TTS) over a quiet ambient bed at the Shoggoth's ears → whisper (default large-v3-turbo) → the heard line
+  into the brain → `ShoggothEvent` log. Byte-identical chase to `--shoggoth-record` → `--shoggoth-replay`
+  reproduces it bit-for-bit with the TTS + whisper + the model OFFLINE.
+- **`Invoke-GateM24`** — clean build + full ctest (`[m24]` TTS determinism + lexicon) + whisper (both
+  models) + KEEL + **the TTS is intelligible** (≥2 words recovered) + **the PA-voice sacred gate**
+  (record == replay all-offline) + 2 graceful no-ops + M21 text sacred gate + M20/M5/INV-5/inventory.
+  **gate.ps1 M24 exits 0. Measured: "Evacuate sector 5" (2/3 words), 5 PA intents, record == replay.**
+
+**Gotchas / notes.** (1) A flat monotone formant buzz reads as MUSIC to whisper — speech needs a moving
+pitch (declination + jitter). (2) A `static thread_local` lowpass state in the synth leaked between calls
+→ broke per-call determinism → made it a local (the `[m24]` determinism test caught it). (3) Calling
+whisper-cli directly from PowerShell tripped `$ErrorActionPreference='Stop'` on whisper's stderr → moved
+the call into the app (`--tts-check`, robust `CreateProcess`) and the gate reads the `recovered_words`
+metric. No new build dependency (the TTS is pure code; whisper stays a shelled-out tool).
+
+**Next: M25 — the Shoggoth body in the DXR (ray-traced) path** (currently raster-only). Then the Shoggoth
+arc is fully complete (body + nav + brain + live brain + eyes + ears + voice, visible in both renderers).
+
+---
+
 ## Session 25 — M23: The Shoggoth HEARS (whisper.cpp)  ✅ COMPLETE — 🏷️ `m23-green`
 
 **`gate.ps1 -Milestone M23` exits 0; tagged `m23-green` + pushed. The monster has eyes AND ears** — it

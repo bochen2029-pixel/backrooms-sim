@@ -11,6 +11,7 @@
 #include "shoggoth_brain_host.h"
 #include "shoggoth_vision.h"
 #include "shoggoth_hearing.h"
+#include "tts.h"
 #include "base64.h"
 
 using namespace br::app;
@@ -187,6 +188,29 @@ TEST_CASE("the hearing prompt carries what it heard, the situation, and the inte
     REQUIRE(p.find("flank") != std::string::npos);
     const std::string q = render_shoggoth_hearing_prompt(sum, "");  // heard nothing -> "silence"
     REQUIRE(q.find("silence") != std::string::npos);
+}
+
+TEST_CASE("procedural TTS synthesizes deterministic, bounded, non-silent speech", "[m24][tts]") {
+    const auto a = synthesize_speech("WARNING LEVEL THREE", 16000u);
+    const auto b = synthesize_speech("WARNING LEVEL THREE", 16000u);
+    REQUIRE(a.size() > 8000u);   // ~0.5 s+ of audio
+    REQUIRE(a == b);             // deterministic (a pure function of text + rate)
+    int peak = 0;
+    for (int16_t v : a) { const int m = v < 0 ? -static_cast<int>(v) : static_cast<int>(v); if (m > peak) peak = m; }
+    REQUIRE(peak > 1000);        // it actually speaks (not silence)
+    REQUIRE(synthesize_speech("", 16000u).empty());          // nothing to say -> nothing
+    REQUIRE(synthesize_speech("EVACUATE", 16000u) != a);     // different text -> different audio
+}
+
+TEST_CASE("the PA lexicon maps known words and falls back for unknown ones", "[m24][tts]") {
+    const auto three = tts::text_to_phonemes("THREE");
+    REQUIRE(three.size() >= 3u);                  // TH R IY (+ a trailing SIL)
+    REQUIRE(three[0] == tts::Ph::TH);
+    REQUIRE(three[1] == tts::Ph::R);
+    REQUIRE(three[2] == tts::Ph::IY);
+    REQUIRE_FALSE(tts::text_to_phonemes("ZZZQX").empty());   // letter-to-sound fallback, not silent
+    REQUIRE(tts::text_to_phonemes("").empty());
+    REQUIRE(tts::text_to_phonemes("level three").size() > tts::text_to_phonemes("three").size());  // case-insensitive
 }
 
 TEST_CASE("the live async brain host has a clean lifecycle and an empty initial poll", "[m21b][shoggoth][brain]") {
