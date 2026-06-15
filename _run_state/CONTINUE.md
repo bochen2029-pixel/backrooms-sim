@@ -45,9 +45,13 @@ and press on. Minimal meta — no scaffolding-on-scaffolding; the bulk of effort
   — run_play's fake ground plane catches you, so you can't fall through shafts/down-stairs in-game; give it
   holes (or real per-cell floor) at shaft + down-stair cells so the despair-gradient works live (ascent
   already works). (2) **M30 telegraph** — draft/wind audio near a shaft (decision 6; off the sim hash).
-  (3) **M30 fog-to-black** abyss render + stream a few floors down a shaft. (4) **M28-DXR** see-through verify
-  (build_scene already takes all resident chunks). (5) **deep-descent soak**. (6) the **M0–M25 regression
-  sweep** + Phase-IV DONE checks (ROADMAP §3). Then perpetual-polish (§4). The Shoggoth lives
+  (3) **M30 fog-to-black** abyss render + stream a few floors down a shaft. (4) ✅ **M28-DXR see-through
+  CONFIRMED** (read `render_dxr/src/dxr.cpp:738` — `build_scene` builds a BLAS per resident chunk at its
+  world-Y, no `(cx,cz)` dedup, so 2-level residency renders both floors in the ray-traced path too; no DXR
+  change needed). (5) **deep-descent soak** (blocked on live descent (1)). (6) the **M0–M25 regression
+  sweep** — done this session: 27 level-0 goldens (m1/m2/m4/m5/m7/m8) bit-identical, 98 ctest green,
+  10-seed ascend/fall robustness all pass. Then Phase-IV DONE checks (ROADMAP §3) + perpetual-polish (§4).
+  The Shoggoth lives
   OUTSIDE WorldState (`app/src/shoggoth.h`), pos is 2-D (X/Z; pos.y = spawn height, never moves vertically),
   nav already takes `seed` + 2-D cells but **hardcodes `ChunkKey{0,cx,cz}`** in `maze_open` (~L62-78).
   No frozen shoggoth-replay golden exists (the M21 gate records→replays FRESH + compares), so folding `level`
