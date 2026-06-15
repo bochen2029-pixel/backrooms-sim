@@ -134,6 +134,12 @@ speed); `apply_head_bob` adds it to the `CameraPose` after `wanderer_camera` —
 WorldState** (the M5 golden stays bit-identical). Shift / gamepad trigger sets `kButtonRun`, which
 `core::tick` turns into `kRunSpeed` (deterministic through the input contract).
 
+**The Shoggoth (M20).** `app/shoggoth.h` (pure, header-only) — a deterministic chase creature that
+lives **outside WorldState** (existing hashes untouched). `shoggoth_step(sh, wanderer, seed,
+pathfind)` BFS-navigates the maze (`gen` layouts) toward the wanderer with a lurk→hunt→chase→retreat
+state machine + organic ooze; `shoggoth_hash` for replay. `--shoggoth` is the headless gate driver
+(determinism + chase metrics + a CPU top-down chase-map PNG via `--out`). The KEEL brain is M21.
+
 **Settings & photo mode (M12).** Configuration is the **CLI flag surface** above
 (the de-facto settings interface; `scripts/run.ps1` is the one-command entry).
 **Photo mode** = the deterministic framed-capture modes already shipped: `--shot`

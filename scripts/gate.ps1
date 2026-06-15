@@ -1936,9 +1936,9 @@ function Invoke-GateM20 {
         foreach ($seed in @(1, 2, 3)) {
             $r = Invoke-AppCapture @('--shoggoth', '--seed', "$seed", '--out', (Join-Path $tmp "chase$seed.png"))
             if ($r.Exit -ne 0) { throw "--shoggoth seed $seed exited $($r.Exit)" }
-            if ((Get-Metric $r.Out 'ever_hunted') -ne 1) { throw "seed $seed: shoggoth never engaged the hunt" }
-            if ((Get-MetricFloat $r.Out 'moved') -lt 8.0) { throw "seed $seed: shoggoth barely moved (stuck?)" }
-            if ((Get-MetricFloat $r.Out 'min_dist') -gt 18.0) { throw "seed $seed: shoggoth never got near the wanderer (min_dist > spawn gap)" }
+            if ((Get-Metric $r.Out 'ever_hunted') -ne 1) { throw "seed ${seed}: shoggoth never engaged the hunt" }
+            if ((Get-MetricFloat $r.Out 'moved') -lt 8.0) { throw "seed ${seed}: shoggoth barely moved (stuck?)" }
+            if ((Get-MetricFloat $r.Out 'min_dist') -gt 18.0) { throw "seed ${seed}: shoggoth never got near the wanderer (min_dist > spawn gap)" }
         }
         Write-Note 'shoggoth engages + routes the maze + closes in, across 3 seeds'
     }

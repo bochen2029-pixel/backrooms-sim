@@ -4,6 +4,39 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 21 — M20: The Shoggoth (deterministic maze-navigating chase)  ✅ COMPLETE — 🏷️ `m20-green`
+
+**`gate.ps1 -Milestone M20` exits 0; tagged `m20-green` + pushed. Something lives in the
+Backrooms now** — a deterministic monster that hunts the wanderer through the maze.
+
+**Done (M20; commit `<wip>` + gate; ADR-046).**
+- **`app/shoggoth.h`** — a deterministic chase creature **outside WorldState** (so every
+  existing replay/walk-bot/Director hash is untouched — structurally unchanged
+  `world_state_hash`). Pure `shoggoth_step(sh, wanderer, seed, pathfind)` + own
+  `shoggoth_hash`. **BFS maze pathfinding** (gen layouts, bounded window, per-chunk cache)
+  toward the wanderer's cell, steering to cell centres (stays in corridors, no
+  wall-tunnelling); **lurk → hunt → chase → retreat** state machine; organic ooze.
+- **`--shoggoth`** — a wanderer walks the maze (the M11 `MazeWalker`); the shoggoth hunts.
+  Reports `shoggoth_hash` + `min_dist` + `moved` + `ever_hunted`. `--out` renders a CPU
+  top-down **chase map** (maze walls + cyan wanderer trail + red shoggoth trail) — the visual.
+- **`Invoke-GateM20`** — ctest (`[m20]`: determinism, lurk-far, hunt-and-close, navigates) +
+  `--shoggoth` same-seed-identical-hash ×2 + engages/navigates/closes-in across 3 seeds +
+  walk-bot/M5 regression (shoggoth separate → existing determinism intact) + INV-5/inventory.
+  **gate.ps1 M20 exits 0.** Seed 1: caught the wanderer at **1.38 m** after routing **19 m**.
+
+**Gotchas / notes.** The shoggoth lives in `app` (header-only) because navigation needs `gen`
+but `core` depends on nothing — it's deterministic by construction (seeded, no wall-clock),
+record→replay bit-identical on a build (the M20 gate proves it). The **body is a proxy** (a
+top-down marker) per the operator's "movement logic first" steer; the **in-world 3D blob is
+M20b**. The BFS-to-goal-cell design is the **cascade scaffold for M21**: the LLM will set the
+goal cell / mood, this cheap navigator walks it there.
+
+**Next: M20b** the in-world 3D blob body (raster + DXR), then **M21** the Shoggoth's KEEL brain
+(shoggoth system prompt → schema-valid intent → this navigator; replay bit-identical model-off),
+then **M22** vision (qwen-VL + mmproj via a backrooms-local KEEL copy).
+
+---
+
 ## Session 20 — M19: Real-time ray-tracing toggle  ✅ COMPLETE — 🏷️ `m19-green`
 
 **`gate.ps1 -Milestone M19` exits 0; tagged `m19-green` + pushed.** The live walk can now be
