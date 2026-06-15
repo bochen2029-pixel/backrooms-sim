@@ -31,9 +31,18 @@ top-down marker) per the operator's "movement logic first" steer; the **in-world
 M20b**. The BFS-to-goal-cell design is the **cascade scaffold for M21**: the LLM will set the
 goal cell / mood, this cheap navigator walks it there.
 
-**Next: M20b** the in-world 3D blob body (raster + DXR), then **M21** the Shoggoth's KEEL brain
-(shoggoth system prompt → schema-valid intent → this navigator; replay bit-identical model-off),
-then **M22** vision (qwen-VL + mmproj via a backrooms-local KEEL copy).
+**M20b ✅ (`m20b-green`) — the in-world body.** A procedural **warm-orange radial-tentacle blob**
+(operator reference; no assets) generated each frame in world space (`app/shoggoth_body.h`) and
+**injected as a synthetic `ResidentChunk`** with a per-frame key → draws through the existing lit
+pipeline (zero renderer change) and the writhe animates. Wired into `--play` + `--game` (Play) — the
+shoggoth chases you, body visible first-person; `--shoggoth-shot` renders it for QC/gate. Gate
+(extended M20): body renders in-world debug-clean + the live walk stays debug-clean. Fixed a UB
+crash (`StreamManager::resident()` returns **by value** → `.begin()/.end()` of two temporaries).
+
+**Next: M21** the Shoggoth's KEEL brain (shoggoth system prompt → schema-valid intent → this
+navigator; replay bit-identical model-off), then **M22** vision (qwen-VL + mmproj via a
+backrooms-local KEEL copy). *(M20b in DXR/ray-traced mode is a small follow-up — currently the
+in-world body shows in the raster path; RT shows the world without the live creature.)*
 
 ---
 

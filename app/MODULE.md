@@ -139,6 +139,9 @@ lives **outside WorldState** (existing hashes untouched). `shoggoth_step(sh, wan
 pathfind)` BFS-navigates the maze (`gen` layouts) toward the wanderer with a lurk→hunt→chase→retreat
 state machine + organic ooze; `shoggoth_hash` for replay. `--shoggoth` is the headless gate driver
 (determinism + chase metrics + a CPU top-down chase-map PNG via `--out`). The KEEL brain is M21.
+`app/shoggoth_body.h` (M20b) generates its procedural **warm-orange radial-tentacle body** (no
+assets) in world space, injected each frame as a synthetic `ResidentChunk` and drawn through the lit
+pipeline — visible first-person in `--play`/`--game`; `--shoggoth-shot` renders it to a PNG.
 
 **Settings & photo mode (M12).** Configuration is the **CLI flag surface** above
 (the de-facto settings interface; `scripts/run.ps1` is the one-command entry).

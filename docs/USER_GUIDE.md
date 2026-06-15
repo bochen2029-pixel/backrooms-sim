@@ -165,4 +165,11 @@ carpet, the buzz of fluorescent lights at maximum hum, and the feeling that you 
 alone and not quite alone. This simulation renders that idea literally and without end:
 **Level 0**, generated forever, never repeating, deterministic to the last photon.
 
-There is no exit. That's the point. Walk a while.
+## 10. …and you are not alone
+
+Something else walks the Backrooms with you. A **Shoggoth** — a warm, writhing, radial mass of
+tentacles — lurks in the maze, and if you wander too close it will **hunt you**, routing the
+corridors to close the distance. It's driven by its own deterministic navigation (and, in time, an
+AI brain of its own). You can't fight it. You can only keep moving.
+
+There is no exit. That's the point. Walk a while — but listen for what's behind you.
