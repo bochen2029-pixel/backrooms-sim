@@ -1836,7 +1836,7 @@ bool Renderer::render_chunks_windowed(const contracts::CameraPose& camera,
             for (int64_t dgj = -R; dgj <= R && n < kMaxLights; ++dgj) {
                 const int64_t gi = gi0 + dgi, gj = gj0 + dgj;
                 if (!contracts::is_fluorescent_cell(gi, gj)) continue;
-                float p[3]; contracts::fluorescent_light_pos(gi, gj, p);
+                float p[3]; contracts::fluorescent_light_pos(gi, gj, p); p[1] += contracts::level_base_y(contracts::level_from_y(camera.pos[1]));  // M26: lights at the wanderer's current floor
                 const uint64_t lid = static_cast<uint64_t>(gi) * 0x9e3779b97f4a7c15ULL ^ static_cast<uint64_t>(gj) * 0xc2b2ae3d27d4eb4fULL;
                 const float fl = br::core::light_flicker(d.pendingTexSeed, lid, tick);
                 lc.lights[n][0] = p[0]; lc.lights[n][1] = p[1]; lc.lights[n][2] = p[2]; lc.lights[n][3] = fl;
@@ -1968,7 +1968,7 @@ bool Renderer::render_chunks(const contracts::CameraPose& camera,
                 const int64_t gi = gi0 + dgi, gj = gj0 + dgj;
                 if (!contracts::is_fluorescent_cell(gi, gj)) continue;
                 float p[3];
-                contracts::fluorescent_light_pos(gi, gj, p);
+                contracts::fluorescent_light_pos(gi, gj, p); p[1] += contracts::level_base_y(contracts::level_from_y(camera.pos[1]));  // M26: lights at the wanderer's current floor
                 const uint64_t lid = static_cast<uint64_t>(gi) * 0x9e3779b97f4a7c15ULL ^
                                      static_cast<uint64_t>(gj) * 0xc2b2ae3d27d4eb4fULL;
                 const float fl = br::core::light_flicker(d.pendingTexSeed, lid, tick);
