@@ -97,6 +97,14 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
     const gen::StairSpec upStair = gen::stair_at(world_seed, key.level, key.cx, key.cz);
     const gen::StairSpec dnStair = gen::stair_at(world_seed, key.level - 1, key.cx, key.cz);
 
+    // M30: a rare open SHAFT drops a vertical void through several floors at one column.
+    // Its cell's FLOOR is open on every level it spans except the bottom (you LAND there); its
+    // CEILING is open on every level except the top (you FALL IN there). shaft_at is per-column,
+    // so each floor cuts its own slice independently and they align into one continuous void.
+    const gen::ShaftSpec shaft = gen::shaft_at(world_seed, key.cx, key.cz);
+    const bool shaftFloorOpen = shaft.present && key.level > shaft.top_level - shaft.depth && key.level <= shaft.top_level;
+    const bool shaftCeilOpen  = shaft.present && key.level >= shaft.top_level - shaft.depth && key.level <  shaft.top_level;
+
     // Floor + ceiling grids (per cell). Ceiling faces down; some tiles fluorescent.
     for (int i = 0; i < G; ++i) {
         for (int j = 0; j < G; ++j) {
@@ -104,18 +112,20 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
             const float x1 = ox + static_cast<float>(i + 1) * cs;
             const float z0 = oz + static_cast<float>(j) * cs;
             const float z1 = oz + static_cast<float>(j + 1) * cs;
-            const bool floorHole = dnStair.present && dnStair.cell_i == i && dnStair.cell_j == j;
+            const bool floorHole = (dnStair.present && dnStair.cell_i == i && dnStair.cell_j == j)
+                                   || (shaftFloorOpen && shaft.cell_i == i && shaft.cell_j == j);  // M30 shaft
             const float f0[3]={x0,baseY,z0}, f1[3]={x1,baseY,z0}, f2[3]={x1,baseY,z1}, f3[3]={x0,baseY,z1};
-            if (!floorHole)  // M27: a stair from the level below arrives here -> open the floor
+            if (!floorHole)  // M27 stair from below / M30 shaft void -> open the floor
                 push_quad(c.vertices, f0, f1, f2, f3, up, floor_col, kMatCarpet);
 
             const int64_t gi = key.cx * G + i;
             const int64_t gj = key.cz * G + j;
             const bool lamp = is_fluorescent_cell(gi, gj);
-            const bool ceilHole = upStair.present && upStair.cell_i == i && upStair.cell_j == j;
+            const bool ceilHole = (upStair.present && upStair.cell_i == i && upStair.cell_j == j)
+                                  || (shaftCeilOpen && shaft.cell_i == i && shaft.cell_j == j);  // M30 shaft
             const float cy = baseY + H;
             const float ck0[3]={x0,cy,z0}, ck1[3]={x1,cy,z0}, ck2[3]={x1,cy,z1}, ck3[3]={x0,cy,z1};
-            if (!ceilHole)  // M27: an up-stair leaves through here -> open the ceiling
+            if (!ceilHole)  // M27 up-stair / M30 shaft void -> open the ceiling
                 push_quad(c.vertices, ck0, ck3, ck2, ck1, down,
                           lamp ? lamp_col : ceil_col, lamp ? kMatFluorescent : kMatCeiling);
         }
