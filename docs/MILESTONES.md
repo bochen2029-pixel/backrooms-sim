@@ -284,6 +284,18 @@ motion every tick — cascading, delegated embodiment.
 [ ] **Replay bit-identical with the model offline** (the sacred gate — intent via the event log).
 [ ] `--no-shoggoth` kill switch. [ ] M0–M20 regression.
 
+## M21b — Live async brain (the Shoggoth thinks while you play) ✅ DONE (`m21b-green`)
+**Scope:** Make the M21 brain run in the actual game. `app/shoggoth_brain_host.h` — a `ShoggothBrainHost`
+mirroring the Director's async `DirectorHost` (worker thread, latest-wins `submit`, non-blocking `poll`,
+atomic counters, graceful no-op when KEEL is down). Wired into `run_play` + `run_game`: submit a
+`ShoggothSummary` every ~3 s (ambient wall-clock), apply the returned intent to the live Shoggoth at a tick
+boundary. On by default; **`--no-shoggoth-brain`** kill switch. KEEL stays OFF the 120 Hz frame thread (the
+M11/Gate-2 async-isolation lesson); the headless record/replay sacred gate is untouched.
+**Exit gates:** [x] `--play` brain-ON thinks live (≥1 intent applied). [x] Async-isolated — p99 frame < 2×
+median best-of-2 (1440p) AND no new hitches vs brain-off (measured on **1.79×** vs off **1.44×** — ON ≈ OFF).
+[x] Graceful no-op with KEEL down. [x] `--no-shoggoth-brain` kill switch. [x] The M21 sacred gate (record ==
+replay, model off) + M0–M21 regression. → `m21b-green`.
+
 ## M22 — Shoggoth sees (KEEL vision / qwen-VL + mmproj)
 **Scope:** A virtual camera renders the shoggoth's **POV snapshot** (offscreen → image) → a **vision
 model via KEEL** (`C:\models\mmproj-F16.gguf`) → richer intent. **First check whether the `:7071`

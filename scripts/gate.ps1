@@ -2053,6 +2053,134 @@ function Invoke-GateM21 {
     Write-Note 'M21 gate: the Shoggoth has a KEEL brain (intent -> the deterministic navigator), and replay stays bit-exact with the model off. The monster thinks.'
 }
 
+function Invoke-GateM21b {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green (incl. the [m21b] brain-host lifecycle test)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m21b'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+
+    # The live brain reuses the Director's KEEL sidecar (:7071). It must be up for the
+    # "it thinks live" assertion, else that check is vacuous. (Relaunch: C:\keel-sidecar-7071\start.cmd.)
+    Assert-Gate 'KEEL sidecar reachable (:7071, the brain endpoint)' {
+        $r = Invoke-AppCapture @('--director-probe', '--seed', '1')
+        if ($r.Exit -ne 0) { throw "director-probe exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'keel_ok') -ne 1) { throw "KEEL not reachable at :7071 (C:\keel-sidecar-7071\start.cmd)" }
+    }
+
+    # THE M21b GATE: with the brain ON, the creature THINKS LIVE (>=1 KEEL intent applied
+    # while you play) AND the async host never blocks the 120 Hz frame loop. Async
+    # isolation is proven two ways (the M3 + M11/Gate-2 lessons): (a) absolute -- p99
+    # frame < 2x median, best-of-2 (a blocking host would run a multi-second inference ON
+    # the frame thread and explode this to ~100x); (b) relative -- the brain-ON hitch
+    # ratio adds nothing over brain-OFF (ON ~= OFF), the true async-isolation invariant
+    # (ADR-039), robust to the uncapped loop's shared-GPU jitter.
+    Assert-Gate 'live async brain: --play thinks (>=1 intent) + async-isolated (p99<2x median best-of-2; no new hitches vs off)' {
+        $offBest = 999.0
+        for ($i = 1; $i -le 2; ++$i) {
+            $csv = Join-Path $tmp "off$i.csv"
+            $r = Invoke-AppCapture @('--play', '--no-shoggoth-brain', '--seconds', '8', '--seed', '3', '--width', '2560', '--height', '1440', '--csv', $csv)
+            if ($r.Exit -ne 0) { throw "brain-off --play exited $($r.Exit): $($r.Out)" }
+            if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "brain-off walk had debug-layer messages" }
+            $h = Get-HitchStats $csv
+            if ($h.P99Ratio -lt $offBest) { $offBest = $h.P99Ratio }
+        }
+        $onBest = 999.0; $intents = 0
+        for ($i = 1; $i -le 2; ++$i) {
+            $csv = Join-Path $tmp "on$i.csv"
+            $r = Invoke-AppCapture @('--play', '--seconds', '8', '--seed', '3', '--width', '2560', '--height', '1440', '--csv', $csv)
+            if ($r.Exit -ne 0) { throw "brain-on --play exited $($r.Exit): $($r.Out)" }
+            if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "brain-on walk had debug-layer messages" }
+            $thisIntents = Get-Metric $r.Out 'brain_intents'
+            if ($thisIntents -gt $intents) { $intents = $thisIntents }
+            $h = Get-HitchStats $csv
+            Write-Note ("brain-on attempt ${i}: frames={0} median={1:N2}ms p99={2:N2}ms p99/median={3:N2}x intents={4}" -f $h.FrameCount, $h.Median, $h.P99, $h.P99Ratio, $thisIntents)
+            if ($h.P99Ratio -lt $onBest) { $onBest = $h.P99Ratio }
+            if ($onBest -lt 2.0 -and $intents -ge 1) { break }
+        }
+        if ($intents -lt 1) { throw "the live brain applied 0 intents in --play -- it never thought (KEEL down at :7071?)" }
+        if ($onBest -ge 2.0) { throw ("p99 frame {0:N2}x median over both attempts (>= 2x -- the async host blocked the frame)" -f $onBest) }
+        if ($onBest -gt $offBest * 1.5) { throw ("brain-on hitch {0:N2}x vs brain-off {1:N2}x (> 1.5x -- the async host added hitches)" -f $onBest, $offBest) }
+        Write-Note ("live brain: $intents intents applied; p99/median on={0:N2}x off={1:N2}x (async-isolated, ADR-039)" -f $onBest, $offBest)
+    }
+
+    # Graceful no-op with KEEL down: a dead URL -> a clean run, zero intents, exit 0.
+    Assert-Gate 'graceful no-op: --play with KEEL down (dead URL) stays clean, 0 intents' {
+        $r = Invoke-AppCapture @('--play', '--director-url', '127.0.0.1:9999', '--seconds', '4', '--seed', '3', '--width', '960', '--height', '540')
+        if ($r.Exit -ne 0) { throw "--play (dead URL) exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "dead-URL walk had debug-layer messages" }
+        if ((Get-Metric $r.Out 'brain_intents') -ne 0) { throw "intents applied with KEEL unreachable?!" }
+        Write-Note "graceful no-op: dead-URL --play clean, 0 intents, exit 0"
+    }
+
+    # The kill switch: --no-shoggoth-brain disables the brain entirely (no worker requests).
+    Assert-Gate 'kill switch: --no-shoggoth-brain disables the live brain (INV-6)' {
+        $r = Invoke-AppCapture @('--play', '--no-shoggoth-brain', '--seconds', '3', '--seed', '3', '--width', '960', '--height', '540')
+        if ($r.Exit -ne 0) { throw "--no-shoggoth-brain --play exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'brain_requests') -ne 0) { throw "--no-shoggoth-brain still ran the brain" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "kill-switch walk had debug-layer messages" }
+    }
+
+    # The full game shell boots debug-clean with the live brain wired in.
+    Assert-Gate '--game boots debug-clean with the live brain wired' {
+        $r = Invoke-AppCapture @('--game', '--seconds', '3', '--seed', '3', '--width', '1280', '--height', '720')
+        if ($r.Exit -ne 0) { throw "--game exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "--game had debug-layer messages" }
+    }
+
+    # SACRED-GATE regression: M21b changes only the LIVE path; the headless brain
+    # record -> replay must STILL be bit-identical with the model offline.
+    Assert-Gate 'regression (sacred gate): shoggoth-record == replay bit-identical, model off' {
+        $slog = Join-Path $tmp 's.log'
+        $rec = Invoke-AppCapture @('--shoggoth-record', '--director-url', 'http://127.0.0.1:7071', '--director-log', $slog, '--seed', '3', '--ticks', '1200')
+        if ($rec.Exit -ne 0) { throw "record exited $($rec.Exit): $($rec.Out)" }
+        $valid = Get-Metric $rec.Out 'valid_intents'
+        if ($valid -lt 1) { throw "the brain produced no valid intents -- is the KEEL sidecar up at :7071?" }
+        $recHash = Get-MetricStr $rec.Out 'combined_hash'
+        $rep = Invoke-AppCapture @('--shoggoth-replay', '--director-log', $slog)
+        if ($rep.Exit -ne 0) { throw "replay exited $($rep.Exit): $($rep.Out)" }
+        if ((Get-MetricStr $rep.Out 'combined_hash') -ne $recHash) { throw "replay hash != record hash -- the model leaked into the sim" }
+        Write-Note "sacred gate intact: $valid LLM intents; record == replay ($recHash) model offline"
+    }
+
+    # Regression: brain-off determinism (M20) + the M5 raster golden are untouched.
+    Assert-Gate 'regression: brain-off shoggoth deterministic + M5 golden bit-identical' {
+        $h1 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '5')).Out 'shoggoth_hash'
+        $h2 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '5')).Out 'shoggoth_hash'
+        if ($h1 -ne $h2) { throw "shoggoth hash not reproducible with the brain off" }
+        $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+        $shot = Join-Path $tmp 'm5.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        if ([double](& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1) -ne 0.0) { throw "M5 golden regressed" }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M21b gate: the Shoggoth thinks WHILE you play -- KEEL off the frame thread (async-isolated), graceful when down, and the sacred record==replay determinism is untouched.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -2081,6 +2209,7 @@ try {
         'M19'   { Invoke-GateM19 }
         'M20'   { Invoke-GateM20 }
         'M21'   { Invoke-GateM21 }
+        'M21B'  { Invoke-GateM21b }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

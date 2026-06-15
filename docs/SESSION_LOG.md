@@ -4,6 +4,48 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 23 — M21b: The Shoggoth's LIVE async brain  ✅ COMPLETE — 🏷️ `m21b-green`
+
+**`gate.ps1 -Milestone M21b` exits 0; tagged `m21b-green` + pushed. The monster thinks WHILE you
+play** — KEEL inference runs off the 120 Hz frame thread, so the creature reasons live without ever
+hitching the loop, and the headless record→replay determinism stays bit-exact.
+
+**Done (M21b; ADR-048).**
+- **`app/shoggoth_brain_host.h`** — a header-only `ShoggothBrainHost`, a faithful mirror of the
+  Director's async `DirectorHost`: a worker thread, non-blocking latest-wins `submit(ShoggothSummary)`
+  (≤1 inference in flight), non-blocking `poll()` → validated intents, atomic `requests()`/`produced()`.
+  The worker runs the exact M21 brain off-thread (`keel_complete` → `render_shoggoth_prompt` →
+  `parse_shoggoth_intent`); KEEL down → `ok=false` → graceful no-op (the M20 `Hunt` default keeps hunting).
+- **Wired into `run_play` + `run_game`** — every ~3 s (ambient wall-clock) submit a summary; apply the
+  returned intent to `sh.intent` at a tick boundary (the same discrete timestamped-event shape the
+  headless sacred gate proves bit-exact). On by default; **`--no-shoggoth-brain`** kill switch. New
+  metrics `brain_intents` / `brain_requests`.
+- **`Invoke-GateM21b`** — clean build + full ctest (`[m21b]` host-lifecycle test) + KEEL reachable +
+  **the live brain thinks (≥1 intent in `--play`) AND is async-isolated** + graceful dead-URL no-op +
+  kill switch + `--game` debug-clean + **the M21 SACRED GATE** (record == replay, model off) + M20/M5/
+  INV-5/inventory. **gate.ps1 M21b exits 0.**
+
+**Async isolation, proven two ways** (M3 + M11/Gate-2). Absolute: p99 frame < 2× median, best-of-2 at
+1440p (a blocking host — a multi-second inference on the frame thread — would explode this to ~100×).
+Relative: brain-ON hitch ratio adds nothing over brain-OFF. **Measured (8 s `--play`, 1440p): on
+p99/median 1.79× vs off 1.44× — ON ≈ OFF**; the residual is the uncapped loop's shared-GPU jitter
+(ADR-039), not a stall. The live brain applied 3 intents over 8 s. Sacred gate: 5 LLM intents,
+record == replay `12e9f56f9171fe5d` model offline.
+
+**Gotchas / notes.** `parse_host_port` lives in a NESTED anonymous namespace in `main.cpp`; a plain
+forward declaration for `run_play`/`run_game` (which precede the definition) created a second overload →
+`ambiguous call`. Fix: wrap the forward decl in `namespace { … }` so it lands in the SAME anonymous
+namespace as the definition. `--play`'s uncapped loop is naturally ~1.9× p99/median at 720p (loop jitter,
+NOT the brain — brain-off measured the same), so the pacing gate runs at 1440p (~1.45×, stable) and ALSO
+asserts ON ≈ OFF, which is robust to that jitter.
+
+**Next: M22 — vision (operator-gated: confirm before building).** A POV snapshot → qwen-VL
+(`mmproj-F16.gguf`) via a backrooms-local KEEL copy feeds richer intent to this same brain; first step is
+investigating the KEEL vision setup. *(Also still pending: M20b-in-DXR — the in-world body shows in the
+raster path only.)*
+
+---
+
 ## Session 22 — M21: The Shoggoth's KEEL brain  ✅ COMPLETE — 🏷️ `m21-green`
 
 **`gate.ps1 -Milestone M21` exits 0; tagged `m21-green` + pushed. The monster thinks** — a

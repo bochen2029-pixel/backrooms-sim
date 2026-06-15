@@ -8,6 +8,7 @@
 #include "shoggoth.h"
 #include "shoggoth_body.h"
 #include "shoggoth_brain.h"
+#include "shoggoth_brain_host.h"
 
 using namespace br::app;
 
@@ -123,4 +124,16 @@ TEST_CASE("the intent steers the shoggoth: Flee retreats, Hunt closes in", "[m21
     const float fleeD = run(ShoggothAction::Flee);
     REQUIRE(huntD < 22.0f);     // hunt closes the ~24 m gap
     REQUIRE(fleeD > huntD);     // flee ends up farther away than hunt
+}
+
+TEST_CASE("the live async brain host has a clean lifecycle and an empty initial poll", "[m21b][shoggoth][brain]") {
+    // M21b: construct (which starts the worker thread), then -- before any submit --
+    // poll() is empty and the counters are zero, and destruction joins cleanly. With no
+    // summary submitted the worker just waits on its condition variable, so this is
+    // fully network-free and deterministic (the live KEEL path is proven by the gate).
+    ShoggothBrainHost host("127.0.0.1", 7071);
+    REQUIRE(host.poll().empty());
+    REQUIRE(host.requests() == 0u);
+    REQUIRE(host.produced() == 0u);
+    // The destructor runs at scope exit: it signals stop + joins the worker (no hang).
 }

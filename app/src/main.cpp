@@ -54,6 +54,7 @@
 #include "shoggoth.h"
 #include "shoggoth_body.h"
 #include "shoggoth_brain.h"
+#include "shoggoth_brain_host.h"
 
 namespace contracts = br::contracts;
 namespace audio = br::audio;
@@ -85,6 +86,7 @@ struct Options {
     bool shoggoth = false;              // M20 headless shoggoth chase (determinism + nav)
     bool shoggoth_shot = false;         // M20b render the shoggoth body to a PNG
     bool shoggoth_record = false, shoggoth_replay = false;  // M21 brain record/replay
+    bool no_shoggoth_brain = false;     // M21b: kill switch for the live async brain in --play/--game
     uint32_t eval_count = 100;          // --director-eval: scenario count
     uint32_t director_interval_s = 15;  // --soak --director: ambient seconds between summaries (wall clock)
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
@@ -180,6 +182,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--shoggoth-shot") == 0) o.shoggoth_shot = true;
         else if (std::strcmp(a, "--shoggoth-record") == 0) o.shoggoth_record = true;
         else if (std::strcmp(a, "--shoggoth-replay") == 0) o.shoggoth_replay = true;
+        else if (std::strcmp(a, "--no-shoggoth-brain") == 0) o.no_shoggoth_brain = true;
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -312,6 +315,12 @@ void apply_head_bob(contracts::CameraPose& cam, const br::core::WorldState& s) {
     cam.pos[2] += rz * bob.dx;
 }
 
+// Defined below in the Director-helpers anonymous namespace; forward-declared here in
+// that SAME anonymous namespace (multiple `namespace {}` blocks in a TU are one and the
+// same) so the interactive --play / --game loops can resolve the KEEL host:port for the
+// M21b live brain without duplicating the scheme/path-stripping logic.
+namespace { void parse_host_port(const std::string& url, std::string& host, int& port); }
+
 int run_play(const Options& o) {
     using namespace br::core;
     using namespace std::chrono;
@@ -383,6 +392,18 @@ int run_play(const Options& o) {
     const bool timed = (o.seconds > 0);
     uint64_t frames = 0;
     bool running = true;
+
+    // M21b: the LIVE async brain. KEEL inference runs on its own thread so the creature
+    // thinks WHILE you play without ever hitching the loop (mirrors the Director's async
+    // host). On by default; --no-shoggoth-brain kills it; a graceful no-op if KEEL is down.
+    std::unique_ptr<app::ShoggothBrainHost> brain;
+    if (!o.no_shoggoth_brain) {
+        std::string bh; int bp; parse_host_port(o.director_url, bh, bp);
+        brain = std::make_unique<app::ShoggothBrainHost>(bh, bp);
+    }
+    const auto brain_interval = milliseconds(3000);  // ambient: a thought every ~3 s (wall)
+    auto last_brain = t_start - brain_interval;       // fire the first summary promptly
+    uint64_t brain_intents = 0;
     while (running) {
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -420,6 +441,17 @@ int run_play(const Options& o) {
             tick(s, step, collision);
             app::shoggoth_step(shog, s.wanderer.pos, o.seed, (s.tick % 8u) == 0u);  // M20b: the hunt
             accum -= tickDt;
+        }
+
+        // M21b: drive the live brain off-thread. Submit a fresh summary on the ambient
+        // cadence; apply any returned intent at this tick boundary (latest-wins). Both
+        // calls are non-blocking, so KEEL never enters frame time.
+        if (brain) {
+            if (now - last_brain >= brain_interval) {
+                brain->submit(app::build_shoggoth_summary(shog, s.wanderer.pos, s.tick));
+                last_brain = now;
+            }
+            for (const app::ShoggothIntent& it : brain->poll()) { shog.intent = it; ++brain_intents; }
         }
 
         if (audioOn) {  // hand the mixer the latest ear pose + footfalls this frame
@@ -488,6 +520,10 @@ int run_play(const Options& o) {
         for (size_t i = 0; i + 2 < lastRt.size(); i += 4) sum += 0.299 * lastRt[i] + 0.587 * lastRt[i + 1] + 0.114 * lastRt[i + 2];
         std::printf("rt_luma_mean: %.1f\n", sum / static_cast<double>(dxrW * dxrH));
     }
+    const unsigned long long brain_req = brain ? brain->requests() : 0ull;
+    brain.reset();  // M21b: join the worker thread before exit
+    std::printf("brain_intents: %llu\n", static_cast<unsigned long long>(brain_intents));
+    std::printf("brain_requests: %llu\n", brain_req);
     std::printf("debug_error_count: %u\n", dbg);
     return dbg == 0 ? 0 : 3;
 }
@@ -811,6 +847,19 @@ int run_game(const Options& o) {
     const bool timed = (o.seconds > 0);
     uint64_t frames = 0;
     bool running = true;
+
+    // M21b: the LIVE async brain — KEEL inference off the frame thread so the creature
+    // thinks while you actually play (mirrors the Director's async host). On by default;
+    // --no-shoggoth-brain kills it; graceful no-op if KEEL is down. Only fed while in Play.
+    std::unique_ptr<app::ShoggothBrainHost> brain;
+    if (!o.no_shoggoth_brain) {
+        std::string bh; int bp; parse_host_port(o.director_url, bh, bp);
+        brain = std::make_unique<app::ShoggothBrainHost>(bh, bp);
+    }
+    const auto brain_interval = milliseconds(3000);
+    auto last_brain = t_start - brain_interval;
+    uint64_t brain_intents = 0;
+
     while (running) {
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -907,6 +956,14 @@ int run_game(const Options& o) {
                 app::shoggoth_step(shog, s.wanderer.pos, model.seed, (s.tick % 8u) == 0u);  // M20b: the hunt
                 accum -= tickDt;
             }
+            // M21b: feed the live brain (off-thread) while in Play; apply returned intent.
+            if (brain) {
+                if (now - last_brain >= brain_interval) {
+                    brain->submit(app::build_shoggoth_summary(shog, s.wanderer.pos, s.tick));
+                    last_brain = now;
+                }
+                for (const app::ShoggothIntent& it : brain->poll()) { shog.intent = it; ++brain_intents; }
+            }
             if (audioOn) {
                 const uint64_t steps = footstep_count(s);
                 eng.post(audio_listener(s), 1.2f, static_cast<uint32_t>(steps - prevSteps));
@@ -971,6 +1028,10 @@ int run_game(const Options& o) {
     std::printf("frames: %llu\n", static_cast<unsigned long long>(frames));
     std::printf("final_screen: %d\n", static_cast<int>(model.screen));
     std::printf("audio_underruns: %llu\n", underruns);
+    const unsigned long long brain_req = brain ? brain->requests() : 0ull;
+    brain.reset();  // M21b: join the worker thread before exit
+    std::printf("brain_intents: %llu\n", static_cast<unsigned long long>(brain_intents));
+    std::printf("brain_requests: %llu\n", brain_req);
     std::printf("debug_error_count: %u\n", dbg);
     return dbg == 0 ? 0 : 3;
 }
