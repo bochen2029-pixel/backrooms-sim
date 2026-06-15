@@ -296,14 +296,18 @@ median best-of-2 (1440p) AND no new hitches vs brain-off (measured on **1.79×**
 [x] Graceful no-op with KEEL down. [x] `--no-shoggoth-brain` kill switch. [x] The M21 sacred gate (record ==
 replay, model off) + M0–M21 regression. → `m21b-green`.
 
-## M22 — Shoggoth sees (KEEL vision / qwen-VL + mmproj)
+## M22 — Shoggoth sees (KEEL vision / qwen-VL + mmproj) ✅ DONE (`m22-green`)
 **Scope:** A virtual camera renders the shoggoth's **POV snapshot** (offscreen → image) → a **vision
-model via KEEL** (`C:\models\mmproj-F16.gguf`) → richer intent. **First check whether the `:7071`
-sidecar / KEEL can do vision; if not, stand up a backrooms-local KEEL copy** (a folder I own — NOT
-`C:\KEEL`) with the qwen-VL model + mmproj. Snapshot + vision happen at **record time only** → intent
-via event log → replay bit-identical model-offline.
-**Exit gates:** [ ] POV snapshot → vision call → parsed intent. [ ] Determinism preserved (replay
-model-offline bit-identical). [ ] Graceful no-op if the vision endpoint is down. [ ] M0–M21 regression.
+model via KEEL** (qwen-VL + `mmproj-F16.gguf`) → richer intent. **Investigation found the `:7071`
+sidecar can do vision AS-IS** (its `keel-serve` parses `image_url` → forced-local vision tier; the
+shared `llama-server :8080` runs `--mmproj`; a live probe described a real POV shot in ~1.3 s) — so **no
+backrooms-local KEEL copy was needed**. `director::keel_complete_vision` carries a `[text, image_url]`
+turn; `run_shoggoth_vision_record` renders the POV (`app/shoggoth_vision.h` + `app/base64.h`) → vision →
+the same `parse_shoggoth_intent` → `ShoggothEvent` log. Snapshot + vision happen at **record time only**;
+the intent enters via the event log → `--shoggoth-replay` is bit-identical model-offline.
+**Exit gates:** [x] POV snapshot → vision call → parsed intent (≥1 real vision intent). [x] Determinism
+preserved — record == replay bit-identical, model off, snapshot never re-rendered. [x] Graceful no-op if
+the vision endpoint is down. [x] M0–M21b regression (incl. the M21 text sacred gate). → `m22-green`.
 
 ## M23 — Shoggoth hears (whisper.cpp) *(later / speculative)*
 **Scope:** Nearby procedural audio → `C:\whisper.cpp` → text → the shoggoth's LLM context, so it

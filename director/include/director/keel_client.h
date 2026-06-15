@@ -27,4 +27,13 @@ struct KeelResponse {
 KeelResponse keel_complete(const std::string& host, int port, const std::string& prompt,
                            uint32_t timeout_ms = 8000);
 
+// M22 (vision): the same call, but the user turn carries an image alongside the text —
+// an OpenAI `image_url` content part with a base64 data URI (`image_base64` is the raw
+// base64 of a PNG, no prefix). KEEL routes raw perception to the local vision tier
+// (qwen-VL + mmproj, forced local — sovereign, $0). Identical failure semantics: a
+// transport/status/parse error returns ok=false (graceful no-op). The vision timeout
+// is larger by default since image processing is heavier than text.
+KeelResponse keel_complete_vision(const std::string& host, int port, const std::string& prompt,
+                                  const std::string& image_base64, uint32_t timeout_ms = 30000);
+
 }  // namespace br::director

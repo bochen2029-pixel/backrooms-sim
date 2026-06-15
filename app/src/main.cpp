@@ -55,6 +55,8 @@
 #include "shoggoth_body.h"
 #include "shoggoth_brain.h"
 #include "shoggoth_brain_host.h"
+#include "shoggoth_vision.h"
+#include "base64.h"
 
 namespace contracts = br::contracts;
 namespace audio = br::audio;
@@ -87,6 +89,7 @@ struct Options {
     bool shoggoth_shot = false;         // M20b render the shoggoth body to a PNG
     bool shoggoth_record = false, shoggoth_replay = false;  // M21 brain record/replay
     bool no_shoggoth_brain = false;     // M21b: kill switch for the live async brain in --play/--game
+    bool shoggoth_vision_record = false;  // M22: the Shoggoth sees -- POV snapshot -> vision intent
     uint32_t eval_count = 100;          // --director-eval: scenario count
     uint32_t director_interval_s = 15;  // --soak --director: ambient seconds between summaries (wall clock)
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
@@ -183,6 +186,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--shoggoth-record") == 0) o.shoggoth_record = true;
         else if (std::strcmp(a, "--shoggoth-replay") == 0) o.shoggoth_replay = true;
         else if (std::strcmp(a, "--no-shoggoth-brain") == 0) o.no_shoggoth_brain = true;
+        else if (std::strcmp(a, "--shoggoth-vision-record") == 0) o.shoggoth_vision_record = true;
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -1998,6 +2002,85 @@ int run_shoggoth_record(const Options& o) {
     return 0;
 }
 
+// M22: the Shoggoth SEES. Identical chase to --shoggoth-record (same MazeWalker, spawn,
+// step cadence, ShoggothEvent log) so --shoggoth-replay reproduces it unchanged -- BUT
+// each thought first renders the creature's POV to an OFFSCREEN snapshot and sends it
+// (text + image) to KEEL's local VISION tier (qwen-VL + mmproj). The validated intent is
+// logged exactly as in M21, so a replay with the model OFFLINE (and the snapshot never
+// re-rendered) is bit-identical -- the sacred gate, now with eyes. RECORD-time only.
+int run_shoggoth_vision_record(const Options& o) {
+    using namespace br::core;
+    std::string host; int port; parse_host_port(o.director_url, host, port);
+    const uint64_t N = (o.ticks > 0) ? o.ticks : 1800u;
+    const uint64_t kBrainEvery = 240u;  // ~2 s of sim between thoughts
+    const uint32_t SW = 384u, SH = 216u;  // POV snapshot size (16:9, small + fast for vision)
+    const float aspect = static_cast<float>(SW) / static_cast<float>(SH);
+
+    Renderer renderer;
+    if (!renderer.init_headless(SW, SH)) { std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1; }
+    renderer.set_texture_seed(o.seed);
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+
+    MazeWalker w(o.seed);
+    app::Shoggoth sh;
+    sh.pos = w.s.wanderer.pos; sh.pos.x += 24.0f;
+    std::vector<app::ShoggothEvent> events;
+    uint64_t H = 1469598103934665603ull;
+    uint64_t thoughts = 0, valid = 0, snapshots = 0;
+    for (uint64_t t = 0; t < N; ++t) {
+        w.step();
+        if (t % kBrainEvery == 0) {
+            ++thoughts;
+            // 1) Render the Shoggoth's POV of the Backrooms ahead -> readback RGBA.
+            const contracts::ChunkKey center = contracts::chunk_key_at(0, sh.pos.x, sh.pos.z);
+            sm.update(center); sm.wait_idle(); sm.update(center);
+            const contracts::CameraPose cam = app::shoggoth_pov_camera(sh, aspect);
+            uint32_t drawn = 0;
+            const size_t resident_target = sm.resident_count();
+            for (int wk = 0; wk < 400 && static_cast<size_t>(drawn) < resident_target; ++wk)
+                renderer.render_chunks(cam, sm.resident(), 64u, t, &drawn);
+            if (!renderer.render_chunks(cam, sm.resident(), 256u, t, &drawn)) { std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); return 1; }
+            FrameImage img;
+            if (!renderer.readback(img)) { std::fprintf(stderr, "readback: %s\n", renderer.last_error().c_str()); return 1; }
+            ++snapshots;
+            if (!o.out.empty() && t == 0) stbi_write_png(o.out.c_str(), static_cast<int>(img.width), static_cast<int>(img.height), 4, img.rgba.data(), static_cast<int>(img.width) * 4);  // QC: dump the first POV
+            // 2) Encode the snapshot to PNG (in memory) -> base64.
+            std::vector<uint8_t> png;
+            stbi_write_png_to_func([](void* ctx, void* data, int size) {
+                auto* v = static_cast<std::vector<uint8_t>*>(ctx);
+                const uint8_t* p = static_cast<const uint8_t*>(data);
+                v->insert(v->end(), p, p + size);
+            }, &png, static_cast<int>(img.width), static_cast<int>(img.height), 4, img.rgba.data(), static_cast<int>(img.width) * 4);
+            const std::string b64 = app::base64_encode(png.data(), png.size());
+            // 3) Ask the vision model what to do, given what it SEES + senses.
+            const app::ShoggothSummary sum = app::build_shoggoth_summary(sh, w.s.wanderer.pos, t);
+            const br::director::KeelResponse resp = br::director::keel_complete_vision(host, port, app::render_shoggoth_vision_prompt(sum), b64, 30000);
+            bool ok = false;
+            const app::ShoggothIntent intent = resp.ok ? app::parse_shoggoth_intent(resp.content, ok) : app::ShoggothIntent{};
+            if (resp.ok && ok) {
+                ++valid;
+                sh.intent = intent;  // identical apply+log path as --shoggoth-record
+                events.push_back(app::ShoggothEvent{t, static_cast<int32_t>(intent.action), intent.aggression});
+                H = fold_bytes(H, &events.back(), sizeof(app::ShoggothEvent));
+            }
+        }
+        app::shoggoth_step(sh, w.s.wanderer.pos, o.seed, (t % 8u) == 0u);
+        H = fold_u64(H, app::shoggoth_hash(sh));
+    }
+    if (!o.director_log.empty()) {
+        if (!app::write_shoggoth_log(o.director_log, o.seed, N, events)) { std::fprintf(stderr, "record: failed to write %s\n", o.director_log.c_str()); return 1; }
+    }
+    const uint32_t dbg = renderer.debug_error_count();
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("ticks: %llu\n", static_cast<unsigned long long>(N));
+    std::printf("thoughts: %llu\n", static_cast<unsigned long long>(thoughts));
+    std::printf("snapshots: %llu\n", static_cast<unsigned long long>(snapshots));
+    std::printf("valid_intents: %llu\n", static_cast<unsigned long long>(valid));
+    std::printf("combined_hash: %016llx\n", static_cast<unsigned long long>(H));
+    std::printf("debug_error_count: %u\n", dbg);
+    return dbg == 0 ? 0 : 3;
+}
+
 // Replay: re-run the SAME chase (seed + ticks from the log), applying the recorded
 // intents at their ticks with KEEL never contacted. The combined hash must equal the
 // record's -> the shoggoth's "brain" lives only in the log (the sacred gate).
@@ -2856,6 +2939,7 @@ int main(int argc, char** argv) {
     if (o.shoggoth)   return run_shoggoth(o);
     if (o.shoggoth_shot) return run_shoggoth_shot(o);
     if (o.shoggoth_record) return run_shoggoth_record(o);
+    if (o.shoggoth_vision_record) return run_shoggoth_vision_record(o);
     if (o.shoggoth_replay) return run_shoggoth_replay(o);
     if (o.game)       return run_game(o);
     if (o.soak)       return run_soak(o);

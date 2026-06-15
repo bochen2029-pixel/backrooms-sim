@@ -9,6 +9,8 @@
 #include "shoggoth_body.h"
 #include "shoggoth_brain.h"
 #include "shoggoth_brain_host.h"
+#include "shoggoth_vision.h"
+#include "base64.h"
 
 using namespace br::app;
 
@@ -124,6 +126,48 @@ TEST_CASE("the intent steers the shoggoth: Flee retreats, Hunt closes in", "[m21
     const float fleeD = run(ShoggothAction::Flee);
     REQUIRE(huntD < 22.0f);     // hunt closes the ~24 m gap
     REQUIRE(fleeD > huntD);     // flee ends up farther away than hunt
+}
+
+TEST_CASE("base64 encodes the RFC 4648 vectors exactly", "[m22][base64]") {
+    auto enc = [](const std::string& s) {
+        return base64_encode(reinterpret_cast<const uint8_t*>(s.data()), s.size());
+    };
+    REQUIRE(enc("") == "");
+    REQUIRE(enc("f") == "Zg==");
+    REQUIRE(enc("fo") == "Zm8=");
+    REQUIRE(enc("foo") == "Zm9v");
+    REQUIRE(enc("foob") == "Zm9vYg==");
+    REQUIRE(enc("fooba") == "Zm9vYmE=");
+    REQUIRE(enc("foobar") == "Zm9vYmFy");
+}
+
+TEST_CASE("the shoggoth POV camera looks out from the creature along its facing", "[m22][shoggoth][vision]") {
+    Shoggoth s = spawn_at(10.0f, 20.0f);
+    s.yaw = 1.5f;
+    const auto cam = shoggoth_pov_camera(s, 16.0f / 9.0f);
+    REQUIRE(std::fabs(cam.pos[0] - 10.0f) < 1e-4f);
+    REQUIRE(std::fabs(cam.pos[2] - 20.0f) < 1e-4f);
+    REQUIRE(cam.pos[1] > s.pos.y);                       // the eye sits above the body
+    REQUIRE(std::fabs(cam.yaw - 1.5f) < 1e-4f);          // it looks where it faces
+    REQUIRE(cam.fov_y > 0.5f);
+    REQUIRE(std::fabs(cam.aspect - 16.0f / 9.0f) < 1e-4f);
+}
+
+TEST_CASE("the vision prompt carries the situation and demands the intent JSON", "[m22][shoggoth][vision]") {
+    Shoggoth s = spawn_at(0.0f, 0.0f);
+    const ShoggothSummary sum = build_shoggoth_summary(s, br::core::Vec3{30.0f, 1.0f, 0.0f}, 7u);
+    const std::string p = render_shoggoth_vision_prompt(sum);
+    REQUIRE(p.find("image") != std::string::npos);       // references what it SEES
+    REQUIRE(p.find("\"action\"") != std::string::npos);  // demands the intent schema
+    REQUIRE(p.find("flank") != std::string::npos);
+}
+
+TEST_CASE("intent parsing tolerates a markdown-fenced or prose-wrapped reply (vision models)", "[m22][shoggoth][brain]") {
+    bool ok = false;
+    const auto a = parse_shoggoth_intent("```json\n{\"action\":\"stalk\",\"aggression\":0.3}\n```", ok);
+    REQUIRE(ok); REQUIRE(a.action == ShoggothAction::Stalk);
+    const auto b = parse_shoggoth_intent("Here is my choice: {\"action\":\"flee\",\"aggression\":0.2} -- run!", ok);
+    REQUIRE(ok); REQUIRE(b.action == ShoggothAction::Flee);
 }
 
 TEST_CASE("the live async brain host has a clean lifecycle and an empty initial poll", "[m21b][shoggoth][brain]") {

@@ -64,9 +64,16 @@ inline std::string render_shoggoth_prompt(const ShoggothSummary& s) {
 inline ShoggothIntent parse_shoggoth_intent(const std::string& content, bool& ok) {
     ShoggothIntent intent{};  // default Hunt, 0.5
     ok = false;
+    // Models (especially the vision tier) sometimes wrap the JSON in a markdown ```json
+    // fence or surround it with prose; extract the outermost {...} span so a fenced or
+    // chatty reply still parses. Bare JSON is unchanged; no braces -> the safe default.
+    const size_t b = content.find('{');
+    const size_t e = content.rfind('}');
+    if (b == std::string::npos || e == std::string::npos || e < b) return intent;
+    const std::string json_str = content.substr(b, e - b + 1);
     br::director::json::Value v;
     std::string err;
-    if (!br::director::json::parse(content, v, err) || !v.is_object()) return intent;
+    if (!br::director::json::parse(json_str, v, err) || !v.is_object()) return intent;
     const auto* a = v.find("action");
     if (!a || !a->is_string()) return intent;
     const std::string& s = a->str;

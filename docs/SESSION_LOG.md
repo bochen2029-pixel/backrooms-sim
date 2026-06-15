@@ -4,6 +4,44 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 24 — M22: The Shoggoth SEES (KEEL vision)  ✅ COMPLETE — 🏷️ `m22-green`
+
+**`gate.ps1 -Milestone M22` exits 0; tagged `m22-green` + pushed. The monster has eyes** — a virtual
+camera renders its POV, a local vision model (qwen-VL + mmproj) decides from what it sees, and the
+recorded chase **replays bit-for-bit with the model offline** (the sacred gate, now multimodal).
+
+**Investigation (M22 STEP 1) — the `:7071` sidecar does vision AS-IS; NO new infra.** The plan allowed
+standing up a backrooms-local KEEL copy if `:7071` couldn't do vision. It can: its `keel-serve` (Stage-2
+snapshot) parses OpenAI `image_url` parts → `Content::Image` → router FORCES local; `keel.lock` pins
+`llm_vision: qwen3.5-9b-q5_k_m` + `mmproj: mmproj-F16`; the shared `llama-server :8080` (reused read-only)
+runs `--mmproj`. A **live probe** (real 640×360 POV shot → `image_url` POST to `:7071`) returned an
+accurate description in **~1.3 s** at `tier:local, cost:0.0`. `C:\KEEL` only read; never `:7070`.
+
+**Done (M22; ADR-049).**
+- **`director::keel_complete_vision(host,port,prompt,image_base64,timeout)`** — the M11 client with a
+  `[text, image_url(data:image/png;base64,…)]` turn (a shared `keel_post` now backs text + vision).
+- **`app/shoggoth_vision.h`** (`shoggoth_pov_camera` + `render_shoggoth_vision_prompt`) + **`app/base64.h`**
+  (RFC-4648, unit-tested). **`run_shoggoth_vision_record`** renders the POV to an offscreen 384×216 snapshot
+  (headless renderer → `readback` → `stbi_write_png_to_func` → base64) → vision → `parse_shoggoth_intent` →
+  `ShoggothEvent` log. **Byte-identical chase to `--shoggoth-record`** so `--shoggoth-replay` reproduces it.
+- **`Invoke-GateM22`** — clean build + full ctest (`[m22]` base64/POV-camera/vision-prompt/fenced-parse) +
+  KEEL reachable + **THE SACRED GATE WITH EYES** (POV → ≥1 vision intent → record == replay model-off,
+  snapshot debug-clean, first POV PNG written) + graceful vision-down no-op + the M21 text sacred gate +
+  M20/M5/INV-5/inventory. **gate.ps1 M22 exits 0. Measured: 5 snapshots → 5 vision intents, record ==
+  replay (model off).**
+
+**Gotcha / fix.** The vision tier wraps its JSON in a markdown ```json fence, so the whole-string
+`json::parse` in `parse_shoggoth_intent` rejected it → `valid_intents: 0`. Fix: extract the outermost
+`{…}` span before parsing (handles fenced/prose-wrapped replies; bare JSON unchanged → M21 text gate
+intact; non-JSON → safe Hunt default). The combined hash is per-run (the model is stochastic), but
+record == replay holds every run. POV snapshots render debug-clean even from the creature's vantage.
+
+**Next: M23 — hearing (whisper.cpp), operator-gated.** Nearby procedural audio → `C:\whisper.cpp` → text
+→ the shoggoth's context, so it has eyes AND ears. *(Also still pending: M20b-in-DXR — in-world body shows
+in the raster path only.)*
+
+---
+
 ## Session 23 — M21b: The Shoggoth's LIVE async brain  ✅ COMPLETE — 🏷️ `m21b-green`
 
 **`gate.ps1 -Milestone M21b` exits 0; tagged `m21b-green` + pushed. The monster thinks WHILE you

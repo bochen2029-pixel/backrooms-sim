@@ -2181,6 +2181,101 @@ function Invoke-GateM21b {
     Write-Note 'M21b gate: the Shoggoth thinks WHILE you play -- KEEL off the frame thread (async-isolated), graceful when down, and the sacred record==replay determinism is untouched.'
 }
 
+function Invoke-GateM22 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green (incl. the [m22] base64 + POV-camera + vision-prompt tests)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m22'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+
+    # The vision tier (qwen-VL + mmproj, forced-local) is reached through the same KEEL
+    # sidecar (:7071). It must be up, else the "it sees" assertion is vacuous.
+    Assert-Gate 'KEEL sidecar reachable (:7071, the brain/vision endpoint)' {
+        $r = Invoke-AppCapture @('--director-probe', '--seed', '1')
+        if ($r.Exit -ne 0) { throw "director-probe exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'keel_ok') -ne 1) { throw "KEEL not reachable at :7071 (C:\keel-sidecar-7071\start.cmd)" }
+    }
+
+    # THE SACRED GATE, NOW WITH EYES: the Shoggoth renders its POV to an offscreen
+    # snapshot, a VISION model (qwen-VL + mmproj) decides from what it SEES, and the
+    # recorded chase replays bit-identically with the model OFFLINE -- the snapshot is
+    # never re-rendered at replay (intent enters only via the event log). >=1 real vision
+    # intent or the gate is vacuous (ADR-038/049 pattern, now multimodal).
+    Assert-Gate 'sacred gate (vision): POV snapshot -> vision intent; record == replay model-off (>=1 real intent)' {
+        $slog = Join-Path $tmp 's.log'; $pov = Join-Path $tmp 'pov0.png'
+        $rec = Invoke-AppCapture @('--shoggoth-vision-record', '--director-url', 'http://127.0.0.1:7071', '--director-log', $slog, '--seed', '3', '--ticks', '1200', '--out', $pov)
+        if ($rec.Exit -ne 0) { throw "vision record exited $($rec.Exit): $($rec.Out)" }
+        if ((Get-Metric $rec.Out 'debug_error_count') -ne 0) { throw "POV snapshot render had D3D12 debug-layer messages" }
+        if ((Get-Metric $rec.Out 'snapshots') -lt 1) { throw "no POV snapshots were rendered" }
+        $valid = Get-Metric $rec.Out 'valid_intents'
+        if ($valid -lt 1) { throw "the vision brain produced no valid intents -- is KEEL vision up at :7071 (mmproj-F16)?" }
+        if (-not (Test-Path $pov)) { throw "the first POV snapshot PNG was not written" }
+        $recHash = Get-MetricStr $rec.Out 'combined_hash'
+        $rep = Invoke-AppCapture @('--shoggoth-replay', '--director-log', $slog)
+        if ($rep.Exit -ne 0) { throw "replay exited $($rep.Exit): $($rep.Out)" }
+        if ((Get-Metric $rep.Out 'replay_events') -lt 1) { throw "replay applied no events from the log" }
+        if ((Get-MetricStr $rep.Out 'combined_hash') -ne $recHash) { throw "replay hash != record hash -- the vision model leaked into the sim" }
+        Write-Note "vision sacred gate: $valid vision intents; record == replay ($recHash) with the model OFFLINE; first POV PNG written"
+    }
+
+    # Graceful no-op: vision endpoint down -> snapshots still render, 0 intents, clean exit.
+    Assert-Gate 'graceful no-op: vision endpoint down (dead URL) -> 0 intents, debug-clean, exit 0' {
+        $r = Invoke-AppCapture @('--shoggoth-vision-record', '--director-url', '127.0.0.1:9999', '--director-log', (Join-Path $tmp 'dead.log'), '--seed', '3', '--ticks', '480')
+        if ($r.Exit -ne 0) { throw "dead-URL vision record exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "dead-URL snapshot render had debug-layer messages" }
+        if ((Get-Metric $r.Out 'valid_intents') -ne 0) { throw "intents applied with the vision endpoint unreachable?!" }
+        Write-Note "graceful no-op: vision down -> $((Get-Metric $r.Out 'snapshots')) snapshots, 0 intents, exit 0"
+    }
+
+    # Regression: the M21 TEXT-brain sacred gate still holds (the parse-robustness tweak
+    # didn't change bare-JSON behaviour); M20 brain-off determinism + the M5 golden hold.
+    Assert-Gate 'regression (M21 sacred gate): text-brain record == replay bit-identical, model off' {
+        $slog = Join-Path $tmp 't.log'
+        $rec = Invoke-AppCapture @('--shoggoth-record', '--director-url', 'http://127.0.0.1:7071', '--director-log', $slog, '--seed', '3', '--ticks', '1200')
+        if ($rec.Exit -ne 0) { throw "M21 record exited $($rec.Exit): $($rec.Out)" }
+        if ((Get-Metric $rec.Out 'valid_intents') -lt 1) { throw "M21 text brain produced no valid intents (KEEL down?)" }
+        $recHash = Get-MetricStr $rec.Out 'combined_hash'
+        $rep = Invoke-AppCapture @('--shoggoth-replay', '--director-log', $slog)
+        if ($rep.Exit -ne 0) { throw "M21 replay exited $($rep.Exit)" }
+        if ((Get-MetricStr $rep.Out 'combined_hash') -ne $recHash) { throw "M21 replay hash != record hash" }
+    }
+    Assert-Gate 'regression: brain-off shoggoth deterministic + M5 golden bit-identical' {
+        $h1 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '5')).Out 'shoggoth_hash'
+        $h2 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '5')).Out 'shoggoth_hash'
+        if ($h1 -ne $h2) { throw "shoggoth hash not reproducible with the brain off" }
+        $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+        $shot = Join-Path $tmp 'm5.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        if ([double](& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1) -ne 0.0) { throw "M5 golden regressed" }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M22 gate: the Shoggoth SEES -- a POV snapshot feeds a local vision model (qwen-VL + mmproj), and the recorded chase still replays bit-exact with the model off. The monster has eyes.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -2210,6 +2305,7 @@ try {
         'M20'   { Invoke-GateM20 }
         'M21'   { Invoke-GateM21 }
         'M21B'  { Invoke-GateM21b }
+        'M22'   { Invoke-GateM22 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

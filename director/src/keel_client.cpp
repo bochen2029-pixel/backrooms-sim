@@ -26,16 +26,12 @@ struct WinHandle {
     ~WinHandle() { if (h) WinHttpCloseHandle(h); }
 };
 
-}  // namespace
-
-KeelResponse keel_complete(const std::string& host, int port, const std::string& prompt,
-                           uint32_t timeout_ms) {
+// POST an already-built JSON `body` to the KEEL chat endpoint and parse the OpenAI
+// envelope. Shared by keel_complete (text) and keel_complete_vision (text + image) —
+// only the body differs. Never throws; any failure sets r.error and leaves r.ok=false.
+KeelResponse keel_post(const std::string& host, int port, const std::string& body,
+                       uint32_t timeout_ms) {
     KeelResponse r;
-
-    // Build the request body: a single user turn + the local-tier routing flags.
-    const std::string body =
-        std::string("{\"messages\":[{\"role\":\"user\",\"content\":\"") + json::escape(prompt) +
-        "\"}],\"sovereign\":true,\"kind\":\"scaffolding\",\"think\":false}";
 
     WinHandle session, connect, request;
     session.h = WinHttpOpen(L"backrooms-director/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
@@ -96,6 +92,31 @@ KeelResponse keel_complete(const std::string& host, int port, const std::string&
     }
     r.ok = true;
     return r;
+}
+
+}  // namespace
+
+KeelResponse keel_complete(const std::string& host, int port, const std::string& prompt,
+                           uint32_t timeout_ms) {
+    // A single user turn (plain text) + the local-tier routing flags.
+    const std::string body =
+        std::string("{\"messages\":[{\"role\":\"user\",\"content\":\"") + json::escape(prompt) +
+        "\"}],\"sovereign\":true,\"kind\":\"scaffolding\",\"think\":false}";
+    return keel_post(host, port, body, timeout_ms);
+}
+
+KeelResponse keel_complete_vision(const std::string& host, int port, const std::string& prompt,
+                                  const std::string& image_base64, uint32_t timeout_ms) {
+    // A single user turn whose content is an array of parts: the text prompt + an
+    // OpenAI image_url part carrying the PNG as a base64 data URI. The base64 alphabet
+    // (A-Z a-z 0-9 + / =) is JSON-safe, so only the prompt needs escaping.
+    const std::string body =
+        std::string("{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"") +
+        json::escape(prompt) +
+        "\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64," +
+        image_base64 +
+        "\"}}]}],\"sovereign\":true,\"kind\":\"scaffolding\",\"think\":false}";
+    return keel_post(host, port, body, timeout_ms);
 }
 
 }  // namespace br::director
