@@ -45,7 +45,11 @@ and press on. Minimal meta — no scaffolding-on-scaffolding; the bulk of effort
   — run_play's fake ground plane catches you, so you can't fall through shafts/down-stairs in-game; give it
   holes (or real per-cell floor) at shaft + down-stair cells so the despair-gradient works live (ascent
   already works). (2) **M30 telegraph** — draft/wind audio near a shaft (decision 6; off the sim hash).
-  (3) **M30 fog-to-black** abyss render + stream a few floors down a shaft. (4) ✅ **M28-DXR see-through
+  (3) ✅ **M30 fog-to-black DONE** (`1a067bb`) — StreamManager range update (`[m30]` test) + `--abyss` proof
+  (depths show through the void, bounded, debug-clean, gated `abyss_ok`) + run_play/run_game open a downward
+  band over a shaft. NOTE: this is the SEE-down; the FALL-through-in-game is item (1) live-descent (still
+  open — the fake ground plane still catches you, so you see the abyss but can't yet fall into it live).
+  (4) ✅ **M28-DXR see-through
   CONFIRMED** (read `render_dxr/src/dxr.cpp:738` — `build_scene` builds a BLAS per resident chunk at its
   world-Y, no `(cx,cz)` dedup, so 2-level residency renders both floors in the ray-traced path too; no DXR
   change needed). (5) **deep-descent soak** (blocked on live descent (1)). (6) the **M0–M25 regression
