@@ -8,6 +8,9 @@
 /runs/*
 !/runs/.gitkeep
 
+# Autopilot supervisor sentinels (scripts/autoloop.ps1 writes DONE / STALLED here)
+/.brstate/
+
 # vcpkg (external, bootstrapped by scripts/bootstrap; never vendored)
 /extern/vcpkg/
 

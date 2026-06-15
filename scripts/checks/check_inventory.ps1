@@ -26,8 +26,12 @@ foreach ($m in $expected) {
 
 # Flag stray top-level module-like directories not in the inventory. `build-release`
 # + `dist` are M17 packaging build artifacts (gitignored), same category as `build`.
+# `_run_state` (autopilot control docs: AUTOSTART/ROADMAP/SETUP) + `.brstate` (the
+# supervisor's gitignored DONE/STALLED sentinels) are the self-driving rig, same class
+# as `runs`/`scripts` — not sim modules, so they carry no MODULE.md / ARCHITECTURE entry.
 $known = $expected + @('contracts', 'docs', 'scripts', 'tests', 'goldens', 'runs',
-                       'build', 'build-release', 'dist', 'extern', 'files', '.git', '.claude')
+                       'build', 'build-release', 'dist', 'extern', 'files', '.git', '.claude',
+                       '_run_state', '.brstate')
 Get-ChildItem $RepoRoot -Directory | ForEach-Object {
     if ($known -notcontains $_.Name) {
         $problems += "unexpected top-level directory (not in inventory): $($_.Name)/"
