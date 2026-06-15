@@ -4,6 +4,41 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 27 — M25: The Shoggoth's body in the RAY-TRACED path  ✅ COMPLETE — 🏷️ `m25-green`
+
+**`gate.ps1 -Milestone M25` exits 0; tagged `m25-green` + pushed. The creature is visible in BOTH
+renderers now** — M20b's procedural body, which was raster-only, now shows + writhes in the DXR
+(path-traced) path too, without regressing M19's frame rate.
+
+**Done (M25; ADR-052).**
+- **`DxrRenderer::update_creature(verts, count)`** — a DYNAMIC creature BLAS updated per frame WITHOUT
+  rebuilding the cached chunk BLASes. `build_scene` reserves a `kMaxCreatureVerts` (4096) tail in the
+  shade buffer + caches the chunk TLAS instances + chunk vert count; `update_creature` writes the creature
+  verts into that tail (InstanceID = chunkVertCount), builds ONE creature BLAS, and rebuilds only the TLAS.
+  Per-frame cost = 1 BLAS + 1 TLAS build (not 169) → cheap enough to animate every frame.
+- **Salmon in the PT** — the path-tracer shades by material id, so the creature is tagged **material 7**
+  at injection (a salmon `albedo_of` branch in the scene shader). The raster path is UNTOUCHED (it shades
+  by vertex colour → M20b/M5 byte-for-byte identical; the material override is DXR-only).
+- **Wired into `run_play` + `run_game`** RT branches + **`--shoggoth-dxr-shot`** (headless: pose 2
+  creature-only / pose 1 world-only / pose 0 world+creature).
+- **`Invoke-GateM25`** — clean build + full ctest (`[m25]` mesh-fits-the-tail) + **the body renders salmon
+  in DXR** (866 salmon px vs 0 world-only; R>1.5·G isolates salmon from the yellow Backrooms) + **`--play
+  --rt` debug-clean + M19 frame-rate preserved** (531 DXR frames/5 s >> 30) + raster byte-for-byte
+  unchanged (M5 golden) + DXR world render + M20b raster body + INV-5/inventory. **gate.ps1 M25 exits 0.**
+
+**Notes.** The cached-chunk design is the key: rebuilding all ~169 chunk BLASes per frame would have
+dropped RT below the 30-frame floor; updating only the creature BLAS + TLAS keeps it at ~106 FPS. The PT
+shades by MATERIAL not vertex colour, which is why M20b's salmon body rendered as yellow wallpaper in DXR
+until tagged material 7. The salmon discriminator R>1.5·G cleanly separates the creature (0.90,0.42,0.34)
+from the yellow walls (0.80,0.72,0.40). (Gate gotcha: `--play --rt` only prints `rt_luma_mean` when `--out`
+is given — the gate now passes it.)
+
+**Phase III's Shoggoth arc is now FULLY COMPLETE** — body, deterministic navigation, KEEL brain, live
+async brain, vision, hearing, a PA voice, and the body visible in both renderers. Determinism stayed
+sacred throughout (every AI decision → event log → bit-exact replay, all models offline).
+
+---
+
 ## Session 26 — M24: The Backrooms PA gets a VOICE (procedural TTS)  ✅ COMPLETE — 🏷️ `m24-green`
 
 **`gate.ps1 -Milestone M24` exits 0; tagged `m24-green` + pushed. The Backrooms speaks** — a from-scratch

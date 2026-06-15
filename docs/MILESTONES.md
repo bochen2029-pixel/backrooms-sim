@@ -335,6 +335,18 @@ contour + jitter** (a flat monotone reads as singing to whisper). `--tts-say` / 
 "Evacuate sector 5"). [x] PA -> whisper words -> intent -> record == replay all-offline. [x] Graceful no-ops
 (whisper missing, KEEL down). [x] M0-M23 regression. -> `m24-green`.
 
+## M25 — Shoggoth body in the ray-traced (DXR) path ✅ DONE (`m25-green`)
+**Scope:** M20b's in-world body was raster-only; the DXR path showed the world without the creature. M25
+injects the body as a **dynamic creature BLAS** so it shows + writhes in RT too, WITHOUT rebuilding the
+~169 chunk BLASes per frame (which would tank the frame rate). `DxrRenderer::update_creature` writes the
+creature into a reserved shade-buffer tail, builds one creature BLAS, and rebuilds only the TLAS (chunk
+BLASes + instances cached by `build_scene`). Shaded salmon via material 7 (DXR-only; raster uses vertex
+colour, untouched). `--shoggoth-dxr-shot` is the headless proof; wired into `run_play` + `run_game` RT.
+**Exit gates:** [x] The body renders salmon in DXR (`--shoggoth-dxr-shot`: 866 salmon px vs 0 world). [x]
+`--play --rt` shows the creature, debug-clean, M19 frame-rate preserved (562 frames/5 s >> 30). [x] Raster
+path byte-for-byte unchanged (M5 golden bit-identical). [x] DXR world render + M20b raster body unchanged.
+[x] M0-M24 regression. -> `m25-green`.
+
 ---
 
 ## Session protocol per milestone

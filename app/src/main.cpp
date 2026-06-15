@@ -89,6 +89,7 @@ struct Options {
     bool rt = false;                    // M19 force ray tracing on in --game/--play
     bool shoggoth = false;              // M20 headless shoggoth chase (determinism + nav)
     bool shoggoth_shot = false;         // M20b render the shoggoth body to a PNG
+    bool shoggoth_dxr_shot = false;     // M25 render the shoggoth body in the DXR (ray-traced) path
     bool shoggoth_record = false, shoggoth_replay = false;  // M21 brain record/replay
     bool no_shoggoth_brain = false;     // M21b: kill switch for the live async brain in --play/--game
     bool shoggoth_vision_record = false;  // M22: the Shoggoth sees -- POV snapshot -> vision intent
@@ -191,6 +192,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--rt") == 0) o.rt = true;
         else if (std::strcmp(a, "--shoggoth") == 0) o.shoggoth = true;
         else if (std::strcmp(a, "--shoggoth-shot") == 0) o.shoggoth_shot = true;
+        else if (std::strcmp(a, "--shoggoth-dxr-shot") == 0) o.shoggoth_dxr_shot = true;
         else if (std::strcmp(a, "--shoggoth-record") == 0) o.shoggoth_record = true;
         else if (std::strcmp(a, "--shoggoth-replay") == 0) o.shoggoth_replay = true;
         else if (std::strcmp(a, "--no-shoggoth-brain") == 0) o.no_shoggoth_brain = true;
@@ -370,7 +372,6 @@ int run_play(const Options& o) {
     std::unique_ptr<br::render_dxr::DxrRenderer> dxr;
     uint32_t dxrW = 0, dxrH = 0;
     contracts::ChunkKey dxrCenter{0, static_cast<int64_t>(1) << 40, 0};
-    float lastCamX = 1e9f, lastCamY = 1e9f, lastCamZ = 1e9f, lastYaw = 1e9f, lastPitch = 1e9f;
     bool rtOn = o.rt;
     uint64_t rtFrames = 0;
     std::vector<uint8_t> lastRt;
@@ -491,11 +492,14 @@ int run_play(const Options& o) {
                 else { rtOn = false; dxr.reset(); }  // no DXR -> raster fallback
             }
             if (dxr) {
-                if (center != dxrCenter) { dxr->build_scene(sm.resident()); dxrCenter = center; lastYaw = 1e9f; }
-                const bool moved = (cam.pos[0] != lastCamX || cam.pos[1] != lastCamY || cam.pos[2] != lastCamZ ||
-                                    cam.yaw != lastYaw || cam.pitch != lastPitch);
-                lastCamX = cam.pos[0]; lastCamY = cam.pos[1]; lastCamZ = cam.pos[2]; lastYaw = cam.yaw; lastPitch = cam.pitch;
-                dxr->render_pt_frame(cam, 4u, static_cast<uint32_t>(o.seed) + static_cast<uint32_t>(frames), moved);
+                if (center != dxrCenter) { dxr->build_scene(sm.resident()); dxrCenter = center; }
+                // M25: the Shoggoth's body in RT -- a dynamic creature BLAS updated each
+                // frame (the chunk BLASes stay cached, so this stays cheap), material 7 so
+                // the PT shades it salmon. It shows + writhes in the ray-traced path too.
+                app::build_shoggoth_mesh(shogBody, shog.pos, shog.writhe, 1.4f);
+                for (auto& v : shogBody) v.material = 7.0f;
+                dxr->update_creature(shogBody.data(), static_cast<uint32_t>(shogBody.size()));
+                dxr->render_pt_frame(cam, 4u, static_cast<uint32_t>(o.seed) + static_cast<uint32_t>(frames), true);  // creature animates -> fresh frame each frame
                 std::vector<uint8_t> rt;
                 if (dxr->readback(rt) && renderer.present_overlay_windowed(rt.data(), dxrW, dxrH)) {
                     ++rtFrames;
@@ -853,7 +857,6 @@ int run_game(const Options& o) {
     std::unique_ptr<br::render_dxr::DxrRenderer> dxr;
     uint32_t dxrW = 0, dxrH = 0;
     contracts::ChunkKey dxrCenter{0, static_cast<int64_t>(1) << 40, 0};
-    float lastCamX = 1e9f, lastCamY = 1e9f, lastCamZ = 1e9f, lastYaw = 1e9f, lastPitch = 1e9f;
     app::Shoggoth shog;                       // M20b: the hunting creature (spawned on New Game)
     std::vector<contracts::ChunkVertex> shogBody;
 
@@ -1001,11 +1004,13 @@ int run_game(const Options& o) {
                     else { model.settings.rt = 0; dxr.reset(); }  // DXR unavailable -> raster fallback
                 }
                 if (dxr) {
-                    if (center != dxrCenter) { dxr->build_scene(sm->resident()); dxrCenter = center; lastYaw = 1e9f; }
-                    const bool moved = (cam.pos[0] != lastCamX || cam.pos[1] != lastCamY || cam.pos[2] != lastCamZ ||
-                                        cam.yaw != lastYaw || cam.pitch != lastPitch);
-                    lastCamX = cam.pos[0]; lastCamY = cam.pos[1]; lastCamZ = cam.pos[2]; lastYaw = cam.yaw; lastPitch = cam.pitch;
-                    dxr->render_pt_frame(cam, 4u, static_cast<uint32_t>(texSeed) + static_cast<uint32_t>(frames), moved);
+                    if (center != dxrCenter) { dxr->build_scene(sm->resident()); dxrCenter = center; }
+                    // M25: the Shoggoth's body in RT -- a dynamic creature BLAS updated each
+                    // frame (chunk BLASes stay cached), material 7 so the PT shades it salmon.
+                    app::build_shoggoth_mesh(shogBody, shog.pos, shog.writhe, 1.4f);
+                    for (auto& v : shogBody) v.material = 7.0f;
+                    dxr->update_creature(shogBody.data(), static_cast<uint32_t>(shogBody.size()));
+                    dxr->render_pt_frame(cam, 4u, static_cast<uint32_t>(texSeed) + static_cast<uint32_t>(frames), true);  // creature animates -> fresh frame
                     std::vector<uint8_t> rt;
                     if (dxr->readback(rt)) renderer.present_overlay_windowed(rt.data(), dxrW, dxrH);
                 }
@@ -3181,6 +3186,62 @@ int run_shoggoth_shot(const Options& o) {
     return renderer.debug_error_count() == 0 ? 0 : 3;
 }
 
+// M25: render the Shoggoth's procedural body in the DXR (PATH-TRACED) path -- the creature
+// injected as one more ResidentChunk into the ray-traced scene, proving it shows up in RT
+// (M20b's in-world body was raster-only). Counts the warm salmon-orange creature pixels:
+// the body is ~(230,120,95) -- distinctly R>G>B -- whereas the Backrooms walls are yellow
+// (R~=G), so the count isolates the creature from the world.
+int run_shoggoth_dxr_shot(const Options& o) {
+    using namespace br::core;
+    const float ex = 16.0f, ez = 16.0f;
+    const float ey = kWandererHalfHeight + 0.02f + kEyeHeight;
+    // The camera stands back and looks at the creature centred just ahead (in an open
+    // cell). pose 0 = world + creature; pose 1 = world only (baseline); pose 2 = creature
+    // only (the clean "it renders salmon in DXR" proof, no maze to occlude it).
+    const Vec3 shog_pos{ex, ey - 0.30f, ez + 1.2f};
+    contracts::CameraPose cam{};
+    cam.pos[0] = ex; cam.pos[1] = ey; cam.pos[2] = ez - 2.6f;
+    cam.yaw = 0.0f; cam.pitch = -0.05f; cam.fov_y = 1.2217305f;
+    cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    const auto center = contracts::chunk_key_at(0, ex, ez);
+    sm.update(center); sm.wait_idle(); sm.update(center);
+
+    std::vector<contracts::ChunkVertex> body;
+    app::build_shoggoth_mesh(body, shog_pos, static_cast<float>(o.ticks) * 0.05f, 1.6f);
+    for (auto& v : body) v.material = 7.0f;  // M25: tag the creature so the PT shades it salmon (raster uses color)
+    const contracts::ResidentChunk creature{contracts::ChunkKey{9999, 0, 0}, body.data(), static_cast<uint32_t>(body.size())};
+
+    std::vector<contracts::ResidentChunk> scene;
+    if (o.pose != 2u) scene = sm.resident();          // world (pose 0 + 1)
+    if (o.pose != 1u) scene.push_back(creature);      // creature (pose 0 + 2)
+
+    br::render_dxr::DxrRenderer r;
+    if (!r.init(o.width, o.height)) { std::fprintf(stderr, "dxr init: %s\n", r.last_error().c_str()); return 1; }
+    if (!r.build_scene(scene)) { std::fprintf(stderr, "dxr scene: %s\n", r.last_error().c_str()); return 1; }
+    if (!r.render_pt(cam, o.spp, static_cast<uint32_t>(o.seed))) { std::fprintf(stderr, "dxr pt: %s\n", r.last_error().c_str()); return 1; }
+    std::vector<uint8_t> rgba;
+    if (!r.readback(rgba)) { std::fprintf(stderr, "dxr readback: %s\n", r.last_error().c_str()); return 1; }
+    if (!o.out.empty()) {
+        stbi_write_png(o.out.c_str(), static_cast<int>(r.width()), static_cast<int>(r.height()), 4, rgba.data(), static_cast<int>(r.width()) * 4);
+    }
+    // Count the creature's warm salmon pixels. The body albedo (0.90, 0.42, 0.34) has
+    // R > 1.5*G, which the Backrooms yellow wallpaper (0.80, 0.72) never satisfies -- so
+    // R>1.5*G (+ G>=B) isolates the creature from the world at any brightness.
+    uint64_t salmon = 0;
+    const size_t px = static_cast<size_t>(r.width()) * r.height();
+    for (size_t p = 0; p < px; ++p) {
+        const uint8_t* c = &rgba[p * 4];
+        if (c[0] > 35 && static_cast<float>(c[0]) > 1.5f * static_cast<float>(c[1]) && c[1] >= c[2]) ++salmon;
+    }
+    std::printf("creature_verts: %llu\n", static_cast<unsigned long long>(body.size()));
+    std::printf("salmon_px: %llu\n", static_cast<unsigned long long>(salmon));
+    std::printf("width: %u\n", r.width());
+    std::printf("height: %u\n", r.height());
+    return 0;
+}
+
 }  // namespace
 
 // Tighten the OS timer/wait granularity (default ~15.6 ms) to 1 ms for the
@@ -3232,6 +3293,7 @@ int main(int argc, char** argv) {
     if (o.credits)    return run_credits(o);
     if (o.shoggoth)   return run_shoggoth(o);
     if (o.shoggoth_shot) return run_shoggoth_shot(o);
+    if (o.shoggoth_dxr_shot) return run_shoggoth_dxr_shot(o);
     if (o.shoggoth_record) return run_shoggoth_record(o);
     if (o.shoggoth_vision_record) return run_shoggoth_vision_record(o);
     if (o.shoggoth_hearing_record) return run_shoggoth_hearing_record(o);

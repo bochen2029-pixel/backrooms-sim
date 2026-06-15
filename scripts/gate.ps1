@@ -2493,6 +2493,97 @@ function Invoke-GateM24 {
     Write-Note 'M24 gate: the Backrooms PA has a procedural VOICE the Shoggoth hears as WORDS -- a from-scratch formant TTS whisper can read back, and the recorded chase still replays bit-exact with the TTS + whisper + the model off.'
 }
 
+function Invoke-GateM25 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green (incl. the [m25] creature-mesh-fits-DXR test)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m25'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+
+    # THE M25 GATE: the Shoggoth's procedural body renders in the DXR (path-traced) path --
+    # injected as a dynamic creature, shaded SALMON (material 7). The salmon metric (R>1.5*G)
+    # isolates the creature from the yellow Backrooms: pose 2 = creature only (clean proof),
+    # pose 1 = world only (must be ~0). M20b's body was raster-only; now it's in RT too.
+    Assert-Gate 'DXR creature: the shoggoth body renders salmon in the path-traced path' {
+        $r2 = Invoke-AppCapture @('--shoggoth-dxr-shot', '--seed', '1', '--pose', '2', '--width', '640', '--height', '360', '--spp', '96', '--out', (Join-Path $tmp 'creature.png'))
+        if ($r2.Exit -ne 0) { throw "DXR creature shot exited $($r2.Exit): $($r2.Out)" }
+        $salmon = Get-Metric $r2.Out 'salmon_px'
+        if ($salmon -lt 300) { throw "the creature barely rendered in DXR ($salmon salmon px)" }
+        $r1 = Invoke-AppCapture @('--shoggoth-dxr-shot', '--seed', '1', '--pose', '1', '--width', '640', '--height', '360', '--spp', '96')
+        if ($r1.Exit -ne 0) { throw "DXR world-only shot exited $($r1.Exit): $($r1.Out)" }
+        $world = Get-Metric $r1.Out 'salmon_px'
+        if ($world -gt 60) { throw "the world (no creature) reported $world salmon px -- the metric isn't creature-specific" }
+        # pose 0 (world + creature) must also build + render debug-clean
+        $r0 = Invoke-AppCapture @('--shoggoth-dxr-shot', '--seed', '1', '--pose', '0', '--width', '640', '--height', '360', '--spp', '64', '--out', (Join-Path $tmp 'both.png'))
+        if ($r0.Exit -ne 0) { throw "DXR world+creature shot exited $($r0.Exit): $($r0.Out)" }
+        Write-Note "DXR creature: $salmon salmon px (creature) vs $world (world only) -- the body renders salmon in RT"
+    }
+
+    # In-game: --play --rt shows the creature WITHOUT regressing M19's frame rate -- the chunk
+    # BLASes stay cached; only the dynamic creature BLAS rebuilds each frame (the M25 design).
+    Assert-Gate 'in-game --play --rt: creature in RT, debug-clean, M19 frame-rate preserved (>=30 frames/5s)' {
+        $r = Invoke-AppCapture @('--play', '--rt', '--seconds', '5', '--seed', '3', '--width', '1280', '--height', '720', '--out', (Join-Path $tmp 'play_rt.png'))
+        if ($r.Exit -ne 0) { throw "--play --rt exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "ray-traced walk (with creature) had debug-layer messages" }
+        $frames = Get-Metric $r.Out 'rt_frames'
+        if ($frames -lt 30) { throw "RT dropped to $frames frames/5s (< 30) -- the creature regressed M19 perf" }
+        $luma = Get-MetricFloat $r.Out 'rt_luma_mean'
+        if ($luma -lt 10.0 -or $luma -gt 250.0) { throw "ray-traced frame luma $luma out of band [10,250]" }
+        Write-Note ("in-game RT: $frames DXR frames in 5 s with the live creature, luma {0:N1}, debug-clean" -f $luma)
+    }
+
+    # Regression: the raster path is byte-for-byte untouched (the material override is DXR-only).
+    Assert-Gate 'regression: M5 raster golden bit-identical + --play (no rt) is raster (rt_frames 0)' {
+        $shot = Join-Path $tmp 'm5.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        if ([double](& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1) -ne 0.0) { throw "M5 golden regressed" }
+        $p = Invoke-AppCapture @('--play', '--seconds', '2', '--seed', '3', '--width', '640', '--height', '360')
+        if ($p.Exit -ne 0) { throw "--play exited $($p.Exit)" }
+        if ((Get-Metric $p.Out 'rt_frames') -ne 0) { throw "--play (no --rt) ran ray tracing" }
+        if ((Get-Metric $p.Out 'debug_error_count') -ne 0) { throw "raster --play had debug-layer messages" }
+    }
+
+    # Regression: the DXR WORLD render is unchanged (build_scene's shade-tail reservation is
+    # additive), and the M20b raster body still renders debug-clean.
+    Assert-Gate 'regression: DXR world render debug-clean + lit (M9), M20b raster body debug-clean' {
+        $r = Invoke-AppCapture @('--dxr-pt', '--seed', '1', '--pose', '0', '--width', '640', '--height', '360', '--spp', '64', '--out', (Join-Path $tmp 'dxrpt.png'))
+        if ($r.Exit -ne 0) { throw "--dxr-pt exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "--dxr-pt had debug-layer messages" }
+        $luma = Get-MetricFloat $r.Out 'luma_mean'
+        if ($luma -lt 10.0 -or $luma -gt 200.0) { throw "DXR world luma $luma out of band [10,200]" }
+        $s = Invoke-AppCapture @('--shoggoth-shot', '--seed', '1', '--width', '640', '--height', '360', '--out', (Join-Path $tmp 'raster_body.png'))
+        if ($s.Exit -ne 0) { throw "--shoggoth-shot exited $($s.Exit): $($s.Out)" }
+        if ((Get-Metric $s.Out 'debug_error_count') -ne 0) { throw "M20b raster body had debug-layer messages" }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M25 gate: the Shoggoth''s body renders in the ray-traced path too -- a dynamic creature BLAS (chunk BLASes cached, so RT frame-rate holds), shaded salmon. The creature is visible in BOTH renderers now.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -2525,6 +2616,7 @@ try {
         'M22'   { Invoke-GateM22 }
         'M23'   { Invoke-GateM23 }
         'M24'   { Invoke-GateM24 }
+        'M25'   { Invoke-GateM25 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

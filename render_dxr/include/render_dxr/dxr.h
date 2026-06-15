@@ -47,6 +47,12 @@ public:
     // holds exactly what the raster renderer draws.
     bool build_scene(const std::vector<contracts::ResidentChunk>& chunks);
 
+    // M25: update a single DYNAMIC creature mesh (the Shoggoth's body) without rebuilding
+    // the cached chunk BLASes — write its verts into the reserved tail of the shade buffer,
+    // build one creature BLAS, and rebuild only the TLAS. Cheap enough to call every frame
+    // so the creature shows + animates in the ray-traced path. Call after build_scene.
+    bool update_creature(const contracts::ChunkVertex* verts, uint32_t count);
+
     // Cast primary rays from the camera through the TLAS; closest-hit shades by
     // distance, miss = background. (gate #1 visualisation; depth-compare next.)
     bool render_scene(const contracts::CameraPose& camera);

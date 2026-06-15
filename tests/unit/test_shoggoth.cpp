@@ -190,6 +190,19 @@ TEST_CASE("the hearing prompt carries what it heard, the situation, and the inte
     REQUIRE(q.find("silence") != std::string::npos);
 }
 
+TEST_CASE("the shoggoth mesh fits the DXR creature buffer (writhe-stable, bounded vert count)", "[m25][shoggoth][body]") {
+    // M25 injects the body as a dynamic creature into the DXR scene, writing it into a
+    // reserved shadeVb tail of kMaxCreatureVerts (4096). The vert COUNT must be stable
+    // across writhe (only positions animate, not topology) so the fixed-region write is
+    // correct, and must fit the reserved tail.
+    std::vector<br::contracts::ChunkVertex> a, b;
+    build_shoggoth_mesh(a, br::core::Vec3{0.0f, 1.0f, 0.0f}, 0.0f, 1.4f);
+    build_shoggoth_mesh(b, br::core::Vec3{0.0f, 1.0f, 0.0f}, 3.7f, 1.4f);  // a different writhe phase
+    REQUIRE(a.size() == b.size());   // topology is writhe-independent -> a stable count
+    REQUIRE(a.size() <= 4096u);      // fits the reserved DXR creature tail (kMaxCreatureVerts)
+    REQUIRE(a.size() % 3u == 0u);    // whole triangles
+}
+
 TEST_CASE("procedural TTS synthesizes deterministic, bounded, non-silent speech", "[m24][tts]") {
     const auto a = synthesize_speech("WARNING LEVEL THREE", 16000u);
     const auto b = synthesize_speech("WARNING LEVEL THREE", 16000u);

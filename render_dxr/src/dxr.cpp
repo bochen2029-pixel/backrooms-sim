@@ -192,6 +192,12 @@ struct DxrRenderer::Impl {
     ComPtr<ID3D12Resource> accumTex;       // RGBA32F radiance accumulator (u2)
     ComPtr<ID3D12Resource> shadeVb;        // concatenated chunk verts (StructuredBuffer t1)
     uint32_t shadeVertCount = 0;
+    // M25: a single DYNAMIC creature (the Shoggoth body) updated per-frame without
+    // rebuilding the cached chunk BLASes -- the chunk TLAS instances + the creature's
+    // start vertex in shadeVb are cached, and shadeVb reserves a tail for the creature.
+    std::vector<D3D12_RAYTRACING_INSTANCE_DESC> chunkInstances;
+    uint32_t chunkVertCount = 0;
+    ComPtr<ID3D12Resource> creatureBlas, creatureVb;
     ComPtr<ID3D12RootSignature> ptRS;
     ComPtr<ID3D12StateObject> ptPso;
     ComPtr<ID3D12Resource> ptSbt;          // raygen-only table
@@ -567,6 +573,7 @@ float3 albedo_of(float m){
     if (m < 1.5) return float3(0.42, 0.30, 0.19);   // carpet
     if (m < 2.5) return float3(0.16, 0.16, 0.15);   // ceiling tile
     if (m < 3.5) return float3(0.0, 0.0, 0.0);       // fluorescent (emitter)
+    if (m > 6.5) return float3(0.90, 0.42, 0.34);   // M25: the Shoggoth (warm salmon, R>G>B)
     return float3(0.28, 0.26, 0.22);                 // baseboard
 }
 
@@ -704,6 +711,10 @@ ComPtr<ID3D12Resource> make_buffer(ID3D12Device5* dev, UINT64 size, D3D12_HEAP_T
     return r;
 }
 
+// M25: shadeVb reserves this many verts past the chunks for the dynamic creature mesh
+// (build_shoggoth_mesh emits a fixed ~1248; 4096 is generous headroom).
+constexpr uint32_t kMaxCreatureVerts = 4096u;
+
 }  // namespace
 
 bool DxrRenderer::build_scene(const std::vector<contracts::ResidentChunk>& chunks) {
@@ -711,6 +722,7 @@ bool DxrRenderer::build_scene(const std::vector<contracts::ResidentChunk>& chunk
     if (!d.device) { last_error_ = "not initialised"; return false; }
     d.blas.clear(); d.vbs.clear(); d.tlas.Reset(); d.sceneReady = false;
     d.shadeVb.Reset(); d.shadeVertCount = 0;
+    d.creatureBlas.Reset(); d.creatureVb.Reset(); d.chunkInstances.clear(); d.chunkVertCount = 0;
 
     // Upload each chunk's vertices to an upload-heap buffer + build a BLAS. The
     // same vertices are also concatenated into one global buffer (shadeVb) the PT
@@ -777,16 +789,21 @@ bool DxrRenderer::build_scene(const std::vector<contracts::ResidentChunk>& chunk
     }
     if (instances.empty()) { last_error_ = "no geometry to build"; return false; }
 
-    // Global shading vertex buffer (PT reads normals/material via InstanceID).
-    const UINT64 shadeBytes = static_cast<UINT64>(allVerts.size()) * sizeof(contracts::ChunkVertex);
+    // Global shading vertex buffer (PT reads normals/material via InstanceID). M25:
+    // reserve a tail of kMaxCreatureVerts so update_creature can drop the dynamic creature
+    // in after the chunks without reallocating; cache the chunk instances + vert count so
+    // the TLAS can be rebuilt around the creature each frame with the chunk BLASes intact.
+    const UINT64 shadeBytes = static_cast<UINT64>(allVerts.size() + kMaxCreatureVerts) * sizeof(contracts::ChunkVertex);
     d.shadeVb = make_buffer(d.device.Get(), shadeBytes, D3D12_HEAP_TYPE_UPLOAD,
                             D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
     if (!d.shadeVb) { last_error_ = "shade vb"; return false; }
     void* sv = nullptr; const D3D12_RANGE svnone{ 0, 0 };
     d.shadeVb->Map(0, &svnone, &sv);
-    std::memcpy(sv, allVerts.data(), static_cast<size_t>(shadeBytes));
+    std::memcpy(sv, allVerts.data(), static_cast<size_t>(allVerts.size()) * sizeof(contracts::ChunkVertex));
     d.shadeVb->Unmap(0, nullptr);
     d.shadeVertCount = vtxOffset;
+    d.chunkInstances = instances;  // M25: cached for per-frame TLAS rebuilds
+    d.chunkVertCount = vtxOffset;
 
     // TLAS: upload instance descs, build.
     const UINT64 instBytes = instances.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
@@ -923,6 +940,105 @@ bool DxrRenderer::build_scene(const std::vector<contracts::ResidentChunk>& chunk
     }
 
     d.sceneReady = true;
+    return true;
+}
+
+// M25: drop one dynamic creature mesh into the already-built scene -- write its verts into
+// the reserved shadeVb tail, build a single creature BLAS, and rebuild ONLY the TLAS
+// (chunk BLASes stay cached). Cheap enough per frame for the creature to writhe in RT.
+bool DxrRenderer::update_creature(const contracts::ChunkVertex* verts, uint32_t count) {
+    Impl& d = *impl_;
+    if (!d.sceneReady) { last_error_ = "scene not built"; return false; }
+    if (count < 3) return true;                       // nothing to add
+    if (count > kMaxCreatureVerts) count = kMaxCreatureVerts;  // clamp to the reserved tail
+
+    d.wait_idle();  // the previous frame's trace is done before we touch shared buffers
+    if (FAILED(d.alloc->Reset())) { last_error_ = "alloc reset"; return false; }
+    if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "list reset"; return false; }
+    const D3D12_RANGE none{ 0, 0 };
+
+    // 1) The creature's verts go into the shadeVb tail (right after the chunk verts), so the
+    //    PT shader reads them via InstanceID = chunkVertCount. The chunk region is untouched.
+    void* sv = nullptr;
+    if (FAILED(d.shadeVb->Map(0, &none, &sv))) { last_error_ = "shade map"; return false; }
+    std::memcpy(static_cast<contracts::ChunkVertex*>(sv) + d.chunkVertCount, verts,
+                static_cast<size_t>(count) * sizeof(contracts::ChunkVertex));
+    d.shadeVb->Unmap(0, nullptr);
+    d.shadeVertCount = d.chunkVertCount + count;
+
+    // 2) Creature vertex buffer + BLAS.
+    const UINT64 vbytes = static_cast<UINT64>(count) * sizeof(contracts::ChunkVertex);
+    d.creatureVb = make_buffer(d.device.Get(), vbytes, D3D12_HEAP_TYPE_UPLOAD,
+                               D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+    if (!d.creatureVb) { last_error_ = "creature vb"; return false; }
+    void* cm = nullptr; d.creatureVb->Map(0, &none, &cm);
+    std::memcpy(cm, verts, static_cast<size_t>(vbytes));
+    d.creatureVb->Unmap(0, nullptr);
+
+    D3D12_RAYTRACING_GEOMETRY_DESC geo{};
+    geo.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+    geo.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+    geo.Triangles.VertexBuffer.StartAddress = d.creatureVb->GetGPUVirtualAddress();
+    geo.Triangles.VertexBuffer.StrideInBytes = sizeof(contracts::ChunkVertex);
+    geo.Triangles.VertexCount = count;
+    geo.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS bin{};
+    bin.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+    bin.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    bin.NumDescs = 1; bin.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY; bin.pGeometryDescs = &geo;
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO bpi{};
+    d.device->GetRaytracingAccelerationStructurePrebuildInfo(&bin, &bpi);
+    ComPtr<ID3D12Resource> bscratch = make_buffer(d.device.Get(), bpi.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT,
+        D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    d.creatureBlas = make_buffer(d.device.Get(), bpi.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT,
+        D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    if (!bscratch || !d.creatureBlas) { last_error_ = "creature blas buffers"; return false; }
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bbd{};
+    bbd.Inputs = bin;
+    bbd.ScratchAccelerationStructureData = bscratch->GetGPUVirtualAddress();
+    bbd.DestAccelerationStructureData = d.creatureBlas->GetGPUVirtualAddress();
+    d.list->BuildRaytracingAccelerationStructure(&bbd, 0, nullptr);
+    D3D12_RESOURCE_BARRIER uavb{}; uavb.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; uavb.UAV.pResource = d.creatureBlas.Get();
+    d.list->ResourceBarrier(1, &uavb);
+
+    // 3) TLAS = cached chunk instances ++ the creature instance (InstanceID = chunkVertCount).
+    std::vector<D3D12_RAYTRACING_INSTANCE_DESC> instances = d.chunkInstances;
+    D3D12_RAYTRACING_INSTANCE_DESC ci{};
+    ci.Transform[0][0] = ci.Transform[1][1] = ci.Transform[2][2] = 1.0f;  // identity (world-space verts)
+    ci.InstanceID = d.chunkVertCount & 0xFFFFFFu;
+    ci.InstanceMask = 0xFF;
+    ci.AccelerationStructure = d.creatureBlas->GetGPUVirtualAddress();
+    instances.push_back(ci);
+
+    const UINT64 instBytes = instances.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+    ComPtr<ID3D12Resource> instBuf = make_buffer(d.device.Get(), instBytes, D3D12_HEAP_TYPE_UPLOAD,
+                                                 D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+    void* im = nullptr; instBuf->Map(0, &none, &im);
+    std::memcpy(im, instances.data(), static_cast<size_t>(instBytes));
+    instBuf->Unmap(0, nullptr);
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tin{};
+    tin.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    tin.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    tin.NumDescs = static_cast<UINT>(instances.size());
+    tin.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    tin.InstanceDescs = instBuf->GetGPUVirtualAddress();
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO tpi{};
+    d.device->GetRaytracingAccelerationStructurePrebuildInfo(&tin, &tpi);
+    ComPtr<ID3D12Resource> tscratch = make_buffer(d.device.Get(), tpi.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT,
+        D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    d.tlas = make_buffer(d.device.Get(), tpi.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT,
+        D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    if (!tscratch || !d.tlas) { last_error_ = "tlas buffers"; return false; }
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC tbd{};
+    tbd.Inputs = tin;
+    tbd.ScratchAccelerationStructureData = tscratch->GetGPUVirtualAddress();
+    tbd.DestAccelerationStructureData = d.tlas->GetGPUVirtualAddress();
+    d.list->BuildRaytracingAccelerationStructure(&tbd, 0, nullptr);
+
+    if (FAILED(d.list->Close())) { last_error_ = "creature build close"; return false; }
+    ID3D12CommandList* lists[] = { d.list.Get() };
+    d.queue->ExecuteCommandLists(1, lists);
+    d.wait_idle();  // scratch/instBuf/bscratch can drop after the build completes
     return true;
 }
 
