@@ -43,3 +43,38 @@ TEST_CASE("recentering evicts the old ring; residency stays bounded", "[stream]"
     }
     REQUIRE(sm.generated_total() >= 50u);          // generated both rings
 }
+
+TEST_CASE("two-level residency: a second adjacent ring streams in + stays bounded (M28)", "[stream][m28]") {
+    StreamManager sm(123u, 2, 4u);  // radius 2 -> 25 chunks per level
+    // Stream level 0 + the floor above (level 1): both rings resident, bounded at 2 x 25.
+    sm.update(contracts::ChunkKey{0, 0, 0}, 1);
+    sm.wait_idle();
+    sm.update(contracts::ChunkKey{0, 0, 0}, 1);
+    REQUIRE(sm.resident_count() == 50u);
+    int n0 = 0, n1 = 0;
+    for (const auto& rc : sm.resident()) {
+        REQUIRE(iabs(rc.key.cx) <= 2);
+        REQUIRE(iabs(rc.key.cz) <= 2);
+        REQUIRE(rc.vertex_count > 0u);
+        if (rc.key.level == 0) ++n0;
+        else if (rc.key.level == 1) ++n1;
+    }
+    REQUIRE(n0 == 25);
+    REQUIRE(n1 == 25);   // the floor above is resident too -> see-through + seamless climb
+
+    // Switching the adjacent level (now looking DOWN) evicts the old one; still bounded.
+    sm.update(contracts::ChunkKey{0, 0, 0}, -1);
+    sm.wait_idle();
+    sm.update(contracts::ChunkKey{0, 0, 0}, -1);
+    REQUIRE(sm.resident_count() == 50u);
+    int up = 0;
+    for (const auto& rc : sm.resident())
+        if (rc.key.level == 1) ++up;
+    REQUIRE(up == 0);    // level +1 fully evicted when the adjacent level switched
+
+    // Backward-compatible: the single-arg update is exactly single-level (the prior path).
+    sm.update(contracts::ChunkKey{0, 0, 0});
+    sm.wait_idle();
+    sm.update(contracts::ChunkKey{0, 0, 0});
+    REQUIRE(sm.resident_count() == 25u);
+}

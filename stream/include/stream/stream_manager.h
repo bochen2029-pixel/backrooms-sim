@@ -34,6 +34,13 @@ public:
     // ones, evict chunks outside the ring around `center`.
     void update(contracts::ChunkKey center);
 
+    // M28: also keep one ADJACENT level resident -- the floor reached through stair
+    // holes -- so a vertical climb crosses the seam and holes see through to the next
+    // floor. Two concentric rings at (center.level) and (extra_level). Presentation
+    // only (INV-1); residency stays bounded by <= 2*(2r+1)^2 (INV-4). Passing
+    // extra_level == center.level is exactly the single-ring behaviour above.
+    void update(contracts::ChunkKey center, int32_t extra_level);
+
     // Block until all in-flight generation has completed and been collected.
     void wait_idle();
 
@@ -48,7 +55,7 @@ private:
     void worker_loop();
     void enqueue(contracts::ChunkKey k);
     void collect();
-    bool in_ring(contracts::ChunkKey c, contracts::ChunkKey center) const;
+    bool in_ring(contracts::ChunkKey c, contracts::ChunkKey center, int32_t extra_level) const;
 
     uint64_t seed_;
     int radius_;

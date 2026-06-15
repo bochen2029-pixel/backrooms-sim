@@ -484,8 +484,11 @@ int run_play(const Options& o) {
             prevSteps = steps;
         }
 
-        const contracts::ChunkKey center = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
-        sm.update(center);
+        const int32_t curLevel = contracts::level_from_y(s.wanderer.pos.y);
+        const int32_t extraLevel = (s.wanderer.pos.y - contracts::level_base_y(curLevel) > 2.0f)
+                                       ? curLevel + 1 : curLevel - 1;  // M28: climbing -> above, else see down
+        const contracts::ChunkKey center = contracts::chunk_key_at(curLevel, s.wanderer.pos.x, s.wanderer.pos.z);
+        sm.update(center, extraLevel);
         contracts::CameraPose cam = wanderer_camera(s, aspect);
         apply_head_bob(cam, s);  // M18 head-bob (view-only)
         if (rtOn) {  // M19: ray-traced path (DXR at 2/3 res, upscaled present)
@@ -996,8 +999,11 @@ int run_game(const Options& o) {
                 eng.post(audio_listener(s), 1.2f, static_cast<uint32_t>(steps - prevSteps));
                 prevSteps = steps;
             }
-            const contracts::ChunkKey center = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
-            sm->update(center);
+            const int32_t curLevel = contracts::level_from_y(s.wanderer.pos.y);
+            const int32_t extraLevel = (s.wanderer.pos.y - contracts::level_base_y(curLevel) > 2.0f)
+                                           ? curLevel + 1 : curLevel - 1;  // M28: climbing -> above, else see down
+            const contracts::ChunkKey center = contracts::chunk_key_at(curLevel, s.wanderer.pos.x, s.wanderer.pos.z);
+            sm->update(center, extraLevel);
             contracts::CameraPose cam = wanderer_camera(s, aspect);
             apply_head_bob(cam, s);  // M18 head-bob (view-only)
             if (model.settings.rt) {

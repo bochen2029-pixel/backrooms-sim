@@ -24,8 +24,8 @@ StreamManager::~StreamManager() {
     }
 }
 
-bool StreamManager::in_ring(ChunkKey c, ChunkKey center) const {
-    if (c.level != center.level) return false;
+bool StreamManager::in_ring(ChunkKey c, ChunkKey center, int32_t extra_level) const {
+    if (c.level != center.level && c.level != extra_level) return false;
     int64_t dx = c.cx - center.cx;
     int64_t dz = c.cz - center.cz;
     if (dx < 0) dx = -dx;
@@ -74,19 +74,28 @@ void StreamManager::collect() {
     }
 }
 
-void StreamManager::update(ChunkKey center) {
-    for (int64_t dx = -radius_; dx <= radius_; ++dx) {
-        for (int64_t dz = -radius_; dz <= radius_; ++dz) {
-            const ChunkKey k{center.level, center.cx + dx, center.cz + dz};
-            if (resident_.find(k) == resident_.end() &&
-                in_flight_.find(k) == in_flight_.end()) {
-                enqueue(k);
+void StreamManager::update(ChunkKey center) { update(center, center.level); }
+
+void StreamManager::update(ChunkKey center, int32_t extra_level) {
+    // M28: stream the wanderer's level AND one adjacent level so a climb crosses the
+    // floor seam and stair holes see through to the next floor. extra_level == center.level
+    // is exactly the prior single-ring behaviour (run_game/soak/tests stay bit-identical).
+    const int32_t levels[2] = {center.level, extra_level};
+    const int nlev = (extra_level == center.level) ? 1 : 2;
+    for (int li = 0; li < nlev; ++li) {
+        for (int64_t dx = -radius_; dx <= radius_; ++dx) {
+            for (int64_t dz = -radius_; dz <= radius_; ++dz) {
+                const ChunkKey k{levels[li], center.cx + dx, center.cz + dz};
+                if (resident_.find(k) == resident_.end() &&
+                    in_flight_.find(k) == in_flight_.end()) {
+                    enqueue(k);
+                }
             }
         }
     }
     collect();
     for (auto it = resident_.begin(); it != resident_.end();) {
-        if (!in_ring(it->first, center)) {
+        if (!in_ring(it->first, center, extra_level)) {
             it = resident_.erase(it);
         } else {
             ++it;
