@@ -65,6 +65,10 @@ constexpr float kCeilingHeight = 3.0f;
 // Level 0 maps to Y=0, so level-0 geometry is unchanged.
 constexpr float kLevelHeight = 4.0f;
 inline float level_base_y(int32_t level) { return static_cast<float>(level) * kLevelHeight; }
+// Inverse of level_base_y: the level whose playable band contains world Y (M26). The
+// wanderer's capsule centre sits at level_base_y(L)+~0.92, well inside [base, base+ceiling],
+// so this recovers its current floor. level_from_y(0)=0 -> level-0 paths are unchanged.
+inline int32_t level_from_y(float y) { return static_cast<int32_t>(std::floor(y / kLevelHeight)); }
 
 // Fluorescent ceiling cells form a regular grid (the backrooms light grid):
 // every other global cell in both axes. gen tiles + renderer lights agree here.

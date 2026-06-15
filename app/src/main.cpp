@@ -360,10 +360,11 @@ int run_play(const Options& o) {
     contracts::ChunkKey cached{ 0, static_cast<int64_t>(1) << 40, 0 };
     auto rebuild = [&](contracts::ChunkKey c) {
         collision.clear();
-        collision.push_back(Aabb{ {-1.0e6f, -1.0f, -1.0e6f}, {1.0e6f, 0.0f, 1.0e6f} });
+        const float baseY = contracts::level_base_y(c.level);  // M26: the wanderer's current floor
+        collision.push_back(Aabb{ {-1.0e6f, baseY - 1.0f, -1.0e6f}, {1.0e6f, baseY, 1.0e6f} });
         for (int64_t dx = -1; dx <= 1; ++dx)
             for (int64_t dz = -1; dz <= 1; ++dz) {
-                const contracts::ChunkData cd = contracts::GenerateChunk(o.seed, contracts::ChunkKey{ 0, c.cx + dx, c.cz + dz });
+                const contracts::ChunkData cd = contracts::GenerateChunk(o.seed, contracts::ChunkKey{ c.level, c.cx + dx, c.cz + dz });
                 for (const auto& b : cd.collision) collision.push_back(Aabb{ {b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]} });
             }
         cached = c;
@@ -379,7 +380,7 @@ int run_play(const Options& o) {
     app::Shoggoth shog;
     shog.pos = s.wanderer.pos; shog.pos.x += 22.0f; shog.pos.z += 6.0f;  // spawn a few cells away
     std::vector<contracts::ChunkVertex> shogBody;
-    contracts::ChunkKey c0 = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+    contracts::ChunkKey c0 = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
     rebuild(c0);
     sm.update(c0); sm.wait_idle(); sm.update(c0);
 
@@ -454,7 +455,7 @@ int run_play(const Options& o) {
         if (accum > 0.25f) accum = 0.25f;  // clamp the spiral of death
         bool firstTick = true;
         while (accum >= tickDt) {
-            const contracts::ChunkKey here = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+            const contracts::ChunkKey here = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
             if (here != cached) rebuild(here);
             contracts::InputCommand step = in;
             if (firstTick) { step.look_yaw = look_yaw; step.look_pitch = look_pitch; firstTick = false; }  // mouse delta is per-frame
@@ -480,7 +481,7 @@ int run_play(const Options& o) {
             prevSteps = steps;
         }
 
-        const contracts::ChunkKey center = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+        const contracts::ChunkKey center = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
         sm.update(center);
         contracts::CameraPose cam = wanderer_camera(s, aspect);
         apply_head_bob(cam, s);  // M18 head-bob (view-only)
@@ -821,10 +822,11 @@ int run_game(const Options& o) {
     uint64_t texSeed = model.seed;
     auto rebuild = [&](contracts::ChunkKey c) {
         collision.clear();
-        collision.push_back(Aabb{ {-1.0e6f, -1.0f, -1.0e6f}, {1.0e6f, 0.0f, 1.0e6f} });
+        const float baseY = contracts::level_base_y(c.level);  // M26: the wanderer's current floor
+        collision.push_back(Aabb{ {-1.0e6f, baseY - 1.0f, -1.0e6f}, {1.0e6f, baseY, 1.0e6f} });
         for (int64_t dx = -1; dx <= 1; ++dx)
             for (int64_t dz = -1; dz <= 1; ++dz) {
-                const contracts::ChunkData cd = contracts::GenerateChunk(texSeed, contracts::ChunkKey{ 0, c.cx + dx, c.cz + dz });
+                const contracts::ChunkData cd = contracts::GenerateChunk(texSeed, contracts::ChunkKey{ c.level, c.cx + dx, c.cz + dz });
                 for (const auto& b : cd.collision) collision.push_back(Aabb{ {b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]} });
             }
         cached = c;
@@ -836,7 +838,7 @@ int run_game(const Options& o) {
         sm = std::make_unique<br::stream::StreamManager>(seed, static_cast<int>(o.radius), o.workers);
         s = WorldState(seed);
         s.wanderer.pos = Vec3{ 2.0f, kWandererHalfHeight + 0.02f, 2.0f };
-        const contracts::ChunkKey c0 = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+        const contracts::ChunkKey c0 = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
         rebuild(c0);
         sm->update(c0); sm->wait_idle(); sm->update(c0);
         prevSteps = footstep_count(s);
@@ -970,7 +972,7 @@ int run_game(const Options& o) {
             }
             bool firstTick = true;
             while (accum >= tickDt) {
-                const contracts::ChunkKey here = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+                const contracts::ChunkKey here = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
                 if (here != cached) rebuild(here);
                 contracts::InputCommand step = in;
                 if (firstTick) { step.look_yaw = look_yaw; step.look_pitch = look_pitch; firstTick = false; }
@@ -991,7 +993,7 @@ int run_game(const Options& o) {
                 eng.post(audio_listener(s), 1.2f, static_cast<uint32_t>(steps - prevSteps));
                 prevSteps = steps;
             }
-            const contracts::ChunkKey center = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+            const contracts::ChunkKey center = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
             sm->update(center);
             contracts::CameraPose cam = wanderer_camera(s, aspect);
             apply_head_bob(cam, s);  // M18 head-bob (view-only)
@@ -1175,7 +1177,7 @@ int run_stream(const Options& o) {
 
     // Prime the ring around the start so the first frames are not empty.
     {
-        const auto c = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+        const auto c = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
         sm.update(c);
         sm.wait_idle();
         sm.update(c);
@@ -1206,7 +1208,7 @@ int run_stream(const Options& o) {
             in.look_yaw = 0.00008f;  // gentle curve -> a 2D swath of chunks
             br::core::tick(s, in, br::core::open_ground());
         }
-        const auto center = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+        const auto center = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
         sm.update(center);
         const auto cam = br::core::wanderer_camera(s, aspect);
         uint32_t drawn = 0;
@@ -1438,7 +1440,7 @@ int run_walkbot(const Options& o) {
     const uint64_t kMaxTicks = 800000;
 
     while (s.odometer < target_m && s.tick < kMaxTicks) {
-        const contracts::ChunkKey here = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+        const contracts::ChunkKey here = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
         if (here != cached) rebuild(here);
         tick(s, bot.step(s), collision);
         const float px = s.wanderer.pos.x, pz = s.wanderer.pos.z;
@@ -1610,7 +1612,7 @@ contracts::WandererSummary build_summary(const br::core::WorldState& s, uint64_t
     sum.tick = s.tick;
     sum.world_seed = seed;
     sum.level = 0;
-    const contracts::ChunkKey k = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+    const contracts::ChunkKey k = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
     sum.chunk_cx = k.cx; sum.chunk_cz = k.cz;
     sum.biome = static_cast<int32_t>(br::gen::biome_at(seed, 0, k.cx, k.cz));
     sum.distance_m = s.odometer;
@@ -1694,16 +1696,17 @@ int run_soak(const Options& o) {
     contracts::ChunkKey cached{ 0, static_cast<int64_t>(1) << 40, 0 };
     auto rebuild_collision = [&](contracts::ChunkKey c) {
         collision.clear();
-        collision.push_back(Aabb{ {-1.0e6f, -1.0f, -1.0e6f}, {1.0e6f, 0.0f, 1.0e6f} });
+        const float baseY = contracts::level_base_y(c.level);  // M26: the wanderer's current floor
+        collision.push_back(Aabb{ {-1.0e6f, baseY - 1.0f, -1.0e6f}, {1.0e6f, baseY, 1.0e6f} });
         for (int64_t dx = -1; dx <= 1; ++dx)
             for (int64_t dz = -1; dz <= 1; ++dz) {
-                const contracts::ChunkData cd = contracts::GenerateChunk(o.seed, contracts::ChunkKey{ 0, c.cx + dx, c.cz + dz });
+                const contracts::ChunkData cd = contracts::GenerateChunk(o.seed, contracts::ChunkKey{ c.level, c.cx + dx, c.cz + dz });
                 for (const auto& b : cd.collision) collision.push_back(Aabb{ {b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]} });
             }
         cached = c;
     };
 
-    contracts::ChunkKey c0 = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+    contracts::ChunkKey c0 = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
     rebuild_collision(c0);
     sm.update(c0); sm.wait_idle(); sm.update(c0);
 
@@ -1739,7 +1742,7 @@ int run_soak(const Options& o) {
         else if (s.tick >= tick_target) break;
 
         for (uint32_t k = 0; k < tpf; ++k) {
-            const contracts::ChunkKey here = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+            const contracts::ChunkKey here = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
             if (here != cached) rebuild_collision(here);
             tick(s, bot.step(s), collision);
         }
@@ -1897,7 +1900,7 @@ struct MazeWalker {
 
     void step() {
         const contracts::ChunkKey here =
-            contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+            contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
         if (here != cached) rebuild(here);
         br::core::tick(s, bot.step(s), collision);
     }
@@ -2873,10 +2876,11 @@ int run_dxr_walk(const Options& o) {
     contracts::ChunkKey cached{ 0, static_cast<int64_t>(1) << 40, 0 };
     auto rebuild_collision = [&](contracts::ChunkKey c) {
         collision.clear();
-        collision.push_back(Aabb{ {-1.0e6f, -1.0f, -1.0e6f}, {1.0e6f, 0.0f, 1.0e6f} });
+        const float baseY = contracts::level_base_y(c.level);  // M26: the wanderer's current floor
+        collision.push_back(Aabb{ {-1.0e6f, baseY - 1.0f, -1.0e6f}, {1.0e6f, baseY, 1.0e6f} });
         for (int64_t dx = -1; dx <= 1; ++dx)
             for (int64_t dz = -1; dz <= 1; ++dz) {
-                const contracts::ChunkData cd = contracts::GenerateChunk(o.seed, contracts::ChunkKey{ 0, c.cx + dx, c.cz + dz });
+                const contracts::ChunkData cd = contracts::GenerateChunk(o.seed, contracts::ChunkKey{ c.level, c.cx + dx, c.cz + dz });
                 for (const auto& b : cd.collision) collision.push_back(Aabb{ {b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]} });
             }
         cached = c;
@@ -2886,7 +2890,7 @@ int run_dxr_walk(const Options& o) {
     br::render_dxr::DxrRenderer r;
     if (!r.init(o.width, o.height)) { std::fprintf(stderr, "dxr init: %s\n", r.last_error().c_str()); return 1; }
 
-    contracts::ChunkKey center = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+    contracts::ChunkKey center = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
     rebuild_collision(center);
     sm.update(center); sm.wait_idle(); sm.update(center);
     if (!r.build_scene(sm.resident())) { std::fprintf(stderr, "dxr scene: %s\n", r.last_error().c_str()); return 1; }
@@ -2898,12 +2902,12 @@ int run_dxr_walk(const Options& o) {
     uint64_t lastRender = 0;
 
     while (s.odometer < target_m && s.tick < kMaxTicks) {
-        const contracts::ChunkKey here = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+        const contracts::ChunkKey here = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
         if (here != cached) rebuild_collision(here);
         tick(s, bot.step(s), collision);
 
         if (s.tick - lastRender >= kRenderEvery) {
-            const contracts::ChunkKey rc = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
+            const contracts::ChunkKey rc = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
             if (rc != sceneCenter) {                    // resident set shifted -> rebuild the AS
                 sm.update(rc); sm.wait_idle(); sm.update(rc);
                 if (!r.build_scene(sm.resident())) { std::fprintf(stderr, "dxr rebuild: %s\n", r.last_error().c_str()); return 1; }
