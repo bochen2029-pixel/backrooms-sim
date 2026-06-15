@@ -73,6 +73,8 @@ struct Options {
     bool walkbot = false, topdown = false, version = false, shot = false;
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
     bool biomeat = false, descend = false, ascend = false, vstream = false, shaftfall = false, abyss = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
+    bool screensaver = false, scr_config = false;   // Windows .scr: /s run, /p <hwnd> preview, /c config
+    std::string scr_preview;                         // /p <hwnd>: parent HWND to render the preview into
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
     bool soak = false, crash_test = false, director_probe = false;
     bool director_record = false, director_replay = false;
@@ -135,6 +137,17 @@ bool parse(int argc, char** argv, Options& o) {
             dst = std::strtof(argv[++i], nullptr);
             return true;
         };
+        // Windows screensaver args (slash-prefixed): /s run fullscreen, /p <hwnd> preview, /c[:hwnd] config.
+        if (a[0] == '/' && (a[1] == 's' || a[1] == 'S')) { o.screensaver = true; continue; }
+        if (a[0] == '/' && (a[1] == 'c' || a[1] == 'C')) { o.scr_config = true; continue; }
+        if (a[0] == '/' && (a[1] == 'p' || a[1] == 'P')) {
+            o.screensaver = true;
+            const char* hp = a + 2;
+            if (*hp == ':' || *hp == '=') ++hp;                 // /p:HWND or /p=HWND
+            if (*hp) o.scr_preview = hp;                        // /pHWND
+            else if (i + 1 < argc) o.scr_preview = argv[++i];   // /p <HWND>
+            continue;
+        }
         if (std::strcmp(a, "--headless") == 0) o.headless = true;
         else if (std::strcmp(a, "--window") == 0) o.windowed = true;
         else if (std::strcmp(a, "--scene") == 0) o.scene = true;
@@ -260,6 +273,40 @@ HWND create_window(uint32_t width, uint32_t height) {
                                 CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
                                 nullptr, nullptr, wc.hInstance, nullptr);
     if (hwnd) ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    return hwnd;
+}
+
+// Screensaver window: ANY key / click / wheel / app-deactivation ends it (the .scr contract);
+// mouse-move is caught in the loop via GetCursorPos. A file-static flag -- the screensaver owns
+// the only window of this class.
+static volatile bool g_scrQuit = false;
+LRESULT CALLBACK scr_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_KEYDOWN: case WM_SYSKEYDOWN:
+        case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN: case WM_MOUSEWHEEL:
+            g_scrQuit = true; return 0;
+        case WM_ACTIVATEAPP: if (wp == FALSE) g_scrQuit = true; return 0;
+        case WM_CLOSE:   DestroyWindow(hwnd); return 0;
+        case WM_DESTROY: PostQuitMessage(0);  return 0;
+        default:         return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+}
+// A borderless, topmost, cursor-hidden window covering the PRIMARY display.
+HWND create_screensaver_window(uint32_t& w, uint32_t& h) {
+    const wchar_t* kClass = L"BackroomsScreensaver";
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = scr_proc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = kClass;
+    wc.hCursor = nullptr;  // no cursor
+    RegisterClassExW(&wc);
+    w = static_cast<uint32_t>(GetSystemMetrics(SM_CXSCREEN));
+    h = static_cast<uint32_t>(GetSystemMetrics(SM_CYSCREEN));
+    HWND hwnd = CreateWindowExW(WS_EX_TOPMOST, kClass, L"Backrooms", WS_POPUP,
+                                0, 0, static_cast<int>(w), static_cast<int>(h),
+                                nullptr, nullptr, wc.hInstance, nullptr);
+    if (hwnd) { ShowWindow(hwnd, SW_SHOW); SetForegroundWindow(hwnd); }
     return hwnd;
 }
 
@@ -3572,6 +3619,158 @@ struct TimerPeriodGuard {
     ~TimerPeriodGuard() { timeEndPeriod(1); }
 };
 
+// ----- Windows screensaver: an auto-driven cinematic walk through a random Backrooms -------
+// /s = fullscreen (cursor hidden; exits on ANY key/click/mouse-move/focus-loss); /p <hwnd> =
+// render the Settings preview pane; /c = a tiny config dialog. VHS post ON, the procedural
+// audio ambience + the wandering Shoggoth, a new random seed each launch. Presentation only --
+// off the gated sim paths, so a wall-clock seed here never touches INV-1. `--seconds N` caps the
+// run (for a headless smoke test); with no cap it runs until input (the screensaver contract).
+int run_screensaver(const Options& o) {
+    using namespace br::core;
+    using namespace std::chrono;
+
+    if (o.scr_config && o.scr_preview.empty()) {
+        MessageBoxW(nullptr,
+            L"Backrooms screensaver\n\nA new, infinite, never-repeating Backrooms every time it starts.\n"
+            L"Nothing to configure -- move the mouse or press any key to exit.",
+            L"Backrooms Screensaver", MB_OK | MB_ICONINFORMATION);
+        return 0;
+    }
+
+    uint64_t seed = (static_cast<uint64_t>(GetTickCount64()) * 2654435761ull) ^ 0x9e3779b97f4a7c15ull;
+    if (seed == 0) seed = 1;
+    const uint64_t texSeed = seed;
+
+    const bool preview = !o.scr_preview.empty();
+    HWND hwnd = nullptr;
+    uint32_t W = 0, H = 0;
+    bool ownWindow = false;
+    if (preview) {
+        hwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(std::strtoull(o.scr_preview.c_str(), nullptr, 0)));
+        if (!hwnd || !IsWindow(hwnd)) return 0;
+        RECT rc{}; GetClientRect(hwnd, &rc);
+        W = static_cast<uint32_t>(rc.right - rc.left); H = static_cast<uint32_t>(rc.bottom - rc.top);
+        if (W < 16) W = 320;
+        if (H < 16) H = 240;
+    } else {
+        hwnd = create_screensaver_window(W, H);
+        if (!hwnd) { std::fprintf(stderr, "screensaver: window creation failed\n"); return 1; }
+        ShowCursor(FALSE);
+        ownWindow = true;
+    }
+
+    Renderer renderer;
+    if (!renderer.init_windowed(hwnd, W, H)) {
+        std::fprintf(stderr, "screensaver init: %s\n", renderer.last_error().c_str());
+        if (ownWindow) ShowCursor(TRUE);
+        return preview ? 0 : 1;   // a blank preview pane is fine; a failed /s is an error
+    }
+    renderer.set_texture_seed(texSeed);
+
+    WorldState s(seed);
+    s.wanderer.pos = Vec3{ 2.0f, kWandererHalfHeight + 0.02f, 2.0f };
+    WalkBot bot(seed ^ 0x5170990000000001ull, s.wanderer.pos);   // the autonomous camera
+    app::Shoggoth shog; shog.pos = s.wanderer.pos; shog.pos.x += 22.0f; shog.pos.z += 6.0f;
+
+    std::vector<Aabb> collision;
+    contracts::ChunkKey cached{ 0, static_cast<int64_t>(1) << 40, 0 };
+    auto rebuild = [&](contracts::ChunkKey c) {
+        collision.clear();
+        const float baseY = contracts::level_base_y(c.level);
+        collision.push_back(Aabb{ {-1.0e6f, baseY - 1.0f, -1.0e6f}, {1.0e6f, baseY, 1.0e6f} });
+        for (int64_t dx = -1; dx <= 1; ++dx)
+            for (int64_t dz = -1; dz <= 1; ++dz) {
+                const contracts::ChunkData cd = contracts::GenerateChunk(texSeed, contracts::ChunkKey{ c.level, c.cx + dx, c.cz + dz });
+                for (const auto& b : cd.collision) collision.push_back(Aabb{ {b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]} });
+            }
+        cached = c;
+    };
+    rebuild(contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z));
+
+    const int rad = (o.radius > 0) ? static_cast<int>(o.radius) : 6;
+    auto sm = std::make_unique<br::stream::StreamManager>(seed, rad, (o.workers > 0 ? o.workers : 4u));
+
+    audio::AudioEngine eng(seed, contracts::kAudioSampleRate);
+    const bool audioOn = (!o.no_audio && !preview) ? eng.start_device(false) : false;
+    if (audioOn) { eng.set_master_volume(0.6f); eng.set_sfx_volume(0.8f); }
+    uint64_t prevSteps = 0;
+
+    std::unique_ptr<app::ShoggothBrainHost> brain;   // optional ambience; graceful if :7071 is down
+    if (!o.no_shoggoth_brain && !preview) {
+        std::string bh; int bp; parse_host_port(o.director_url, bh, bp);
+        brain = std::make_unique<app::ShoggothBrainHost>(bh, bp);
+    }
+
+    const auto t0 = steady_clock::now();
+    auto prevt = t0; auto last_brain = t0 - seconds(3);
+    const float tickDt = 1.0f / 120.0f;
+    float accum = 0.0f;
+    std::vector<contracts::ChunkVertex> shogBody;
+    uint64_t frames = 0;
+    bool haveAnchor = false; POINT anchor{};
+    const double cap = (o.seconds > 0) ? static_cast<double>(o.seconds) : 0.0;  // 0 = run until input
+
+    while (!g_scrQuit) {
+        pump_messages();
+        if (g_scrQuit) break;
+        if (preview && !IsWindow(hwnd)) break;        // host closed the settings dialog
+        if (ownWindow) {                              // any cursor move ends it (.scr contract)
+            POINT cp;
+            if (GetCursorPos(&cp)) {
+                if (!haveAnchor) { anchor = cp; haveAnchor = true; }
+                else if ((cp.x > anchor.x ? cp.x - anchor.x : anchor.x - cp.x) > 6 ||
+                         (cp.y > anchor.y ? cp.y - anchor.y : anchor.y - cp.y) > 6) { g_scrQuit = true; break; }
+            }
+        }
+        const auto now = steady_clock::now();
+        if (cap > 0.0 && duration<double>(now - t0).count() >= cap) break;
+        accum += duration<float>(now - prevt).count(); prevt = now;
+        if (accum > 0.25f) accum = 0.25f;
+        const float aspect = static_cast<float>(W) / static_cast<float>(H);
+
+        while (accum >= tickDt) {
+            const contracts::ChunkKey here = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
+            if (here != cached) rebuild(here);
+            tick(s, bot.step(s), collision);                                  // auto-driven, no keyboard
+            app::shoggoth_step(shog, s.wanderer.pos, seed, (s.tick % 8u) == 0u);
+            accum -= tickDt;
+        }
+        if (brain) {
+            if (now - last_brain >= seconds(3)) { brain->submit(app::build_shoggoth_summary(shog, s.wanderer.pos, s.tick)); last_brain = now; }
+            for (const app::ShoggothIntent& it : brain->poll()) shog.intent = it;
+        }
+        if (audioOn) {
+            const uint64_t steps = footstep_count(s);
+            eng.post(audio_listener(s), 1.2f, static_cast<uint32_t>(steps - prevSteps));
+            prevSteps = steps;
+        }
+        // M28/M30 streaming: open the abyss band downward over a shaft, else the 2-floor see-through.
+        const int32_t curLevel = contracts::level_from_y(s.wanderer.pos.y);
+        const int32_t extraLevel = (s.wanderer.pos.y - contracts::level_base_y(curLevel) > 2.0f) ? curLevel + 1 : curLevel - 1;
+        const contracts::ChunkKey center = contracts::chunk_key_at(curLevel, s.wanderer.pos.x, s.wanderer.pos.z);
+        const br::gen::ShaftSpec shaft = br::gen::shaft_at(texSeed, center.cx, center.cz);
+        if (shaft.present && curLevel > shaft.top_level - shaft.depth && curLevel <= shaft.top_level) {
+            const int32_t below = curLevel - shaft.top_level + shaft.depth;
+            sm->update(center, curLevel - ((below < 4) ? below : 4), curLevel);
+        } else {
+            sm->update(center, extraLevel);
+        }
+
+        contracts::CameraPose cam = wanderer_camera(s, aspect);
+        apply_head_bob(cam, s);
+        renderer.set_post(true, static_cast<uint32_t>(texSeed), duration<float>(now - t0).count(), false);  // VHS, animated
+        app::build_shoggoth_mesh(shogBody, shog.pos, shog.writhe, 1.4f);
+        std::vector<contracts::ResidentChunk> withShog = sm->resident();
+        withShog.push_back(contracts::ResidentChunk{ contracts::ChunkKey{9999, static_cast<int64_t>(frames), 0}, shogBody.data(), static_cast<uint32_t>(shogBody.size()) });
+        uint32_t drawn = 0;
+        if (!renderer.render_chunks_windowed(cam, withShog, 8u, s.tick, &drawn)) break;  // device lost / host closed
+        ++frames;
+    }
+
+    if (ownWindow) { ShowCursor(TRUE); if (IsWindow(hwnd)) DestroyWindow(hwnd); }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     TimerPeriodGuard timer_period;
     Options o;
@@ -3626,6 +3825,7 @@ int main(int argc, char** argv) {
     if (o.tts_say) return run_tts_say(o);
     if (o.tts_check) return run_tts_check(o);
     if (o.shoggoth_replay) return run_shoggoth_replay(o);
+    if (o.screensaver || o.scr_config) return run_screensaver(o);
     if (o.game)       return run_game(o);
     if (o.soak)       return run_soak(o);
     if (o.sim)     return run_sim(o);
