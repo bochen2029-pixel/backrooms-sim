@@ -41,6 +41,12 @@ public:
     // extra_level == center.level is exactly the single-ring behaviour above.
     void update(contracts::ChunkKey center, int32_t extra_level);
 
+    // M30: keep a whole RANGE of floors [lo_level, hi_level] resident -- for looking DOWN an
+    // open shaft into the abyss (you see several floors down, then black where the bounded ring
+    // ends = fog-to-black for free). Presentation only (INV-1); residency stays bounded by
+    // (hi-lo+1)*(2r+1)^2 (INV-4), so callers keep the range small + only open it near a shaft.
+    void update(contracts::ChunkKey center, int32_t lo_level, int32_t hi_level);
+
     // Block until all in-flight generation has completed and been collected.
     void wait_idle();
 

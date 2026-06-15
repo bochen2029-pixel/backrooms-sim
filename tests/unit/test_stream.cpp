@@ -78,3 +78,29 @@ TEST_CASE("two-level residency: a second adjacent ring streams in + stays bounde
     sm.update(contracts::ChunkKey{0, 0, 0});
     REQUIRE(sm.resident_count() == 25u);
 }
+
+TEST_CASE("range residency: a band of floors streams in for the abyss + stays bounded (M30)", "[stream][m30]") {
+    StreamManager sm(123u, 2, 4u);  // radius 2 -> 25 chunks per level
+    // Look DOWN a shaft: stream the band [-2, 0] (3 floors) -> 3 x 25, all within the ring.
+    sm.update(contracts::ChunkKey{0, 0, 0}, -2, 0);
+    sm.wait_idle();
+    sm.update(contracts::ChunkKey{0, 0, 0}, -2, 0);
+    REQUIRE(sm.resident_count() == 75u);
+    int per[3] = {0, 0, 0};
+    for (const auto& rc : sm.resident()) {
+        REQUIRE(iabs(rc.key.cx) <= 2);
+        REQUIRE(iabs(rc.key.cz) <= 2);
+        REQUIRE(rc.key.level >= -2);
+        REQUIRE(rc.key.level <= 0);
+        ++per[rc.key.level + 2];
+    }
+    REQUIRE(per[0] == 25);   // level -2 (deepest)
+    REQUIRE(per[1] == 25);   // level -1
+    REQUIRE(per[2] == 25);   // level 0
+
+    // Closing the band back to one floor evicts the abyss; residency stays bounded.
+    sm.update(contracts::ChunkKey{0, 0, 0}, 0, 0);
+    sm.wait_idle();
+    sm.update(contracts::ChunkKey{0, 0, 0}, 0, 0);
+    REQUIRE(sm.resident_count() == 25u);
+}

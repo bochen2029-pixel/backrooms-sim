@@ -103,6 +103,30 @@ void StreamManager::update(ChunkKey center, int32_t extra_level) {
     }
 }
 
+void StreamManager::update(ChunkKey center, int32_t lo_level, int32_t hi_level) {
+    if (hi_level < lo_level) { const int32_t t = lo_level; lo_level = hi_level; hi_level = t; }
+    // M30: a ring at EVERY level in [lo, hi] (for the abyss down a shaft). Callers keep the
+    // range small + open it only near a shaft, so residency stays bounded (INV-4).
+    for (int32_t lv = lo_level; lv <= hi_level; ++lv) {
+        for (int64_t dx = -radius_; dx <= radius_; ++dx) {
+            for (int64_t dz = -radius_; dz <= radius_; ++dz) {
+                const ChunkKey k{lv, center.cx + dx, center.cz + dz};
+                if (resident_.find(k) == resident_.end() && in_flight_.find(k) == in_flight_.end()) {
+                    enqueue(k);
+                }
+            }
+        }
+    }
+    collect();
+    for (auto it = resident_.begin(); it != resident_.end();) {
+        const ChunkKey& c = it->first;
+        int64_t dx = c.cx - center.cx; if (dx < 0) dx = -dx;
+        int64_t dz = c.cz - center.cz; if (dz < 0) dz = -dz;
+        const bool keep = (c.level >= lo_level && c.level <= hi_level && dx <= radius_ && dz <= radius_);
+        if (!keep) { it = resident_.erase(it); } else { ++it; }
+    }
+}
+
 void StreamManager::wait_idle() {
     while (!in_flight_.empty()) {
         collect();
