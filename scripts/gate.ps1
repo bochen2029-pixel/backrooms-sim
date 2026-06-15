@@ -1986,6 +1986,73 @@ function Invoke-GateM20 {
     Write-Note 'M20 gate: a deterministic, maze-navigating Shoggoth that hunts. Something lives in the Backrooms now.'
 }
 
+function Invoke-GateM21 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green (incl. the shoggoth-brain intent tests)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m21'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+
+    # THE SACRED GATE: the Shoggoth's KEEL brain is a stochastic LLM inside a bit-exact
+    # engine. Record with the brain ON (>=1 real KEEL inference) -> replay with the model
+    # OFFLINE must be bit-identical. The intents live only in the event log (M11/Gate-4
+    # pattern, now for the monster). Needs the KEEL sidecar up at :7071.
+    Assert-Gate 'sacred gate: shoggoth brain record -> replay bit-identical (>=1 real intent, model off)' {
+        $slog = Join-Path $tmp 's.log'
+        $rec = Invoke-AppCapture @('--shoggoth-record', '--director-url', 'http://127.0.0.1:7071', '--director-log', $slog, '--seed', '3', '--ticks', '1200')
+        if ($rec.Exit -ne 0) { throw "record exited $($rec.Exit): $($rec.Out)" }
+        $valid = Get-Metric $rec.Out 'valid_intents'
+        if ($valid -lt 1) { throw "the brain produced no valid intents -- is the KEEL sidecar up at :7071? (C:\keel-sidecar-7071\start.cmd)" }
+        $recHash = Get-MetricStr $rec.Out 'combined_hash'
+        $rep = Invoke-AppCapture @('--shoggoth-replay', '--director-log', $slog)
+        if ($rep.Exit -ne 0) { throw "replay exited $($rep.Exit): $($rep.Out)" }
+        if ((Get-Metric $rep.Out 'replay_events') -lt 1) { throw "replay applied no events from the log" }
+        if ((Get-MetricStr $rep.Out 'combined_hash') -ne $recHash) { throw "replay hash != record hash -- the model leaked into the sim" }
+        Write-Note "shoggoth brain: $valid LLM intents; record == replay ($recHash) with the model OFFLINE"
+    }
+
+    # The brain-off default is exactly the M20 behaviour (intent = Hunt) — deterministic.
+    Assert-Gate 'brain-off default: shoggoth still deterministic + hunts (M20 regression)' {
+        $h1 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '5')).Out 'shoggoth_hash'
+        $h2 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '5')).Out 'shoggoth_hash'
+        if ($h1 -ne $h2) { throw "shoggoth hash not reproducible with the brain off" }
+        $r = Invoke-AppCapture @('--shoggoth', '--seed', '2')
+        if ((Get-Metric $r.Out 'ever_hunted') -ne 1) { throw "shoggoth no longer hunts by default" }
+    }
+    Assert-Gate 'regression: M5 lit shot golden bit-identical' {
+        $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+        $shot = Join-Path $tmp 'm5.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ($r.Exit -ne 0) { throw "M5 shot exited $($r.Exit)" }
+        if ([double](& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1) -ne 0.0) { throw "M5 golden regressed" }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M21 gate: the Shoggoth has a KEEL brain (intent -> the deterministic navigator), and replay stays bit-exact with the model off. The monster thinks.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -2013,6 +2080,7 @@ try {
         'M18'   { Invoke-GateM18 }
         'M19'   { Invoke-GateM19 }
         'M20'   { Invoke-GateM20 }
+        'M21'   { Invoke-GateM21 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

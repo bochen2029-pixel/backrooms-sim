@@ -53,6 +53,7 @@
 #include "head_bob.h"
 #include "shoggoth.h"
 #include "shoggoth_body.h"
+#include "shoggoth_brain.h"
 
 namespace contracts = br::contracts;
 namespace audio = br::audio;
@@ -83,6 +84,7 @@ struct Options {
     bool rt = false;                    // M19 force ray tracing on in --game/--play
     bool shoggoth = false;              // M20 headless shoggoth chase (determinism + nav)
     bool shoggoth_shot = false;         // M20b render the shoggoth body to a PNG
+    bool shoggoth_record = false, shoggoth_replay = false;  // M21 brain record/replay
     uint32_t eval_count = 100;          // --director-eval: scenario count
     uint32_t director_interval_s = 15;  // --soak --director: ambient seconds between summaries (wall clock)
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
@@ -176,6 +178,8 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--rt") == 0) o.rt = true;
         else if (std::strcmp(a, "--shoggoth") == 0) o.shoggoth = true;
         else if (std::strcmp(a, "--shoggoth-shot") == 0) o.shoggoth_shot = true;
+        else if (std::strcmp(a, "--shoggoth-record") == 0) o.shoggoth_record = true;
+        else if (std::strcmp(a, "--shoggoth-replay") == 0) o.shoggoth_replay = true;
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -1504,9 +1508,14 @@ uint64_t fold_bytes(uint64_t h, const void* p, size_t n) {
 void parse_host_port(const std::string& url, std::string& host, int& port) {
     host = "127.0.0.1"; port = 7071;
     if (url.empty()) return;
-    const size_t colon = url.rfind(':');
-    if (colon != std::string::npos) { host = url.substr(0, colon); port = std::atoi(url.c_str() + colon + 1); }
-    else { host = url; }
+    std::string u = url;
+    const size_t scheme = u.find("://");  // strip a leading http:// or https:// if present
+    if (scheme != std::string::npos) u = u.substr(scheme + 3);
+    const size_t slash = u.find('/');     // strip any trailing path
+    if (slash != std::string::npos) u = u.substr(0, slash);
+    const size_t colon = u.rfind(':');
+    if (colon != std::string::npos) { host = u.substr(0, colon); port = std::atoi(u.c_str() + colon + 1); }
+    else { host = u; }
 }
 
 // Deterministic WandererSummary from the (already-hashed) WorldState (the sim is the
@@ -1877,6 +1886,85 @@ int run_director_replay(const Options& o) {
     std::printf("ticks: %llu\n", static_cast<unsigned long long>(N));
     std::printf("director_events: %llu\n", static_cast<unsigned long long>(events.size()));
     std::printf("events_applied: %llu\n", static_cast<unsigned long long>(i));
+    std::printf("combined_hash: %016llx\n", static_cast<unsigned long long>(H));
+    return 0;
+}
+
+// ----- M21 Shoggoth brain record/replay: prove the sacred gate (model off) -----
+// Record: a wanderer walks the maze; the Shoggoth hunts with its KEEL brain ON. Every
+// few seconds it asks KEEL (with the shoggoth system prompt) for an intent, validates
+// it, applies it, and logs it at its tick. Prints the combined hash (shoggoth_hash
+// folded per tick + the exact event bytes) and writes the log.
+int run_shoggoth_record(const Options& o) {
+    std::string host; int port; parse_host_port(o.director_url, host, port);
+    const uint64_t N = (o.ticks > 0) ? o.ticks : 1800u;
+    const uint64_t kBrainEvery = 240u;  // ~2 s of sim between thoughts
+
+    MazeWalker w(o.seed);
+    app::Shoggoth sh;
+    sh.pos = w.s.wanderer.pos; sh.pos.x += 24.0f;
+    std::vector<app::ShoggothEvent> events;
+    uint64_t H = 1469598103934665603ull;
+    uint64_t thoughts = 0, valid = 0;
+    for (uint64_t t = 0; t < N; ++t) {
+        w.step();
+        if (t % kBrainEvery == 0) {
+            ++thoughts;
+            const app::ShoggothSummary sum = app::build_shoggoth_summary(sh, w.s.wanderer.pos, t);
+            const br::director::KeelResponse resp = br::director::keel_complete(host, port, app::render_shoggoth_prompt(sum), 15000);
+            bool ok = false;
+            const app::ShoggothIntent intent = resp.ok ? app::parse_shoggoth_intent(resp.content, ok) : app::ShoggothIntent{};
+            if (resp.ok) {
+                if (ok) {
+                    ++valid;
+                    sh.intent = intent;
+                    events.push_back(app::ShoggothEvent{t, static_cast<int32_t>(intent.action), intent.aggression});
+                    H = fold_bytes(H, &events.back(), sizeof(app::ShoggothEvent));
+                }
+            }
+        }
+        app::shoggoth_step(sh, w.s.wanderer.pos, o.seed, (t % 8u) == 0u);
+        H = fold_u64(H, app::shoggoth_hash(sh));
+    }
+    if (!o.director_log.empty()) {
+        if (!app::write_shoggoth_log(o.director_log, o.seed, N, events)) { std::fprintf(stderr, "record: failed to write %s\n", o.director_log.c_str()); return 1; }
+    }
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("ticks: %llu\n", static_cast<unsigned long long>(N));
+    std::printf("thoughts: %llu\n", static_cast<unsigned long long>(thoughts));
+    std::printf("valid_intents: %llu\n", static_cast<unsigned long long>(valid));
+    std::printf("combined_hash: %016llx\n", static_cast<unsigned long long>(H));
+    return 0;
+}
+
+// Replay: re-run the SAME chase (seed + ticks from the log), applying the recorded
+// intents at their ticks with KEEL never contacted. The combined hash must equal the
+// record's -> the shoggoth's "brain" lives only in the log (the sacred gate).
+int run_shoggoth_replay(const Options& o) {
+    if (o.director_log.empty()) { std::fprintf(stderr, "replay: --director-log <path> required\n"); return 2; }
+    uint64_t seed = 0, N = 0;
+    std::vector<app::ShoggothEvent> events;
+    if (!app::read_shoggoth_log(o.director_log, seed, N, events)) { std::fprintf(stderr, "replay: cannot read %s\n", o.director_log.c_str()); return 2; }
+
+    MazeWalker w(seed);
+    app::Shoggoth sh;
+    sh.pos = w.s.wanderer.pos; sh.pos.x += 24.0f;
+    uint64_t H = 1469598103934665603ull;
+    size_t ei = 0;
+    for (uint64_t t = 0; t < N; ++t) {
+        w.step();
+        while (ei < events.size() && events[ei].effective_tick == t) {
+            sh.intent.action = static_cast<app::ShoggothAction>(events[ei].action);
+            sh.intent.aggression = events[ei].aggression;
+            H = fold_bytes(H, &events[ei], sizeof(app::ShoggothEvent));
+            ++ei;
+        }
+        app::shoggoth_step(sh, w.s.wanderer.pos, seed, (t % 8u) == 0u);
+        H = fold_u64(H, app::shoggoth_hash(sh));
+    }
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(seed));
+    std::printf("ticks: %llu\n", static_cast<unsigned long long>(N));
+    std::printf("replay_events: %llu\n", static_cast<unsigned long long>(events.size()));
     std::printf("combined_hash: %016llx\n", static_cast<unsigned long long>(H));
     return 0;
 }
@@ -2706,6 +2794,8 @@ int main(int argc, char** argv) {
     if (o.credits)    return run_credits(o);
     if (o.shoggoth)   return run_shoggoth(o);
     if (o.shoggoth_shot) return run_shoggoth_shot(o);
+    if (o.shoggoth_record) return run_shoggoth_record(o);
+    if (o.shoggoth_replay) return run_shoggoth_replay(o);
     if (o.game)       return run_game(o);
     if (o.soak)       return run_soak(o);
     if (o.sim)     return run_sim(o);

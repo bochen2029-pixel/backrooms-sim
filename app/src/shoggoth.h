@@ -24,6 +24,16 @@ namespace br::app {
 
 enum class ShoggothState { Lurk = 0, Hunt = 1, Chase = 2, Retreat = 3 };
 
+// M21: the high-level *intent* the KEEL brain sets (the cascade's top layer). The
+// deterministic navigator below executes it. `Hunt` is the default (= the M20
+// behavior, so the brain being off changes nothing).
+enum class ShoggothAction { Hunt = 0, Stalk = 1, Lurk = 2, Flank = 3, Flee = 4 };
+
+struct ShoggothIntent {
+    ShoggothAction action = ShoggothAction::Hunt;
+    float aggression = 0.5f;  // 0..1, scales speed
+};
+
 struct Shoggoth {
     br::core::Vec3 pos{0.0f, 0.0f, 0.0f};
     float yaw = 0.0f;      // facing (radians)
@@ -31,6 +41,7 @@ struct Shoggoth {
     ShoggothState state = ShoggothState::Lurk;
     uint32_t state_ticks = 0;
     int64_t wander_gi = 0, wander_gj = 0;  // current lurk goal cell
+    ShoggothIntent intent;                 // M21: set by the KEEL brain via the event log
     br::core::Pcg64 rng{0x5170990000000001ull};
 };
 
@@ -162,6 +173,23 @@ inline void shoggoth_step(Shoggoth& sh, const br::core::Vec3& wanderer, uint64_t
         tgi = sh.wander_gi; tgj = sh.wander_gj;
     }
 
+    // M21: the KEEL intent overrides/modulates the goal (Hunt = the M20 default, so
+    // the brain being off changes nothing).
+    switch (sh.intent.action) {
+        case ShoggothAction::Hunt: break;                                   // state-machine goal
+        case ShoggothAction::Stalk: tgi = wgi; tgj = wgj; break;            // approach (slowed below)
+        case ShoggothAction::Lurk: tgi = sh.wander_gi; tgj = sh.wander_gj; break;
+        case ShoggothAction::Flank: {                                       // circle: rotate the approach 90°
+            const int64_t di = wgi - sgi, dj = wgj - sgj;
+            tgi = wgi - dj / 2; tgj = wgj + di / 2;
+            break;
+        }
+        case ShoggothAction::Flee:
+            tgi = sgi + (sgi >= wgi ? 4 : -4);
+            tgj = sgj + (sgj >= wgj ? 4 : -4);
+            break;
+    }
+
     // Steer toward the centre of the next cell along the BFS route (stays in corridors).
     float ddx = 0.0f, ddz = 0.0f;
     const int dir = next_step_dir(seed, sgi, sgj, tgi, tgj);
@@ -178,7 +206,10 @@ inline void shoggoth_step(Shoggoth& sh, const br::core::Vec3& wanderer, uint64_t
     if (dl > 1e-4f) { ddx /= dl; ddz /= dl; sh.yaw = std::atan2(ddx, ddz); }
 
     // Organic ooze: speed pulses with the writhe so it never glides robotically.
-    const float speed = shog_speed(sh.state);
+    // M21: the intent scales it (Stalk creeps; aggression 0.5 -> x1.0 = M20 default).
+    float speed = shog_speed(sh.state);
+    if (sh.intent.action == ShoggothAction::Stalk) speed *= 0.55f;
+    speed *= 0.7f + 0.6f * sh.intent.aggression;
     sh.writhe += dt * (2.5f + speed);
     const float ooze = 0.92f + 0.18f * std::sin(sh.writhe * 1.7f);  // pulses ~[0.74,1.10], avg ~0.92
     sh.pos.x += ddx * speed * ooze * dt;
@@ -194,6 +225,7 @@ inline uint64_t shoggoth_hash(const Shoggoth& sh) {
     mixf(sh.pos.x); mixf(sh.pos.y); mixf(sh.pos.z); mixf(sh.yaw); mixf(sh.writhe);
     mix(static_cast<uint64_t>(sh.state)); mix(sh.state_ticks);
     mix(static_cast<uint64_t>(sh.wander_gi)); mix(static_cast<uint64_t>(sh.wander_gj));
+    mix(static_cast<uint64_t>(sh.intent.action)); mixf(sh.intent.aggression);  // M21 intent
     return h;
 }
 
