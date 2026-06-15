@@ -36,6 +36,7 @@ struct ShoggothIntent {
 
 struct Shoggoth {
     br::core::Vec3 pos{0.0f, 0.0f, 0.0f};
+    int32_t level = 0;     // M29: the floor it patrols (derived from pos.y; it never crosses a seam)
     float yaw = 0.0f;      // facing (radians)
     float writhe = 0.0f;   // organic body phase
     ShoggothState state = ShoggothState::Lurk;
@@ -60,14 +61,14 @@ inline float cell_center(int64_t g) { return (static_cast<float>(g) + 0.5f) * br
 // Is the move from global cell (gi,gj) in `dir` (0=E+x,1=W-x,2=N+z,3=S-z) open?
 // `cache` memoises per-chunk layouts so a BFS generates each chunk's maze once.
 inline bool maze_open(uint64_t seed, int64_t gi, int64_t gj, int dir,
-                      std::unordered_map<int64_t, br::gen::ChunkLayout>& cache) {
+                      std::unordered_map<int64_t, br::gen::ChunkLayout>& cache, int32_t level = 0) {
     const int G = br::gen::kCellsPerChunk;
     const int64_t cx = floor_div(gi, G), cz = floor_div(gj, G);
     const int li = static_cast<int>(gi - cx * G), lj = static_cast<int>(gj - cz * G);
     const int64_t key = (cx & 0xffffffffLL) | (cz << 32);
     auto it = cache.find(key);
     if (it == cache.end())
-        it = cache.emplace(key, br::gen::generate_layout(seed, contracts::ChunkKey{0, cx, cz})).first;
+        it = cache.emplace(key, br::gen::generate_layout(seed, contracts::ChunkKey{level, cx, cz})).first;
     const br::gen::ChunkLayout& L = it->second;
     switch (dir) {
         case 0: return !L.vwall[li + 1][lj];  // east
@@ -80,7 +81,7 @@ inline bool maze_open(uint64_t seed, int64_t gi, int64_t gj, int dir,
 // BFS over a bounded cell window: the direction (0..3) to step from (sgi,sgj) toward
 // (tgi,tgj), or -1 if already there / unreachable within the window. Deterministic
 // (neighbours are visited in a fixed E,W,N,S order).
-inline int next_step_dir(uint64_t seed, int64_t sgi, int64_t sgj, int64_t tgi, int64_t tgj) {
+inline int next_step_dir(uint64_t seed, int32_t level, int64_t sgi, int64_t sgj, int64_t tgi, int64_t tgj) {
     if (sgi == tgi && sgj == tgj) return -1;
     constexpr int R = 22;  // window radius in cells (~88 m)
     std::unordered_map<int64_t, br::gen::ChunkLayout> cache;
@@ -90,7 +91,7 @@ inline int next_step_dir(uint64_t seed, int64_t sgi, int64_t sgj, int64_t tgi, i
     static const int dgi[4] = {1, -1, 0, 0};
     static const int dgj[4] = {0, 0, 1, -1};
     for (int d = 0; d < 4; ++d) {
-        if (maze_open(seed, sgi, sgj, d, cache)) {
+        if (maze_open(seed, sgi, sgj, d, cache, level)) {
             const int64_t ni = sgi + dgi[d], nj = sgj + dgj[d];
             if (ni == tgi && nj == tgj) return d;
             if (seen.insert({ni, nj}).second) q.push({{ni, nj}, d});
@@ -101,7 +102,7 @@ inline int next_step_dir(uint64_t seed, int64_t sgi, int64_t sgj, int64_t tgi, i
         const int64_t ci = cur.first.first, cj = cur.first.second;
         const int first = cur.second;
         for (int d = 0; d < 4; ++d) {
-            if (!maze_open(seed, ci, cj, d, cache)) continue;
+            if (!maze_open(seed, ci, cj, d, cache, level)) continue;
             const int64_t ni = ci + dgi[d], nj = cj + dgj[d];
             if (ni == tgi && nj == tgj) return first;
             if (std::llabs(ni - sgi) > R || std::llabs(nj - sgj) > R) continue;
@@ -133,7 +134,11 @@ inline float shog_speed(ShoggothState s) {
 inline void shoggoth_step(Shoggoth& sh, const br::core::Vec3& wanderer, uint64_t seed, bool pathfind) {
     const float dt = br::core::kTickDt;
     const float dx = wanderer.x - sh.pos.x, dz = wanderer.z - sh.pos.z;
-    const float dist = std::sqrt(dx * dx + dz * dz);
+    sh.level = contracts::level_from_y(sh.pos.y);  // M29: the floor it patrols (no vertical motion below)
+    const bool same_level = (contracts::level_from_y(wanderer.y) == sh.level);
+    // M29: it can't sense prey on another floor -> descending/ascending a stair ESCAPES it. At level 0
+    // (every M20/M21 scene the wanderer + creature share) same_level is always true, so behaviour is unchanged.
+    const float dist = same_level ? std::sqrt(dx * dx + dz * dz) : (kShogLoseRange + 1.0f);
 
     ++sh.state_ticks;
     const ShoggothState was = sh.state;
@@ -192,7 +197,7 @@ inline void shoggoth_step(Shoggoth& sh, const br::core::Vec3& wanderer, uint64_t
 
     // Steer toward the centre of the next cell along the BFS route (stays in corridors).
     float ddx = 0.0f, ddz = 0.0f;
-    const int dir = next_step_dir(seed, sgi, sgj, tgi, tgj);
+    const int dir = next_step_dir(seed, sh.level, sgi, sgj, tgi, tgj);
     if (dir >= 0) {
         static const int dgi[4] = {1, -1, 0, 0};
         static const int dgj[4] = {0, 0, 1, -1};
@@ -225,6 +230,7 @@ inline uint64_t shoggoth_hash(const Shoggoth& sh) {
     mixf(sh.pos.x); mixf(sh.pos.y); mixf(sh.pos.z); mixf(sh.yaw); mixf(sh.writhe);
     mix(static_cast<uint64_t>(sh.state)); mix(sh.state_ticks);
     mix(static_cast<uint64_t>(sh.wander_gi)); mix(static_cast<uint64_t>(sh.wander_gj));
+    mix(static_cast<uint64_t>(sh.level));  // M29: the floor it patrols
     mix(static_cast<uint64_t>(sh.intent.action)); mixf(sh.intent.aggression);  // M21 intent
     return h;
 }

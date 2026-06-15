@@ -30,13 +30,30 @@ and press on. Minimal meta — no scaffolding-on-scaffolding; the bulk of effort
   `level_base_y`, cache keyed by full `ChunkKey`). Proven via `--vstream` (both floors resident `2x` ring
   bounded + rendered debug-clean, floor above visible through the hole `see_through_diff ~57-62`); M5 golden
   + M27 ascent intact. `[m28]` test. ADR-054. Commits `050d08c` → `--vstream`+gate → gate commit.
-- 🔨 **NEXT = M29 (per-floor Shoggoth).** Confine the Shoggoth to its level, seed it per `(seed, level)`,
-  and let descending a stair escape it (it can't follow across the seam); record→replay across a descent
-  **bit-exact with the model OFFLINE** (the M21 sacred gate, extended to verticality). **NEEDS the KEEL
-  sidecar at :7071** (`C:\keel-sidecar-7071\start.cmd`; NEVER :7070) for the live-brain path — but the
-  determinism gate runs model-offline. Study M20/M21's shoggoth (`app/src/main.cpp` run_shoggoth*, the
-  event-log→effective-tick design) before changing it. **Deps:** M27. See `_run_state/ROADMAP.md` §2. Then
-  **M30** (open shafts & the abyss — telegraphed bounded soft-catch fall + fog render + deep-descent soak).
+- 🔨 **M29 (per-floor Shoggoth) IN PROGRESS — Increment 1 ✅ DONE (core + escape, steps a–f below; `[m29]`
+  green, all M20/M21 shoggoth tests still pass); NEXT = Increment 2 (g,h): descent record→replay + the
+  sacred gate + `Invoke-GateM29` (needs KEEL sidecar :7071 to record).** The Shoggoth lives
+  OUTSIDE WorldState (`app/src/shoggoth.h`), pos is 2-D (X/Z; pos.y = spawn height, never moves vertically),
+  nav already takes `seed` + 2-D cells but **hardcodes `ChunkKey{0,cx,cz}`** in `maze_open` (~L62-78).
+  No frozen shoggoth-replay golden exists (the M21 gate records→replays FRESH + compares), so folding `level`
+  into `shoggoth_hash` is SAFE. **INCREMENT 1 (~15 lines, low-risk, do first):** (a) add `int32_t level=0;`
+  to `struct Shoggoth` (`shoggoth.h` ~L37-46); (b) in `shoggoth_step` (~L133-217) set `sh.level =
+  contracts::level_from_y(sh.pos.y);` near the top; (c) thread `level` into `next_step_dir`(~L83-112) +
+  `maze_open`(~L62-78) → use `ChunkKey{level,cx,cz}` (confines nav to the floor; per-level maze → per-(seed,
+  level) DISTINCT behaviour for free — no rng re-seed needed); (d) fold `sh.level` into `shoggoth_hash`
+  (~L220-230); (e) `[m29]` test in `tests/unit/test_shoggoth.cpp` (~L31-77 pattern): same seed, levels 0 vs 1
+  → DIFFERENT hashes; deterministic (run twice == ); still navigates. Build + `[m29]` green → commit.
+  **INCREMENT 2 (escape + the sacred gate):** (f) make hunt/sense level-aware in `shoggoth_step` — if
+  `level_from_y(wanderer.y) != sh.level`, the Shoggoth can't sense the wanderer (stay Lurk) → **descending a
+  stair ESCAPES it**; (g) extend `run_shoggoth_record`/`run_shoggoth_replay` (`main.cpp` ~L1996/L2344) so the
+  MazeWalker descends mid-run (or add a scripted level change) and assert **record==replay bit-exact MODEL
+  OFFLINE across the level change** (the M21 sacred gate, extended); (h) `Invoke-GateM29` + dispatch:
+  `[m29]` + confinement (sh.level constant w/o a stair) + per-(seed,level) distinct + escape (wanderer on a
+  different level → Shoggoth loses the hunt) + **sacred record==replay-offline across a descent** + M20
+  brain-off determinism + M5/INV-5/inventory regression → `m27`…`m29-green`. **Live-brain path needs KEEL
+  sidecar :7071** (`C:\keel-sidecar-7071\start.cmd`, NEVER :7070; currently DOWN — launch via
+  `scripts/autoloop.ps1` Ensure-Sidecar or the .cmd); the determinism gate itself runs OFFLINE. **Deps:** M27.
+  Then **M30** (open shafts & the abyss — telegraphed bounded soft-catch fall + fog render + deep-descent soak).
 
 ## THE LOOP (per ROADMAP §0)
 pick next step → tight change manifest (≤400 LOC; sim core `/fp:strict`, seeded PCG64, no wall-clock;

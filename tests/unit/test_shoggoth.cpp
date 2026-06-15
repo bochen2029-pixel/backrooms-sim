@@ -76,6 +76,48 @@ TEST_CASE("the shoggoth never tunnels into a sealed cell (stays on the maze grap
     REQUIRE(moved);  // it actually navigated (didn't get stuck at spawn)
 }
 
+TEST_CASE("per-floor shoggoth: confined to its level, escapes across a seam, deterministic (M29)", "[m29][shoggoth]") {
+    const uint64_t seed = 11u;
+    auto run_on = [&](float spawnY, float wandererY, float wanderX) {
+        Shoggoth s; s.pos = br::core::Vec3{28.0f, spawnY, 16.0f};
+        const br::core::Vec3 wanderer{wanderX, wandererY, 16.0f};
+        for (int t = 0; t < 800; ++t) shoggoth_step(s, wanderer, seed, (t % 8) == 0);
+        return s;
+    };
+    const float y0 = br::core::kWandererHalfHeight;                                   // level 0
+    const float y1 = br::contracts::level_base_y(1) + br::core::kWandererHalfHeight;   // level 1
+
+    // (1) Deterministic: same (seed, level, inputs) -> identical fingerprint.
+    REQUIRE(shoggoth_hash(run_on(y0, y0, 16.0f)) == shoggoth_hash(run_on(y0, y0, 16.0f)));
+
+    // (2) Per-(seed, level): the SAME world seed on different floors is a different creature
+    // (its own level field + a per-level maze it routes through).
+    const Shoggoth a0 = run_on(y0, y0, 16.0f);
+    const Shoggoth a1 = run_on(y1, y1, 16.0f);
+    REQUIRE(a0.level == 0);
+    REQUIRE(a1.level == 1);
+    REQUIRE(shoggoth_hash(a0) != shoggoth_hash(a1));
+
+    // (3) Confinement: it stays on its spawn floor (no vertical motion in shoggoth_step).
+    REQUIRE(a0.level == br::contracts::level_from_y(a0.pos.y));
+
+    // (4) ESCAPE across the seam: a level-0 creature cannot sense a wanderer who climbed to level 1
+    // (only 4 m away in X/Z) -> it never leaves Lurk. The same-distance SAME-floor control DOES hunt.
+    Shoggoth esc; esc.pos = br::core::Vec3{20.0f, y0, 16.0f};
+    const br::core::Vec3 upstairs{16.0f, y1, 16.0f};
+    for (int t = 0; t < 600; ++t) shoggoth_step(esc, upstairs, seed, (t % 8) == 0);
+    REQUIRE(esc.state == ShoggothState::Lurk);            // escaped: cross-seam prey is unsensed
+
+    Shoggoth ctl; ctl.pos = br::core::Vec3{20.0f, y0, 16.0f};
+    const br::core::Vec3 samefloor{16.0f, y0, 16.0f};
+    bool hunted = false;
+    for (int t = 0; t < 600; ++t) {
+        shoggoth_step(ctl, samefloor, seed, (t % 8) == 0);
+        if (ctl.state != ShoggothState::Lurk) hunted = true;
+    }
+    REQUIRE(hunted);
+}
+
 TEST_CASE("the procedural body is a valid, bounded, finite mesh", "[m20][shoggoth][body]") {
     std::vector<br::contracts::ChunkVertex> body;
     const br::core::Vec3 pos{16.0f, 1.0f, 16.0f};
