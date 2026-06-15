@@ -2654,6 +2654,106 @@ function Invoke-GateM26 {
     Write-Note 'M26 gate: the live walk is multi-level -- the wanderer''s floor is derived from y; chunks/collision/lights are per-level; distinct floors render debug-clean; level 0 stays byte-identical. The Phase IV foundation is in.'
 }
 
+function Invoke-GateM27 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green (incl. [m27] stair_at coverage + vertical connectivity)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m27'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+
+    # THE M27 PROOF: a scripted wanderer climbs a real procedural up-stair a full floor
+    # (level 0 -> 1) via step-up locomotion, deterministically (bit-identical hash x2).
+    Assert-Gate 'live ascent: the wanderer climbs a procedural stair to level 1, deterministic' {
+        foreach ($seed in 1, 7) {
+            $r1 = Invoke-AppCapture @('--ascend', '--seed', "$seed")
+            if ($r1.Exit -ne 0) { throw "ascend seed $seed exited $($r1.Exit): $($r1.Out)" }
+            if ((Get-Metric $r1.Out 'climbed') -ne 1) { throw "seed $seed did not climb the stair" }
+            if ((Get-Metric $r1.Out 'level_at_max') -ne 1) { throw "seed $seed did not reach level 1" }
+            $climb = Get-MetricFloat $r1.Out 'climb_m'
+            if ($climb -lt 3.0) { throw "seed $seed climbed only $climb m (< 3)" }
+            $r2 = Invoke-AppCapture @('--ascend', '--seed', "$seed")
+            if ((Get-MetricStr $r1.Out 'final_hash') -ne (Get-MetricStr $r2.Out 'final_hash')) { throw "seed $seed ascent hash not reproducible" }
+        }
+        Write-Note 'live ascent: wanderer climbs a procedural up-stair ~3.98 m to level 1 (seeds 1,7), bit-identical hash x2 -- the stairs are climbable + deterministic'
+    }
+
+    # Regression: the M7 scripted DESCENT still reaches level -1 (step-up did not break it).
+    Assert-Gate 'regression: --descend still reaches level -1 (M7)' {
+        $r = Invoke-AppCapture @('--descend', '--seed', '1')
+        if ($r.Exit -ne 0) { throw "descend exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'level_reached') -ne -1) { throw "descend no longer reaches level -1" }
+    }
+
+    # Goldens: the two top-down goldens were re-baselined for the stair holes (ADR-053); the
+    # first-person + fixed-scene goldens are UNCHANGED (stairs are sparse, none in those views).
+    Assert-Gate 'goldens: m4 top-down re-baselined bit-match; m5/m1/m2 unchanged (minimal blast radius)' {
+        foreach ($seed in 1, 7) {
+            $td = Join-Path $tmp "td_$seed.png"
+            $r = Invoke-AppCapture @('--topdown', '--out', $td, '--width', '512', '--height', '512', '--seed', "$seed")
+            if ($r.Exit -ne 0) { throw "topdown seed $seed exited $($r.Exit)" }
+            if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "topdown seed $seed had debug-layer messages" }
+            if ([double](& $hashdiff diff $td (Join-Path $RepoRoot "goldens\m4\topdown_seed$($seed).png") | Select-Object -Last 1) -ne 0.0) { throw "m4 topdown seed $seed != re-baselined golden" }
+        }
+        $shot = Join-Path $tmp 'm5.png'
+        $rs = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $shot)
+        if ((Get-Metric $rs.Out 'debug_error_count') -ne 0) { throw "M5 shot had debug-layer messages" }
+        if ([double](& $hashdiff diff $shot (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1) -ne 0.0) { throw "M5 first-person golden regressed (stairs leaked into the FP view)" }
+        $f0 = Join-Path $tmp 'm1.png'
+        $rf = Invoke-AppCapture @('--headless', '--out', $f0, '--width', '320', '--height', '180')
+        if ([double](& $hashdiff diff $f0 (Join-Path $RepoRoot 'goldens\m1\frame0_320x180.png') | Select-Object -Last 1) -ne 0.0) { throw "M1 frame-0 golden regressed" }
+        $room = Join-Path $tmp 'm2.png'
+        $rr = Invoke-AppCapture @('--scene', '--out', $room, '--width', '640', '--height', '360')
+        if ([double](& $hashdiff diff $room (Join-Path $RepoRoot 'goldens\m2\room_640x360.png') | Select-Object -Last 1) -ne 0.0) { throw "M2 room golden regressed" }
+        Write-Note 'goldens: m4 top-down (seed 1,7) bit-match the ADR-053 re-baseline; m5 FP shot + m1 frame-0 + m2 room byte-identical -- only the ceiling-facing top-down changed'
+    }
+
+    # The stairs do not trap horizontal navigation (the carve keeps every stair cell passable).
+    Assert-Gate 'walk-bot: 1 km, zero stuck (stairs navigable), deterministic' {
+        $h1 = $null
+        foreach ($seed in 1, 2, 3) {
+            $r = Invoke-AppCapture @('--walkbot', '--km', '1', '--seed', "$seed")
+            if ($r.Exit -ne 0) { throw "walk-bot seed $seed failed (exit $($r.Exit))" }
+            if ((Get-Metric $r.Out 'stuck_events') -ne 0) { throw "walk-bot seed $seed had stuck events" }
+            if ($seed -eq 1) { $h1 = Get-AppHash $r.Out }
+        }
+        $r2 = Invoke-AppCapture @('--walkbot', '--km', '1', '--seed', '1')
+        if ((Get-AppHash $r2.Out) -ne $h1) { throw "walk-bot hash not reproducible" }
+    }
+
+    # Regression: the Shoggoth stays deterministic with the brain off (M20).
+    Assert-Gate 'regression: brain-off shoggoth deterministic (M20)' {
+        $h1 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '5')).Out 'shoggoth_hash'
+        $h2 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '5')).Out 'shoggoth_hash'
+        if ($h1 -ne $h2) { throw "shoggoth hash not reproducible with the brain off" }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M27 gate: procedural stairs connect the stack -- hybrid placement (per-superblock backstop), aligned floor/ceiling holes, a climbable riser-slab stairwell + step-up locomotion (live ascent to level 1), a vertical-connectivity validator. Level-0 blast radius is just the 2 ceiling-facing top-down goldens (ADR-053).'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -2688,6 +2788,7 @@ try {
         'M24'   { Invoke-GateM24 }
         'M25'   { Invoke-GateM25 }
         'M26'   { Invoke-GateM26 }
+        'M27'   { Invoke-GateM27 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2

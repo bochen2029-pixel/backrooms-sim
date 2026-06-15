@@ -71,12 +71,15 @@ as the oracle, `m<N>-green` as the revert anchor, SESSION_LOG/PROGRESS/memory as
   kCeilingHeight`, currently pinned to 3.0). **Gate:** M5 raster golden **bit-identical** (no
   regression — the load-bearing constraint: level-0-only stays byte-identical) + spawn-on-level-N
   renders/collides correctly + replay hash stable + M0–M25 regression. **Deps:** Slice 0.
-- `[ ] M27` · **Procedural stairs (hybrid, K=4).** `stair_at(seed,L,cx,cz)` (density + 4×4 backstop) read
-  identically from both floors (the vertical-seam shared hash, mirroring `door_index`); cut ceiling/floor
-  holes + build the stairwell + landing; **stair-aware layout** (reserve+connect the stair cell); a
-  **vertical-connectivity validator** (Z-analogue of the flood-fill). **Gate:** every 4×4 superblock
-  links up+down; live ascend/descend in the streamed world; 2-D connectivity holds with holes;
-  no-stair level-0 byte-identical. **Deps:** M26.
+- `[x] M27` · **Procedural stairs (hybrid, K=4)** (`m27-green`). `stair_at(seed,L,cx,cz)` (density + 4×4
+  backstop) read identically from both floors (the vertical-seam shared hash, mirroring `door_index`);
+  aligned ceiling/floor holes cut in `GenerateChunk`; a climbable thin riser-slab stairwell + collision;
+  **stair-aware carve** (opens the stair cell, perimeter/seams untouched); **step-up locomotion** in
+  `move_and_collide` (inert for full-height walls → prior collision bit-identical); a **vertical-
+  connectivity validator** (Z flood-fill). **Gate PASSED:** every 4×4 superblock links up+down (`[m27]`);
+  live ascent climbs to level 1, bit-identical ×2 (`--ascend`); `--descend` still reaches level -1;
+  2-D connectivity holds with holes; walk-bot 1 km × 0 stuck; blast radius = only the 2 ceiling-facing
+  top-down goldens, re-baselined via goldgen (**ADR-053**). **Deps:** M26.
 - `[ ] M28` · **Vertical streaming + see-through.** Two-floor residency at stairwells (current level + the
   connected adjacent level near a stair); look up/down a stairwell debug-clean; bounded memory (INV-4).
   **Gate:** stand at a stairwell, both floors resident + rendered, debug-clean, memory-slope ~0. **Deps:** M27.

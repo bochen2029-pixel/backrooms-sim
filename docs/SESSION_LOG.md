@@ -4,6 +4,45 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 29 — M27: Procedural stairs (the stack is connected + climbable)  ✅ COMPLETE — 🏷️ `m27-green`
+
+`gate.ps1 -Milestone M27` exits 0; tagged `m27-green` + pushed. **The floors are now joined** — a wanderer
+can climb a real procedural stair from one floor to the next. Second Phase IV milestone.
+
+**Done (M27).** (1) `gen::stair_at(seed,L,cx,cz)` — pure, total — places an UP-stair via a density scatter
+(`hash % kStairDensityN=13`) PLUS a 4×4-superblock backstop, so every superblock holds ≥1 up-stair (the
+Z-analogue of INV-3) and both floors read the SAME function (level L cuts its ceiling hole + builds the
+stairwell; level L+1 cuts its floor hole at the same cell — aligned by construction, INV-2 in Z, no
+neighbour query). (2) `GenerateChunk` cuts the aligned holes + builds a climbable stairwell: 8 thin
+grounded riser-slabs (0.5 m each, inset, abutting → passes `ValidateChunkGeometry`); the pillar pass skips
+the stair cell. (3) `generate_layout` carves the stair cell's interior walls open (carving never
+disconnects; perimeter/door walls untouched → seams still agree). (4) **Step-up locomotion** in
+`move_and_collide` — a surgical pre-pass that mounts a low step (top within `kStepHeight=0.55 m` of the
+feet) when lifting onto it is clear; **inert for full-height walls/pillars, so all prior collision +
+determinism is bit-identical**. (5) `validate_vertical_connectivity` (Z flood-fill: horizontal doorways
+always link, vertical links iff `stair_at` fires) makes "no floor is ever sealed" machine-checkable.
+
+**Gate.** clean build (no warnings) + full ctest (95; incl. `[m27]` stair_at coverage + the
+vertical-connectivity validator with a non-vacuity control) + **live ascent** (`--ascend`: the capsule
+climbs a real up-stair ~3.98 m to **level 1**, seeds 1/7, bit-identical hash ×2) + `--descend` still
+reaches level -1 (M7 regression) + **goldens** (the 2 ceiling-facing m4 top-down goldens re-baselined via
+goldgen + **ADR-053**; m5 first-person shot + m1 frame-0 + m2 room **byte-identical**) + walk-bot 1 km × 0
+stuck on 3 seeds + brain-off shoggoth determinism (M20) + INV-5/inventory.
+
+**4 green increments** (`e7543bf` holes+stairwell+carve+goldens+ADR · `70f0eef` step-up + `--ascend` ·
+this gate). **No new dependency** (pure `gen`/`core` code).
+
+**Gotcha — `ValidateChunkGeometry` is strict.** It accepts only grounded (`mn.y==baseY`) thin walls or
+small square pillars, with no fat overlaps. The first stairwell (full-cell nested boxes, `baseY-0.05`)
+failed 4 tests; the fix was thin, grounded, abutting, inset riser-slabs. **Gotcha — no step-up existed:**
+the axis-separated AABB resolver stopped the capsule flat at any riser, so stairs were unclimbable until
+the step-up pre-pass; it's gated to low boxes only, keeping every existing hash bit-identical.
+
+**Next: M28 — vertical streaming + see-through** (two-floor residency at a stairwell so the ascent crosses
+the seam seamlessly + you can see down the hole). Per `_run_state/ROADMAP.md` §2.
+
+---
+
 ## Session 28 — M26: Live multi-level (Phase IV foundation)  ✅ COMPLETE — 🏷️ `m26-green`
 
 `gate.ps1 -Milestone M26` exits 0; tagged `m26-green` + pushed. **The live walk is multi-level** — the

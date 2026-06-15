@@ -18,20 +18,18 @@ and press on. Minimal meta — no scaffolding-on-scaffolding; the bulk of effort
 
 ## CURRENT POSITION (update this line as you go)
 - ✅ Autopilot rig + perpetual memory + M26 (`m26-green`, live multi-level) shipped.
-- 🔨 **M27 (procedural stairs) IN PROGRESS — geometry DONE, validator+gate NEXT.** DONE so far:
-  `stair_at` placement (`a8d4b12`, `[m27]` green); **floor/ceiling holes** cut in `gen/src/chunk.cpp`
-  (floor opens where `stair_at(seed,L-1,..)` fires, ceiling where `stair_at(seed,L,..)` fires — aligned
-  by the same fn); **thin grounded riser-slab stairwell** + collision in `GenerateChunk` (8×0.5 m risers,
-  inset, abutting — passes `ValidateChunkGeometry`; pillar pass skips the stair cell); **stair-aware
-  carve** in `generate_layout` (opens the stair cell's interior walls, perimeter/seams untouched). All
-  94 ctest green. **Goldens re-baselined** via `goldgen capture` — only `goldens/m4/topdown_seed{1,7}`
-  changed (top-down sees the ceiling holes); all m5 shots / m1 / m2 / m7 biomes byte-identical, walk-bot
-  1 km × 0 stuck on all 5 seeds. ADR-053 written. **NEXT, in order:** (d) a **vertical-connectivity
-  validator** (Z flood-fill / superblock reachability — make "no floor ever sealed" machine-checkable) +
-  an `[m27]` test; (e) `Invoke-GateM27` + dispatch in `scripts/gate.ps1` → run `gate.ps1 -Milestone M27`
-  to exit 0 → `git tag m27-green` → push branch+tags → mark ROADMAP §2 M27 `[x]` + SESSION_LOG. Then
-  **M28** (vertical streaming + see-through), **M29** (per-floor Shoggoth; needs KEEL sidecar :7071),
-  **M30** (open shafts).
+- ✅ **M27 (procedural stairs) DONE — `m27-green`, gate exits 0, tagged + pushed.** `stair_at` hybrid
+  placement; aligned floor/ceiling holes; a climbable thin riser-slab stairwell + collision; stair-aware
+  carve; **step-up locomotion** in `move_and_collide` (inert for walls → prior collision bit-identical);
+  `validate_vertical_connectivity` (Z flood-fill). Proven: live ascent to level 1 (`--ascend`, bit-id ×2),
+  `--descend` still ↓ to -1, walk-bot 1 km × 0 stuck, only the 2 m4 top-down goldens re-baselined
+  (ADR-053). Commits `e7543bf` → `70f0eef` → the gate commit.
+- 🔨 **NEXT = M28 (vertical streaming + see-through).** Two-floor residency at a stairwell so the live
+  ascent crosses the seam seamlessly (currently the live walk streams a single level via
+  `level_from_y(pos.y)` — the ascent works headlessly but a live climb needs both floors resident at the
+  seam) + render down through a floor hole. **Gate:** stand at a stairwell, both floors resident +
+  rendered, debug-clean, memory-slope ~0. **Deps:** M27 (done). See `_run_state/ROADMAP.md` §2. Then
+  **M29** (per-floor Shoggoth; needs KEEL sidecar :7071), **M30** (open shafts).
 
 ## THE LOOP (per ROADMAP §0)
 pick next step → tight change manifest (≤400 LOC; sim core `/fp:strict`, seeded PCG64, no wall-clock;
