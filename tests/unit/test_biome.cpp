@@ -114,3 +114,41 @@ TEST_CASE("level -1 chunks are connected and geometry-valid (cross-level, M7 gat
         REQUIRE(br::contracts::ValidateChunkGeometry(cd));
     }
 }
+
+TEST_CASE("level_from_y inverts level_base_y at the wanderer's stance (M26)", "[m26][level]") {
+    // The implicit-level tracking M26 relies on: a point in level L's playable band
+    // [base, base+ceiling] resolves back to L, for any floor up or down. level_from_y(0)=0
+    // keeps every level-0 path byte-identical.
+    for (int32_t L = -64; L <= 64; ++L) {
+        const float base = br::contracts::level_base_y(L);
+        REQUIRE(br::contracts::level_from_y(base + 0.92f) == L);  // standing on the floor
+        REQUIRE(br::contracts::level_from_y(base + 0.10f) == L);  // just above it
+        REQUIRE(br::contracts::level_from_y(base + 2.90f) == L);  // head near the ceiling
+    }
+}
+
+TEST_CASE("floors do not repeat in Z: the biome field varies by level (M26)", "[m26][level]") {
+    // Generation already folds `level` into chunk_seed + biome_at, so the same (cx,cz)
+    // is a DIFFERENT floor at a different level (the Tegmark-I non-repetition property).
+    const uint64_t seed = 4242u;
+    const int64_t cx = 7, cz = -3;
+    const Biome b0 = biome_at(seed, 0, cx, cz);
+    bool varies = false;
+    for (int32_t lvl = -32; lvl <= 32 && !varies; ++lvl)
+        if (lvl != 0 && biome_at(seed, lvl, cx, cz) != b0) varies = true;
+    REQUIRE(varies);  // some neighbouring floor differs from level 0 -> non-repeating in Z
+}
+
+TEST_CASE("generation holds INV-3 + valid geometry across many levels (M26)", "[m26][level]") {
+    // Every floor up and down obeys the same invariants as level 0 (connectivity + valid
+    // geometry at its own level_base_y), so the wanderer can always keep walking on any floor.
+    const uint64_t seed = 909u;
+    for (int32_t lvl = -16; lvl <= 16; ++lvl) {
+        for (int64_t k = 0; k < 64; ++k) {
+            const br::contracts::ChunkKey key{lvl, (k % 16) - 8, (k / 16) - 2};
+            INFO("level " << lvl << " chunk (" << key.cx << "," << key.cz << ")");
+            REQUIRE(validate_connectivity(generate_layout(seed, key)));
+            REQUIRE(br::contracts::ValidateChunkGeometry(br::contracts::GenerateChunk(seed, key)));
+        }
+    }
+}
