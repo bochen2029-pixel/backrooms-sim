@@ -2894,6 +2894,81 @@ function Invoke-GateM30 {
     Write-Note 'M30 gate: open shafts -- a rare deep vertical void (shaft_at, ~1/1500) cut through the floors, a soft-catch fall the full depth (5..10), debug-clean, deterministic. The draft-audio telegraph + multi-floor fog render + a deep-descent soak are tracked M30 polish (ROADMAP).'
 }
 
+function Invoke-GateM29 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green (incl. the [m29] per-floor shoggoth test)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m29'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+
+    # THE M29 SACRED GATE (across a descent): record the per-floor Shoggoth's brain-driven chase with
+    # the wanderer CHANGING FLOOR at the midpoint (--level 2 -> it escapes across the seam), then
+    # replay with the model OFFLINE -> bit-identical, AND the creature must have lost the prey (Lurk).
+    Assert-Gate 'sacred gate: per-floor shoggoth record->replay bit-identical across a descent, model off' {
+        $slog = Join-Path $tmp 's.log'
+        $rec = Invoke-AppCapture @('--shoggoth-record', '--director-url', 'http://127.0.0.1:7071', '--director-log', $slog, '--seed', '3', '--ticks', '1200', '--level', '2')
+        if ($rec.Exit -ne 0) { throw "record exited $($rec.Exit): $($rec.Out)" }
+        if ((Get-Metric $rec.Out 'valid_intents') -lt 1) { throw "the brain produced no valid intents -- is the KEEL sidecar up at :7071?" }
+        $recHash = Get-MetricStr $rec.Out 'combined_hash'
+        $recState = [int](Get-Metric $rec.Out 'final_state')
+        $rep = Invoke-AppCapture @('--shoggoth-replay', '--director-log', $slog, '--level', '2')
+        if ($rep.Exit -ne 0) { throw "replay exited $($rep.Exit): $($rep.Out)" }
+        if ((Get-Metric $rep.Out 'replay_events') -lt 1) { throw "replay applied no events from the log" }
+        if ((Get-MetricStr $rep.Out 'combined_hash') -ne $recHash) { throw "replay hash != record hash across the descent -- the model leaked into the sim" }
+        if ([int](Get-Metric $rep.Out 'final_state') -ne $recState) { throw "replay final state diverged from record" }
+        if ($recState -ne 0) { throw "the Shoggoth did not lose the prey across the seam (final state $recState, not Lurk)" }
+        Write-Note "sacred gate (descent): record==replay $recHash model-offline; the per-floor Shoggoth lost the prey (Lurk) when it changed floor -- escape is deterministic + replayable"
+    }
+
+    # Regression: the M21 sacred gate (no floor change, --level 0) still holds bit-exact.
+    Assert-Gate 'regression: M21 sacred gate (level-0 record->replay bit-identical, model off)' {
+        $slog = Join-Path $tmp 's21.log'
+        $rec = Invoke-AppCapture @('--shoggoth-record', '--director-url', 'http://127.0.0.1:7071', '--director-log', $slog, '--seed', '3', '--ticks', '1200')
+        if ($rec.Exit -ne 0) { throw "M21 record exited $($rec.Exit): $($rec.Out)" }
+        if ((Get-Metric $rec.Out 'valid_intents') -lt 1) { throw "M21 record produced no valid intents" }
+        $recHash = Get-MetricStr $rec.Out 'combined_hash'
+        $rep = Invoke-AppCapture @('--shoggoth-replay', '--director-log', $slog)
+        if ((Get-MetricStr $rep.Out 'combined_hash') -ne $recHash) { throw "M21 sacred gate regressed (level-0 record != replay)" }
+    }
+
+    # Regression: brain-off determinism (M20) + the M5 raster golden (shoggoth changes are off-render).
+    Assert-Gate 'regression: brain-off shoggoth deterministic (M20) + M5 golden bit-identical' {
+        $h1 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '5')).Out 'shoggoth_hash'
+        $h2 = Get-MetricStr (Invoke-AppCapture @('--shoggoth', '--seed', '5')).Out 'shoggoth_hash'
+        if ($h1 -ne $h2) { throw "shoggoth hash not reproducible with the brain off" }
+        $m5 = Join-Path $tmp 'm5.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $m5)
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "M5 shot had debug-layer messages" }
+        if ([double](& $hashdiff diff $m5 (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1) -ne 0.0) { throw "M5 golden regressed" }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M29 gate: the Shoggoth is per-floor -- confined to its level, seeded per (seed, level) via its per-level maze, and the wanderer ESCAPES it by changing floor (it cannot sense across a seam); the sacred record->replay stays bit-exact across the descent with the model OFFLINE.'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -2930,6 +3005,7 @@ try {
         'M26'   { Invoke-GateM26 }
         'M27'   { Invoke-GateM27 }
         'M28'   { Invoke-GateM28 }
+        'M29'   { Invoke-GateM29 }
         'M30'   { Invoke-GateM30 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"

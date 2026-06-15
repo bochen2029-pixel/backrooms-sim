@@ -2007,9 +2007,14 @@ int run_shoggoth_record(const Options& o) {
     uint64_t thoughts = 0, valid = 0;
     for (uint64_t t = 0; t < N; ++t) {
         w.step();
+        // M29: optionally the wanderer changes floor at the midpoint (escape across a seam). The
+        // per-floor Shoggoth (pinned to its spawn level) then can't sense the prey. --level 0 (the
+        // M21 sacred gate) leaves prey == the wanderer, so M21 is byte-identical.
+        br::core::Vec3 prey = w.s.wanderer.pos;
+        if (o.level != 0 && t >= N / 2) prey.y += contracts::level_base_y(o.level);
         if (t % kBrainEvery == 0) {
             ++thoughts;
-            const app::ShoggothSummary sum = app::build_shoggoth_summary(sh, w.s.wanderer.pos, t);
+            const app::ShoggothSummary sum = app::build_shoggoth_summary(sh, prey, t);
             const br::director::KeelResponse resp = br::director::keel_complete(host, port, app::render_shoggoth_prompt(sum), 15000);
             bool ok = false;
             const app::ShoggothIntent intent = resp.ok ? app::parse_shoggoth_intent(resp.content, ok) : app::ShoggothIntent{};
@@ -2022,7 +2027,7 @@ int run_shoggoth_record(const Options& o) {
                 }
             }
         }
-        app::shoggoth_step(sh, w.s.wanderer.pos, o.seed, (t % 8u) == 0u);
+        app::shoggoth_step(sh, prey, o.seed, (t % 8u) == 0u);
         H = fold_u64(H, app::shoggoth_hash(sh));
     }
     if (!o.director_log.empty()) {
@@ -2033,6 +2038,7 @@ int run_shoggoth_record(const Options& o) {
     std::printf("thoughts: %llu\n", static_cast<unsigned long long>(thoughts));
     std::printf("valid_intents: %llu\n", static_cast<unsigned long long>(valid));
     std::printf("combined_hash: %016llx\n", static_cast<unsigned long long>(H));
+    std::printf("final_state: %d\n", static_cast<int>(sh.state));  // M29: 0=Lurk (escaped after a floor change)
     return 0;
 }
 
@@ -2355,19 +2361,23 @@ int run_shoggoth_replay(const Options& o) {
     size_t ei = 0;
     for (uint64_t t = 0; t < N; ++t) {
         w.step();
+        // M29: replay the SAME floor change the record injected (the gate passes a matching --level).
+        br::core::Vec3 prey = w.s.wanderer.pos;
+        if (o.level != 0 && t >= N / 2) prey.y += contracts::level_base_y(o.level);
         while (ei < events.size() && events[ei].effective_tick == t) {
             sh.intent.action = static_cast<app::ShoggothAction>(events[ei].action);
             sh.intent.aggression = events[ei].aggression;
             H = fold_bytes(H, &events[ei], sizeof(app::ShoggothEvent));
             ++ei;
         }
-        app::shoggoth_step(sh, w.s.wanderer.pos, seed, (t % 8u) == 0u);
+        app::shoggoth_step(sh, prey, seed, (t % 8u) == 0u);
         H = fold_u64(H, app::shoggoth_hash(sh));
     }
     std::printf("seed: %llu\n", static_cast<unsigned long long>(seed));
     std::printf("ticks: %llu\n", static_cast<unsigned long long>(N));
     std::printf("replay_events: %llu\n", static_cast<unsigned long long>(events.size()));
     std::printf("combined_hash: %016llx\n", static_cast<unsigned long long>(H));
+    std::printf("final_state: %d\n", static_cast<int>(sh.state));  // M29: matches record (deterministic)
     return 0;
 }
 
