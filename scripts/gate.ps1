@@ -1943,6 +1943,22 @@ function Invoke-GateM20 {
         Write-Note 'shoggoth engages + routes the maze + closes in, across 3 seeds'
     }
 
+    # Exit gate (M20b): the procedural body (warm radial tentacles, no assets) renders
+    # in-world, lit, debug-clean; and the live walk with the shoggoth chasing is clean.
+    Assert-Gate 'shoggoth body renders in-world debug-clean (--shoggoth-shot)' {
+        $r = Invoke-AppCapture @('--shoggoth-shot', '--seed', '7', '--width', '640', '--height', '360', '--out', (Join-Path $tmp 'body.png'))
+        if ($r.Exit -ne 0) { throw "--shoggoth-shot exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "shoggoth body render had debug-layer messages" }
+        if ((Get-Metric $r.Out 'body_verts') -lt 100) { throw "shoggoth body mesh empty" }
+        if ((Get-Metric $r.Out 'drawn') -lt 2) { throw "shoggoth body not drawn (creature chunk missing)" }
+        Write-Note "shoggoth body: $((Get-Metric $r.Out 'body_verts')) verts drawn in-world, debug-clean"
+    }
+    Assert-Gate 'live walk with the shoggoth chasing (--play) stays debug-clean' {
+        $r = Invoke-AppCapture @('--play', '--seconds', '4', '--seed', '7', '--width', '1280', '--height', '720')
+        if ($r.Exit -ne 0) { throw "--play exited $($r.Exit): $($r.Out)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "live walk with the shoggoth had debug-layer messages" }
+    }
+
     # The shoggoth lives outside WorldState, so the existing determinism is untouched:
     # the walk-bot hash is unchanged, and the raster golden is bit-identical.
     Assert-Gate 'regression: walk-bot determinism hash unchanged (shoggoth is separate from WorldState)' {

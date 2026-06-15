@@ -6,6 +6,7 @@
 #include <cmath>
 
 #include "shoggoth.h"
+#include "shoggoth_body.h"
 
 using namespace br::app;
 
@@ -67,4 +68,30 @@ TEST_CASE("the shoggoth never tunnels into a sealed cell (stays on the maze grap
         if (dist2d(s.pos, start) > 1.0f) moved = true;
     }
     REQUIRE(moved);  // it actually navigated (didn't get stuck at spawn)
+}
+
+TEST_CASE("the procedural body is a valid, bounded, finite mesh", "[m20][shoggoth][body]") {
+    std::vector<br::contracts::ChunkVertex> body;
+    const br::core::Vec3 pos{16.0f, 1.0f, 16.0f};
+    build_shoggoth_mesh(body, pos, 0.0f, 1.4f);
+    REQUIRE(body.size() > 100u);
+    REQUIRE(body.size() % 3u == 0u);  // whole triangles
+    for (const auto& v : body) {
+        for (int i = 0; i < 3; ++i) {
+            REQUIRE(std::isfinite(v.pos[i]));
+            REQUIRE(std::isfinite(v.nrm[i]));
+            REQUIRE(v.color[i] >= 0.0f);
+        }
+        // every vertex sits within a few metres of the body centre (no runaway geometry)
+        const float dx = v.pos[0] - pos.x, dy = v.pos[1] - pos.y, dz = v.pos[2] - pos.z;
+        REQUIRE(std::sqrt(dx * dx + dy * dy + dz * dz) < 6.0f);
+        REQUIRE(v.color[0] > v.color[2]);  // warm (red > blue)
+    }
+    // The writhe changes the mesh (it animates).
+    std::vector<br::contracts::ChunkVertex> body2;
+    build_shoggoth_mesh(body2, pos, 1.5f, 1.4f);
+    bool differs = false;
+    for (size_t i = 0; i < body.size() && i < body2.size(); ++i)
+        if (body[i].pos[0] != body2[i].pos[0] || body[i].pos[2] != body2[i].pos[2]) { differs = true; break; }
+    REQUIRE(differs);
 }

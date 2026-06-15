@@ -52,6 +52,7 @@
 #include "gamepad.h"
 #include "head_bob.h"
 #include "shoggoth.h"
+#include "shoggoth_body.h"
 
 namespace contracts = br::contracts;
 namespace audio = br::audio;
@@ -81,6 +82,7 @@ struct Options {
     bool credits = false;               // M17 credits screen (text)
     bool rt = false;                    // M19 force ray tracing on in --game/--play
     bool shoggoth = false;              // M20 headless shoggoth chase (determinism + nav)
+    bool shoggoth_shot = false;         // M20b render the shoggoth body to a PNG
     uint32_t eval_count = 100;          // --director-eval: scenario count
     uint32_t director_interval_s = 15;  // --soak --director: ambient seconds between summaries (wall clock)
     uint32_t frames = 1, seconds = 0, width = 320, height = 180, ticks = 0;
@@ -173,6 +175,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--credits") == 0) o.credits = true;
         else if (std::strcmp(a, "--rt") == 0) o.rt = true;
         else if (std::strcmp(a, "--shoggoth") == 0) o.shoggoth = true;
+        else if (std::strcmp(a, "--shoggoth-shot") == 0) o.shoggoth_shot = true;
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -339,6 +342,10 @@ int run_play(const Options& o) {
     bool rtOn = o.rt;
     uint64_t rtFrames = 0;
     std::vector<uint8_t> lastRt;
+    // M20b: a Shoggoth hunts the wanderer, its procedural body rendered in-world.
+    app::Shoggoth shog;
+    shog.pos = s.wanderer.pos; shog.pos.x += 22.0f; shog.pos.z += 6.0f;  // spawn a few cells away
+    std::vector<contracts::ChunkVertex> shogBody;
     contracts::ChunkKey c0 = contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z);
     rebuild(c0);
     sm.update(c0); sm.wait_idle(); sm.update(c0);
@@ -407,6 +414,7 @@ int run_play(const Options& o) {
             contracts::InputCommand step = in;
             if (firstTick) { step.look_yaw = look_yaw; step.look_pitch = look_pitch; firstTick = false; }  // mouse delta is per-frame
             tick(s, step, collision);
+            app::shoggoth_step(shog, s.wanderer.pos, o.seed, (s.tick % 8u) == 0u);  // M20b: the hunt
             accum -= tickDt;
         }
 
@@ -441,8 +449,13 @@ int run_play(const Options& o) {
             }
         }
         if (!rtOn) {
+            // M20b: inject the shoggoth's procedural body as a per-frame chunk (the
+            // changing key re-uploads it each frame so the tentacles writhe).
+            app::build_shoggoth_mesh(shogBody, shog.pos, shog.writhe, 1.4f);
+            std::vector<contracts::ResidentChunk> withShog = sm.resident();
+            withShog.push_back(contracts::ResidentChunk{contracts::ChunkKey{9999, static_cast<int64_t>(frames), 0}, shogBody.data(), static_cast<uint32_t>(shogBody.size())});
             uint32_t drawn = 0;
-            if (!renderer.render_chunks_windowed(cam, sm.resident(), 8u, s.tick, &drawn)) {
+            if (!renderer.render_chunks_windowed(cam, withShog, 8u, s.tick, &drawn)) {
                 std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str());
                 ShowCursor(TRUE);
                 return 1;
@@ -782,6 +795,8 @@ int run_game(const Options& o) {
     uint32_t dxrW = 0, dxrH = 0;
     contracts::ChunkKey dxrCenter{0, static_cast<int64_t>(1) << 40, 0};
     float lastCamX = 1e9f, lastCamY = 1e9f, lastCamZ = 1e9f, lastYaw = 1e9f, lastPitch = 1e9f;
+    app::Shoggoth shog;                       // M20b: the hunting creature (spawned on New Game)
+    std::vector<contracts::ChunkVertex> shogBody;
 
     struct Keys { bool up=false, down=false, left=false, right=false, enter=false, esc=false; } prev;
     auto edge = [](bool now, bool& p) { const bool e = now && !p; p = now; return e; };
@@ -839,7 +854,11 @@ int run_game(const Options& o) {
 
         if (act != app::UiAction::None) {
             const app::UiCommand cmd = app::menu_step(model, act);
-            if (cmd == app::UiCommand::StartGame) start_session(model.seed);
+            if (cmd == app::UiCommand::StartGame) {
+                start_session(model.seed);
+                shog = app::Shoggoth{};
+                shog.pos = s.wanderer.pos; shog.pos.x += 22.0f; shog.pos.z += 6.0f;  // M20b spawn
+            }
             else if (cmd == app::UiCommand::QuitApp) running = false;
             // ResumeGame keeps the existing session as-is.
         }
@@ -881,6 +900,7 @@ int run_game(const Options& o) {
                 contracts::InputCommand step = in;
                 if (firstTick) { step.look_yaw = look_yaw; step.look_pitch = look_pitch; firstTick = false; }
                 tick(s, step, collision);
+                app::shoggoth_step(shog, s.wanderer.pos, model.seed, (s.tick % 8u) == 0u);  // M20b: the hunt
                 accum -= tickDt;
             }
             if (audioOn) {
@@ -911,8 +931,11 @@ int run_game(const Options& o) {
                 }
             }
             if (!model.settings.rt) {
+                app::build_shoggoth_mesh(shogBody, shog.pos, shog.writhe, 1.4f);  // M20b in-world body
+                std::vector<contracts::ResidentChunk> withShog = sm->resident();
+                withShog.push_back(contracts::ResidentChunk{contracts::ChunkKey{9999, static_cast<int64_t>(frames), 0}, shogBody.data(), static_cast<uint32_t>(shogBody.size())});
                 uint32_t drawn = 0;
-                if (!renderer.render_chunks_windowed(cam, sm->resident(), 8u, s.tick, &drawn)) {
+                if (!renderer.render_chunks_windowed(cam, withShog, 8u, s.tick, &drawn)) {
                     std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); ShowCursor(TRUE); return 1;
                 }
             }
@@ -2588,6 +2611,50 @@ int run_shoggoth(const Options& o) {
     return 0;
 }
 
+// ----- M20b render the Shoggoth's procedural body to a PNG (QC + gate) --------
+// Places the creature a few metres ahead of a fixed camera, injects its mesh as a
+// synthetic resident chunk (collision-proof key), renders lit + reads back. The body
+// is procedural (no assets); deterministic for a fixed (seed, tick).
+int run_shoggoth_shot(const Options& o) {
+    using namespace br::core;
+    Renderer renderer;
+    if (!renderer.init_headless(o.width, o.height)) { std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1; }
+    renderer.set_texture_seed(o.seed);
+
+    const float ex = 16.0f, ez = 16.0f;
+    const float ey = kWandererHalfHeight + 0.02f + kEyeHeight;
+    contracts::CameraPose cam{};
+    cam.pos[0] = ex; cam.pos[1] = ey; cam.pos[2] = ez;
+    cam.yaw = 0.0f; cam.pitch = -0.06f; cam.fov_y = 1.2217305f;
+    cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    const auto center = contracts::chunk_key_at(0, ex, ez);
+    sm.update(center); sm.wait_idle(); sm.update(center);
+    uint32_t drawn = 0;
+    const size_t target = sm.resident_count();
+    for (int w = 0; w < 400 && static_cast<size_t>(drawn) < target; ++w)
+        renderer.render_chunks(cam, sm.resident(), 64u, 0u, &drawn);
+
+    std::vector<contracts::ChunkVertex> body;
+    const Vec3 shog_pos{ex, ey - 0.5f, ez + 3.4f};  // a few metres ahead, in view
+    app::build_shoggoth_mesh(body, shog_pos, static_cast<float>(o.ticks) * 0.05f, 1.8f);
+    std::vector<contracts::ResidentChunk> withCreature = sm.resident();  // by value (single call)
+    const contracts::ResidentChunk creature{contracts::ChunkKey{9999, 0, 0}, body.data(), static_cast<uint32_t>(body.size())};
+    withCreature.push_back(creature);
+
+    if (!renderer.render_chunks(cam, withCreature, 256u, o.ticks, &drawn)) { std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); return 1; }
+    FrameImage img;
+    if (!renderer.readback(img)) { std::fprintf(stderr, "readback: %s\n", renderer.last_error().c_str()); return 1; }
+    const std::string out = o.out.empty() ? std::string("runs/shoggoth.png") : o.out;
+    stbi_write_png(out.c_str(), static_cast<int>(img.width), static_cast<int>(img.height), 4, img.rgba.data(), static_cast<int>(img.width) * 4);
+
+    std::printf("body_verts: %llu\n", static_cast<unsigned long long>(body.size()));
+    std::printf("drawn: %u\n", drawn);
+    std::printf("debug_error_count: %u\n", renderer.debug_error_count());
+    return renderer.debug_error_count() == 0 ? 0 : 3;
+}
+
 }  // namespace
 
 // Tighten the OS timer/wait granularity (default ~15.6 ms) to 1 ms for the
@@ -2638,6 +2705,7 @@ int main(int argc, char** argv) {
     if (o.resize_smoke) return run_resize_smoke(o);
     if (o.credits)    return run_credits(o);
     if (o.shoggoth)   return run_shoggoth(o);
+    if (o.shoggoth_shot) return run_shoggoth_shot(o);
     if (o.game)       return run_game(o);
     if (o.soak)       return run_soak(o);
     if (o.sim)     return run_sim(o);
