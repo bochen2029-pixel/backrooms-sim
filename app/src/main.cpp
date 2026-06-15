@@ -72,7 +72,7 @@ struct Options {
     bool headless = false, windowed = false, scene = false, sim = false, stream = false;
     bool walkbot = false, topdown = false, version = false, shot = false;
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
-    bool biomeat = false, descend = false, ascend = false, vstream = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
+    bool biomeat = false, descend = false, ascend = false, vstream = false, shaftfall = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
     bool soak = false, crash_test = false, director_probe = false;
     bool director_record = false, director_replay = false;
@@ -154,6 +154,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--descend") == 0) o.descend = true;
         else if (std::strcmp(a, "--ascend") == 0) o.ascend = true;
         else if (std::strcmp(a, "--vstream") == 0) o.vstream = true;
+        else if (std::strcmp(a, "--shaftfall") == 0) o.shaftfall = true;
         else if (std::strcmp(a, "--post") == 0) o.post = true;
         else if (std::strcmp(a, "--dxr-probe") == 0) o.dxr_probe = true;
         else if (std::strcmp(a, "--dxr-test") == 0) o.dxr_test = true;
@@ -2811,6 +2812,57 @@ int run_vstream(const Options& o) {
     return ok ? 0 : 6;
 }
 
+// ----- M30: scripted soft-catch FALL down an open shaft (headless) ------------
+// Finds a real shaft, drops the wanderer in at its top level, and lets gravity carry it
+// down the void. The bottom level's solid floor catches it via swept collision -- a soft
+// landing (there is no health/fail-state, by design). Reports the fall depth + the
+// determinism hash (the gate runs it twice). Proves the bounded soft-catch fall.
+int run_shaftfall(const Options& o) {
+    using namespace br::core;
+    int64_t scx = 0, scz = 0;
+    bool found = false;
+    for (int64_t r = 0; r < 200 && !found; ++r)
+        for (int64_t cz = -r; cz <= r && !found; ++cz)
+            for (int64_t cx = -r; cx <= r && !found; ++cx)
+                if (br::gen::shaft_at(o.seed, cx, cz).present) { scx = cx; scz = cz; found = true; }
+    if (!found) { std::printf("no_shaft_found: 1\n"); return 6; }
+    const br::gen::ShaftSpec sh = br::gen::shaft_at(o.seed, scx, scz);
+
+    const float cs = br::gen::kCellSize;
+    const float cellx = static_cast<float>(scx) * contracts::kChunkSize + (static_cast<float>(sh.cell_i) + 0.5f) * cs;
+    const float cellz = static_cast<float>(scz) * contracts::kChunkSize + (static_cast<float>(sh.cell_j) + 0.5f) * cs;
+    const float botY = contracts::level_base_y(sh.top_level - sh.depth);  // the landing floor
+
+    std::vector<Aabb> col;  // only a solid floor at the bottom -> the void above is a free fall
+    col.push_back(Aabb{{cellx - cs, botY - 1.0f, cellz - cs}, {cellx + cs, botY, cellz + cs}});
+
+    WorldState s(o.seed);
+    s.wanderer.pos = Vec3{cellx, contracts::level_base_y(sh.top_level) + kWandererHalfHeight + 0.5f, cellz};
+    const int32_t startLevel = contracts::level_from_y(s.wanderer.pos.y);
+    contracts::InputCommand in{};  // no input: pure gravity
+    const uint32_t ticks = (o.ticks > 0) ? o.ticks : 1200u;
+    float maxFall = 0.0f;
+    for (uint32_t t = 0; t < ticks; ++t) {
+        tick(s, in, col);
+        if (-s.wanderer.vel.y > maxFall) maxFall = -s.wanderer.vel.y;
+    }
+    const int32_t endLevel = contracts::level_from_y(s.wanderer.pos.y);
+    const bool landed = s.wanderer.on_ground && endLevel == (sh.top_level - sh.depth);
+
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("shaft_chunk: %lld %lld cell %d %d\n",
+                static_cast<long long>(scx), static_cast<long long>(scz), sh.cell_i, sh.cell_j);
+    std::printf("top_level: %d\n", sh.top_level);
+    std::printf("depth: %d\n", sh.depth);
+    std::printf("start_level: %d\n", startLevel);
+    std::printf("end_level: %d\n", endLevel);
+    std::printf("fell_floors: %d\n", startLevel - endLevel);
+    std::printf("max_fall_speed: %.2f\n", static_cast<double>(maxFall));
+    std::printf("landed: %d\n", landed ? 1 : 0);
+    std::printf("final_hash: %016llx\n", static_cast<unsigned long long>(world_state_hash(s)));
+    return landed ? 0 : 6;
+}
+
 // ----- M9 DXR capability probe: device tier + DXC shader compilation ----------
 int run_dxr_probe(const Options&) {
     const br::render_dxr::DxrCaps c = br::render_dxr::probe_caps();
@@ -3430,6 +3482,7 @@ int main(int argc, char** argv) {
     if (o.descend)    return run_descend(o);
     if (o.ascend)     return run_ascend(o);
     if (o.vstream)    return run_vstream(o);
+    if (o.shaftfall)  return run_shaftfall(o);
     if (o.dxr_probe)  return run_dxr_probe(o);
     if (o.dxr_test)   return run_dxr_test(o);
     if (o.dxr_depth)  return run_dxr_depth(o);
