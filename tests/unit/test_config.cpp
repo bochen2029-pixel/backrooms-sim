@@ -53,7 +53,7 @@ TEST_CASE("parse ignores comments, blanks, and unknown keys; missing keys keep d
     const Config c = parse(text);
     REQUIRE(c.master == 33);
     REQUIRE(c.height == 900);
-    REQUIRE(c.width == 1280);   // untouched -> default
+    REQUIRE(c.width == 1920);   // untouched -> default (1080p)
     REQUIRE(c.sfx == 90);       // untouched -> default
 }
 

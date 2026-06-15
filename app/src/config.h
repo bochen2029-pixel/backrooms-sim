@@ -17,8 +17,8 @@
 namespace br::app {
 
 struct Config {
-    int width = 1280;
-    int height = 720;
+    int width = 1920;       // default 1080p; clamp below allows up to 7680x4320 (4K/8K)
+    int height = 1080;
     int fullscreen = 0;     // 0 windowed, 1 borderless fullscreen
     int vsync = 1;
     int master = 80;        // 0..100
