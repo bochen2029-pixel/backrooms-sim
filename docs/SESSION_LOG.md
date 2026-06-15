@@ -4,6 +4,42 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 31 — M30: Open shafts & the abyss (the despair gradient)  ✅ COMPLETE — 🏷️ `m30-green`
+
+`gate.ps1 -Milestone M30` exits 0; tagged `m30-green` + pushed. **The second vertical system is in** — a
+rare deep void you can fall down, 5–10 floors in one drop. (Done before M29 finishes: M29's sacred-gate
+Increment 2 needs the KEEL sidecar/model, so per the operator's "model-free fruit first" + round-robin
+directive, model-free M30 took priority. M29 Increment 1 — per-floor core + escape — is committed `fa39ebe`.)
+
+**Done (M30, first pass).** (1) `gen::shaft_at(seed,cx,cz)` — pure, per-column, **very rare** (`hash %
+kShaftDensityN=1500`, the ~1.3 km cadence) — a hashed cell + top level + depth (5..10). `shaft_passes(s,
+level)` lets any floor decide locally whether the void spans it (inclusive `[top-depth, top]`) — the
+Z-analogue of the stair seam, no neighbour query. (2) `GenerateChunk` cuts the void's slice at the shaft
+cell (floor open except the bottom landing, ceiling open except the top entry), additive to the M27 stair
+holes. (3) **Soft-catch fall — no new physics:** the void has no floor, gravity drops the wanderer, the
+bottom level's solid floor catches it via the existing swept-AABB collision (a soft landing — there is no
+health/fail-state by design). `--shaftfall` is the headless proof.
+
+**Gate.** clean build + full ctest (incl. a new `[m30]` test: rare `<0.005`, deep `5..10`, deterministic,
+per-seed-relocated, `shaft_passes` spans exactly the range) + **`--shaftfall`** (seeds 1/7/42 fall the full
+depth — 10/9/9 floors, ~36–38 m/s — and **land**, bounded, bit-identical ×2) + shafts render debug-clean
+at levels 0/7/10 with **M5 golden bit-identical** (voids ~1/1500 miss the views — verified m4/m5/m1/m2
+all 0-diff) + M27 ascent + M28 see-through regressions + INV-5/inventory.
+
+**4 green increments** (`07f7d26` `shaft_at` + `[m30]` · `7c263ff` shaft holes in GenerateChunk · `30b6508`
+`--shaftfall` · this gate). No new dependency; no golden change.
+
+**Tracked M30 polish (not blocking m30-green):** the draft/wind **telegraph** audio (locked design decision
+6 — accidental but always telegraphed), streaming several floors *down* a shaft for the **fog-to-black**
+abyss render, and a **deep-descent soak**. **Gotcha:** none new — the fall reused the existing swept
+collision wholesale, which is exactly why "soft-catch, no fail-state" needed zero new physics code.
+
+**Next: finish M29** — Increment 2 (the sacred record→replay-across-a-descent gate + `Invoke-GateM29`).
+**Needs the KEEL sidecar :7071** (launch via the autoloop's `Ensure-Sidecar`); the determinism check runs
+model-offline. Then the M30 polish + the Phase-IV completion sweep. Per `_run_state/ROADMAP.md` §2.
+
+---
+
 ## Session 30 — M28: Vertical streaming + see-through  ✅ COMPLETE — 🏷️ `m28-green`
 
 `gate.ps1 -Milestone M28` exits 0; tagged `m28-green` + pushed. **You can stand at a stairwell and see the

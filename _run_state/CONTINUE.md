@@ -30,9 +30,16 @@ and press on. Minimal meta — no scaffolding-on-scaffolding; the bulk of effort
   `level_base_y`, cache keyed by full `ChunkKey`). Proven via `--vstream` (both floors resident `2x` ring
   bounded + rendered debug-clean, floor above visible through the hole `see_through_diff ~57-62`); M5 golden
   + M27 ascent intact. `[m28]` test. ADR-054. Commits `050d08c` → `--vstream`+gate → gate commit.
-- 🔨 **M29 (per-floor Shoggoth) IN PROGRESS — Increment 1 ✅ DONE (core + escape, steps a–f below; `[m29]`
-  green, all M20/M21 shoggoth tests still pass); NEXT = Increment 2 (g,h): descent record→replay + the
-  sacred gate + `Invoke-GateM29` (needs KEEL sidecar :7071 to record).** The Shoggoth lives
+- ✅ **M30 (open shafts & the abyss) DONE — `m30-green`, gate exits 0, tagged + pushed.** `shaft_at` (pure
+  per-column, ~1/1500, depth 5–10) + per-level void hole-cutting + a soft-catch fall (`--shaftfall`:
+  full-depth fall + land, bounded, bit-id ×2 — no new physics, the bottom floor catches you). ADR-055.
+  Polish deferred (telegraph audio, fog-to-black, deep soak). Commits `07f7d26`→`7c263ff`→`30b6508`→gate.
+  **Model-free Phase-IV fruit is now EXHAUSTED (M26/M27/M28/M30 green, M29-Inc1 done).**
+- 🔨 **M29 (per-floor Shoggoth) — the LAST core piece; Increment 2 NEEDS THE MODEL (sidecar :7071).**
+  Increment 1 ✅ DONE (core + escape, steps a–f below; `[m29]` green, all M20/M21 shoggoth tests pass).
+  **NEXT = Increment 2 (g,h): descent record→replay + the sacred gate + `Invoke-GateM29`.** First launch the
+  KEEL sidecar (`C:\keel-sidecar-7071\start.cmd` or autoloop `Ensure-Sidecar`; NEVER :7070) — the brain
+  RECORD needs it; the determinism check itself runs model-offline. The Shoggoth lives
   OUTSIDE WorldState (`app/src/shoggoth.h`), pos is 2-D (X/Z; pos.y = spawn height, never moves vertically),
   nav already takes `seed` + 2-D cells but **hardcodes `ChunkKey{0,cx,cz}`** in `maze_open` (~L62-78).
   No frozen shoggoth-replay golden exists (the M21 gate records→replays FRESH + compares), so folding `level`

@@ -92,12 +92,15 @@ as the oracle, `m<N>-green` as the revert anchor, SESSION_LOG/PROGRESS/memory as
   or a shaft) **escapes** the current one; each floor has its own. **Gate:** the shoggoth never leaves its
   level; record→replay across a descent **bit-exact, model offline**. **Deps:** M27. **Needs the KEEL
   sidecar (:7071) for the brain gate** — else graceful-no-op.
-- `[ ] M30` · **Open shafts & the abyss.** `shaft_at` (very rare ≈1.3 km); hashed depth **5–10**; multi-floor
-  aligned holes (a floor checks ≤Dmax levels above for a passing shaft column); **telegraphed** soft-catch
-  fall (draft audio cue one cell out + the dark void; deterministic deceleration; the landing floor catches
-  you — no fail-state); fog-to-black abyss render (a few floors down, bounded). **Gate:** deterministic
-  bounded fall (replay bit-exact) + a deep-descent soak (fall + climb many floors) holds the memory-slope
-  + hash invariants + debug-clean. **Deps:** M27, M28.
+- `[x] M30` · **Open shafts & the abyss** (`m30-green`; first pass — done before M29 finishes since M30 is
+  model-free and M29-Inc2 needs the sidecar). `gen::shaft_at(seed,cx,cz)` — pure per-column, very rare
+  (`~1/kShaftDensityN=1500`), hashed cell + top level + depth **5–10**; `shaft_passes` cuts each floor's
+  void slice locally (additive to the M27 stair holes); the **soft-catch fall** needs no new physics — the
+  void has no floor, gravity drops you, the bottom level's solid floor stops you via swept collision (no
+  fail-state). **Gate PASSED:** `[m30]` placement (rare/deep/deterministic/per-seed) + `--shaftfall` (full-
+  depth fall, lands, bounded, bit-identical ×2) + debug-clean shaft renders + M5 golden bit-identical (voids
+  miss the views) + M27/M28 regressions. ADR-055. **Tracked polish (not blocking):** the draft-audio
+  telegraph (decision 6), multi-floor fog-to-black render, a deep-descent memory soak. **Deps:** M27, M28.
 
 ### Deferred / leftover (decide-and-document, or operator-gate)
 - `[?] M31` · **floating-origin rebase** for *true*-unbounded XYZ (fixes the float horizon in 2-D too).

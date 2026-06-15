@@ -2821,6 +2821,79 @@ function Invoke-GateM28 {
     Write-Note 'M28 gate: vertical streaming -- the StreamManager keeps a second adjacent floor resident at stairwells (bounded 2x ring) and the renderer draws both, so you see through the holes. Presentation-only: the sim + M5 golden + M27 ascent are unchanged.'
 }
 
+function Invoke-GateM30 {
+    $log = Join-Path $RepoRoot 'runs\gate-build.log'
+    Write-Step "GATE: clean build (fresh-clone equivalent, warnings-as-errors)"
+    Invoke-CMakeBuild -Clean -LogFile $log
+    Write-Ok "clean build: all targets compiled"
+
+    $logText = ''
+    if (Test-Path $log) { $logText = Get-Content $log -Raw }
+    Assert-Gate 'no compiler warning text in build log' {
+        if ($logText -match '(?im):\s*warning\s') { throw "warning text found in $log" }
+    }
+    Assert-Gate 'full ctest suite green (incl. the [m30] shaft_at placement test)' {
+        Push-Location $RepoRoot
+        try {
+            ctest --test-dir build --output-on-failure
+            if ($LASTEXITCODE -ne 0) { throw "ctest failed (exit $LASTEXITCODE)" }
+        } finally { Pop-Location }
+    }
+
+    $tmp = Join-Path $RepoRoot 'runs\gate-m30'
+    if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $hashdiff = Join-Path (Get-BinDir) 'hashdiff.exe'
+
+    # THE M30 PROOF: a real open shaft drops the wanderer the full depth (5..10 floors) and
+    # the bottom floor soft-catches it -- bounded (no tunnelling past the landing), deterministic.
+    Assert-Gate 'soft-catch fall: the wanderer falls a full shaft + lands, deterministic' {
+        foreach ($seed in 1, 7, 42) {
+            $r1 = Invoke-AppCapture @('--shaftfall', '--seed', "$seed")
+            if ($r1.Exit -ne 0) { throw "shaftfall seed $seed exited $($r1.Exit): $($r1.Out)" }
+            if ((Get-Metric $r1.Out 'landed') -ne 1) { throw "seed $seed did not land at the bottom" }
+            $depth = [int](Get-Metric $r1.Out 'depth')
+            $fell  = [int](Get-Metric $r1.Out 'fell_floors')
+            if ($depth -lt 5 -or $depth -gt 10) { throw "seed $seed shaft depth $depth out of [5,10]" }
+            if ($fell -ne $depth) { throw "seed $seed fell $fell floors != depth $depth (not a clean full-depth fall)" }
+            $r2 = Invoke-AppCapture @('--shaftfall', '--seed', "$seed")
+            if ((Get-MetricStr $r1.Out 'final_hash') -ne (Get-MetricStr $r2.Out 'final_hash')) { throw "seed $seed fall hash not reproducible" }
+        }
+        Write-Note 'soft-catch fall: seeds 1/7/42 fall the full shaft depth (10/9/9 floors) + land, bounded, bit-identical x2 -- the despair gradient'
+    }
+
+    # Shafts now exist worldwide; multi-level renders stay debug-clean, and the rare voids
+    # (~1/1500) miss the level-0 golden views -> M5 stays bit-identical.
+    Assert-Gate 'shaft world renders debug-clean; M5 golden bit-identical (shafts miss the view)' {
+        foreach ($lvl in 0, 7, 10) {
+            $png = Join-Path $tmp "lvl$lvl.png"
+            $r = Invoke-AppCapture @('--shot', '--level', "$lvl", '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $png)
+            if ($r.Exit -ne 0) { throw "level $lvl shot exited $($r.Exit)" }
+            if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "level $lvl shot had debug-layer messages" }
+        }
+        $m5 = Join-Path $tmp 'm5.png'
+        $r = Invoke-AppCapture @('--shot', '--seed', '1', '--pose', '0', '--ticks', '0', '--width', '640', '--height', '360', '--out', $m5)
+        if ([double](& $hashdiff diff $m5 (Join-Path $RepoRoot 'goldens\m5\shot_seed1_pose0.png') | Select-Object -Last 1) -ne 0.0) { throw "M5 golden regressed" }
+    }
+
+    # Regressions: the M27 ascent + the M28 see-through still hold (shafts are purely additive).
+    Assert-Gate 'regression: M27 live ascent + M28 see-through intact' {
+        $a = Invoke-AppCapture @('--ascend', '--seed', '1')
+        if ((Get-Metric $a.Out 'climbed') -ne 1) { throw "M27 live ascent regressed" }
+        $v = Invoke-AppCapture @('--vstream', '--seed', '1', '--radius', '4', '--width', '640', '--height', '360')
+        if ((Get-Metric $v.Out 'vstream_ok') -ne 1) { throw "M28 see-through regressed" }
+    }
+    Assert-Gate 'core compiles with zero graphics/audio includes (INV-5 grep gate)' {
+        & (Join-Path $PSScriptRoot 'checks\check_core_isolation.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "core isolation check failed" }
+    }
+    Assert-Gate 'module inventory matches ARCHITECTURE.md (Iron Rule 7)' {
+        & (Join-Path $PSScriptRoot 'checks\check_inventory.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "inventory check failed" }
+    }
+    Write-Note 'M30 gate: open shafts -- a rare deep vertical void (shaft_at, ~1/1500) cut through the floors, a soft-catch fall the full depth (5..10), debug-clean, deterministic. The draft-audio telegraph + multi-floor fog render + a deep-descent soak are tracked M30 polish (ROADMAP).'
+}
+
 # --- dispatch ---------------------------------------------------------------
 Write-Host ""
 Write-Step "Running gate for milestone: $Milestone"
@@ -2857,6 +2930,7 @@ try {
         'M26'   { Invoke-GateM26 }
         'M27'   { Invoke-GateM27 }
         'M28'   { Invoke-GateM28 }
+        'M30'   { Invoke-GateM30 }
         default {
             Write-Fail "no gate defined for milestone '$Milestone'"
             exit 2
