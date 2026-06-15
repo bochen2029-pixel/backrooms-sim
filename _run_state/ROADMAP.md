@@ -136,6 +136,15 @@ completeness-critic pass every ~N build slices too, to catch drift early.)
   precision-horizon trigger to justify the work; default OFF this phase.
 - **ISSUE-4 [operator-only]** — anything outward-facing (publishing / Steam / store assets). Never
   self-authorize.
+- **ISSUE-5 [environment/blocked]** — the **M29 sacred gate** (`gate.ps1 -Milestone M29`) needs the KEEL
+  model stack UP: `llama-server :8080` (the model backend) → `keel-serve.exe :7071` (the sidecar,
+  `C:\keel-sidecar-7071\start.cmd`). Both were DOWN this session (operator away; launching :7071 found no
+  :8080 backend). The gate CODE + the descent determinism are DONE + committed (`56df9e2`):
+  `--shoggoth-record/replay --level 2` give an IDENTICAL `combined_hash` (`5652627d017bb899`) + `final_state
+  0` (Lurk = escaped) model-free, so per-floor confinement + escape + cross-descent replay are proven; only
+  `valid_intents>=1` (the live brain) is unmet. **Unblocks:** start `:8080` (operator's normal setup) →
+  autoloop `Ensure-Sidecar` starts `:7071` → `gate.ps1 -Milestone M29` → `m29-green`. Do NOT relax the
+  valid-intents assertion (that would gut the sacred gate). M29-Inc1 (core+escape) is already `[m29]`-green.
 - *(Append new issues as discovered: `ISSUE-N [type] — description · what unblocks it`. If the loop
   STALLS — only `[G]`/`[!]`/`[?]` remain and none can advance — write `.brstate/STALLED` with the reason
   so the supervisor stops respawning; the operator clears the queue on his next look.)*

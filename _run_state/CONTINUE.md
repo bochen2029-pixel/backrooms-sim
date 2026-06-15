@@ -34,12 +34,20 @@ and press on. Minimal meta — no scaffolding-on-scaffolding; the bulk of effort
   per-column, ~1/1500, depth 5–10) + per-level void hole-cutting + a soft-catch fall (`--shaftfall`:
   full-depth fall + land, bounded, bit-id ×2 — no new physics, the bottom floor catches you). ADR-055.
   Polish deferred (telegraph audio, fog-to-black, deep soak). Commits `07f7d26`→`7c263ff`→`30b6508`→gate.
-  **Model-free Phase-IV fruit is now EXHAUSTED (M26/M27/M28/M30 green, M29-Inc1 done).**
-- 🔨 **M29 (per-floor Shoggoth) — the LAST core piece; Increment 2 NEEDS THE MODEL (sidecar :7071).**
-  Increment 1 ✅ DONE (core + escape, steps a–f below; `[m29]` green, all M20/M21 shoggoth tests pass).
-  **NEXT = Increment 2 (g,h): descent record→replay + the sacred gate + `Invoke-GateM29`.** First launch the
-  KEEL sidecar (`C:\keel-sidecar-7071\start.cmd` or autoloop `Ensure-Sidecar`; NEVER :7070) — the brain
-  RECORD needs it; the determinism check itself runs model-offline. The Shoggoth lives
+  **Phase-IV milestones M26–M30 are all green or (M29) model-blocked.**
+- ⏸ **M29 (per-floor Shoggoth) — CODE COMPLETE; gate BLOCKED on the model server (ROADMAP §5 ISSUE-5).**
+  Inc1 ✅ (core+escape, `[m29]` green) + Inc2 ✅ CODE (`56df9e2`: descent record/replay gated by `--level`,
+  `Invoke-GateM29` + dispatch). PROVEN MODEL-FREE: `--shoggoth-record/replay --level 2` → identical hash
+  `5652627d017bb899` + `final_state 0` (Lurk = escaped). Only `valid_intents>=1` needs the brain → needs
+  `llama-server :8080` UP (the :7071 sidecar reuses it; both were down). To reach `m29-green`: start :8080
+  → autoloop `Ensure-Sidecar` :7071 → `gate.ps1 -Milestone M29`. Do NOT relax valid-intents. (Design ref below.)
+- 🔨 **NEXT (all MODEL-FREE; round-robin, kill-timer each):** this is polish/closing now. (1) **live descent**
+  — run_play's fake ground plane catches you, so you can't fall through shafts/down-stairs in-game; give it
+  holes (or real per-cell floor) at shaft + down-stair cells so the despair-gradient works live (ascent
+  already works). (2) **M30 telegraph** — draft/wind audio near a shaft (decision 6; off the sim hash).
+  (3) **M30 fog-to-black** abyss render + stream a few floors down a shaft. (4) **M28-DXR** see-through verify
+  (build_scene already takes all resident chunks). (5) **deep-descent soak**. (6) the **M0–M25 regression
+  sweep** + Phase-IV DONE checks (ROADMAP §3). Then perpetual-polish (§4). The Shoggoth lives
   OUTSIDE WorldState (`app/src/shoggoth.h`), pos is 2-D (X/Z; pos.y = spawn height, never moves vertically),
   nav already takes `seed` + 2-D cells but **hardcodes `ChunkKey{0,cx,cz}`** in `maze_open` (~L62-78).
   No frozen shoggoth-replay golden exists (the M21 gate records→replays FRESH + compares), so folding `level`
