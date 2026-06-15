@@ -242,4 +242,16 @@ ShaftSpec shaft_at(uint64_t world_seed, int64_t cx, int64_t cz) {
     return s;
 }
 
+bool floor_hole_at(uint64_t world_seed, int32_t level, int64_t cx, int64_t cz, int cell_i, int cell_j) {
+    const StairSpec dn = stair_at(world_seed, level - 1, cx, cz);  // a stair from below pokes through MY floor
+    const ShaftSpec sh = shaft_at(world_seed, cx, cz);
+    return floor_open_in_cell(dn, sh, shaft_floor_open(sh, level), cell_i, cell_j);
+}
+
+bool ceiling_hole_at(uint64_t world_seed, int32_t level, int64_t cx, int64_t cz, int cell_i, int cell_j) {
+    const StairSpec up = stair_at(world_seed, level, cx, cz);      // MY up-stair leaves through MY ceiling
+    const ShaftSpec sh = shaft_at(world_seed, cx, cz);
+    return ceil_open_in_cell(up, sh, shaft_ceil_open(sh, level), cell_i, cell_j);
+}
+
 }  // namespace br::gen

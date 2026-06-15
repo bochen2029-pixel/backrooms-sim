@@ -4,6 +4,53 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 32 — M30 polish: LIVE in-game descent (the despair gradient, playable)  ✅ — `gate M30` green
+
+`gate.ps1 -Milestone M30` exits 0 (with a NEW live-descent proof). **You can now fall through the
+world's real openings while playing** — not just look down them. This closes ROADMAP §2 M30 item (1)
+"live descent," the last big model-free Phase-IV item. (M29 stays model-blocked on the KEEL sidecar :8080,
+ISSUE-5 — both servers were down again this session; routed around per the standing directive.)
+
+**The problem.** M26–M30 made the world vertical, but the interactive walks (`run_play`/`run_game`/
+`run_screensaver`) still substituted a single solid `{-1e6..1e6}` ground plane at the wanderer's floor — a
+hold-over that **sealed every floor opening**. So in-game you could *see* down a shaft / through a down-stair
+hole (M28/M30 see-through + abyss) but never **fall** through it: ascent worked, descent didn't. The headless
+`--shaftfall`/`--descend` already proved the fall physics; what was missing were holes in the LIVE floor.
+
+**Done (ADR-057).** (1) **Single source of truth in `gen`:** inline `shaft_floor_open`/`shaft_ceil_open` +
+`floor_open_in_cell`/`ceil_open_in_cell`, and public `floor_hole_at`/`ceiling_hole_at(seed,level,cx,cz,i,j)`.
+`GenerateChunk` is **refactored to use them** — the stair/shaft specs are still computed once per chunk, so it
+is a **pure extraction: the floor/ceiling mesh is bit-identical** (no per-cell perf cost, no drift). (2)
+`app::build_walk_collision()` replaces the giant plane in the three **interactive** walks: a per-cell solid
+floor slab (`baseY-1..baseY`, top surface identical to the old plane) over the 3×3 ring, **skipping cells where
+`floor_hole_at` is true** (down-stair holes + shaft voids). You fall through; the level below soft-catches you
+on the next per-level rebuild — exactly like `--shaftfall`. The two **gated** level-0 walk-bot paths
+(`run_walkbot` soak, `run_dxr_walk` PT) keep the flat sealed plane **on purpose** (a bot falling would perturb
+their pacing/PT gate; they never descend). (3) **Generation fix:** the pillar pass placed full-height columns at
+*any* cell, incl. floor-hole/shaft cells — a pillar **floating over a void** that also blocked a fall. It now
+skips floor-/ceiling-hole cells (shared predicate; the skip is after the `rng.next_double()` consume, so
+non-hole cells stay **bit-identical**). A column over a void is a generator bug to fix, not tune around.
+
+**Gate.** clean build + full ctest (99/99) + the **NEW `--livedescent` proof** (finds a clean level-0
+down-stair hole — not co-located with a level-0 up-stairwell — then asserts a SOLID cell HOLDS the wanderer up
+AND the open DOWN-STAIR hole DROPS him a floor + soft-catches him, bit-identical ×2, model-free; seeds 1/7/42) +
+the M30 soft-catch fall + abyss render + **M5 golden bit-identical** + M27 ascent + M28 see-through + INV-5/
+inventory. Hand-verified beyond the gate: live descent robust across **15 seeds**, and **all** level-0 goldens
+bit-identical — m4 top-downs, m5 shots (seeds 1/7/42), m7 biomes **including parking_garage (the pillar biome)**
+— so the pillar fix touched no golden view; **zero re-baseline**.
+
+**Gotchas.** (1) A down-hole co-located with a level-0 up-stair is a stacked stair-junction: the up-stairwell
+steps catch you on level 0, so that particular cell isn't a clean fall (traversable, nothing stuck). The proof
+picks a clean hole (fixture choice, like `--ascend` picks an interior up-stair); in-game these are a small
+fraction of down-holes. (2) The SESSION_LOG's own `$seed:` PowerShell parse trap bit the new gate block — use
+`${seed}:`. (Files: `gen/layout.h` + `layout.cpp` + `chunk.cpp`, `app/src/main.cpp`, `scripts/gate.ps1`.)
+
+**Next (model-free, round-robin):** M30 **telegraph audio** (draft/wind near a shaft, off the sim hash) → a
+**deep-descent soak** (now unblocked — you can fall live) → the Phase-IV completion sweep (ROADMAP §3). M29
+Increment 2 + `m29-green` the moment `llama-server :8080` is up (ISSUE-5). Per `_run_state/ROADMAP.md` §2.
+
+---
+
 ## Session 31 — M30: Open shafts & the abyss (the despair gradient)  ✅ COMPLETE — 🏷️ `m30-green`
 
 `gate.ps1 -Milestone M30` exits 0; tagged `m30-green` + pushed. **The second vertical system is in** — a

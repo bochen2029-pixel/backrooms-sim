@@ -102,8 +102,8 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
     // CEILING is open on every level except the top (you FALL IN there). shaft_at is per-column,
     // so each floor cuts its own slice independently and they align into one continuous void.
     const gen::ShaftSpec shaft = gen::shaft_at(world_seed, key.cx, key.cz);
-    const bool shaftFloorOpen = shaft.present && key.level > shaft.top_level - shaft.depth && key.level <= shaft.top_level;
-    const bool shaftCeilOpen  = shaft.present && key.level >= shaft.top_level - shaft.depth && key.level <  shaft.top_level;
+    const bool shaftFloorOpen = gen::shaft_floor_open(shaft, key.level);  // shared with floor_hole_at (live descent)
+    const bool shaftCeilOpen  = gen::shaft_ceil_open(shaft, key.level);
 
     // Floor + ceiling grids (per cell). Ceiling faces down; some tiles fluorescent.
     for (int i = 0; i < G; ++i) {
@@ -112,8 +112,7 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
             const float x1 = ox + static_cast<float>(i + 1) * cs;
             const float z0 = oz + static_cast<float>(j) * cs;
             const float z1 = oz + static_cast<float>(j + 1) * cs;
-            const bool floorHole = (dnStair.present && dnStair.cell_i == i && dnStair.cell_j == j)
-                                   || (shaftFloorOpen && shaft.cell_i == i && shaft.cell_j == j);  // M30 shaft
+            const bool floorHole = gen::floor_open_in_cell(dnStair, shaft, shaftFloorOpen, i, j);  // M27 down-stair / M30 shaft
             const float f0[3]={x0,baseY,z0}, f1[3]={x1,baseY,z0}, f2[3]={x1,baseY,z1}, f3[3]={x0,baseY,z1};
             if (!floorHole)  // M27 stair from below / M30 shaft void -> open the floor
                 push_quad(c.vertices, f0, f1, f2, f3, up, floor_col, kMatCarpet);
@@ -121,8 +120,7 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
             const int64_t gi = key.cx * G + i;
             const int64_t gj = key.cz * G + j;
             const bool lamp = is_fluorescent_cell(gi, gj);
-            const bool ceilHole = (upStair.present && upStair.cell_i == i && upStair.cell_j == j)
-                                  || (shaftCeilOpen && shaft.cell_i == i && shaft.cell_j == j);  // M30 shaft
+            const bool ceilHole = gen::ceil_open_in_cell(upStair, shaft, shaftCeilOpen, i, j);  // M27 up-stair / M30 shaft
             const float cy = baseY + H;
             const float ck0[3]={x0,cy,z0}, ck1[3]={x1,cy,z0}, ck2[3]={x1,cy,z1}, ck3[3]={x0,cy,z1};
             if (!ceilHole)  // M27 up-stair / M30 shaft void -> open the ceiling
@@ -197,7 +195,13 @@ ChunkData GenerateChunk(uint64_t world_seed, ChunkKey key) {
         for (int i = 0; i < G; ++i) {
             for (int j = 0; j < G; ++j) {
                 if (rng.next_double() >= static_cast<double>(bp.pillar_density)) continue;
-                if (upStair.present && i == upStair.cell_i && j == upStair.cell_j) continue;  // M27: the stairwell owns this cell
+                // M27/M30: never stand a pillar over an open FLOOR hole (it would float over the
+                // void + block a live descent) or through an open CEILING hole / up-stairwell cell
+                // (the stairwell owns it). The skip is AFTER the rng consume, so non-hole cells stay
+                // bit-identical -- only a pillar that rolled AT a hole cell is removed. (subsumes the
+                // old up-stair-only skip via ceil_open_in_cell.)
+                if (gen::floor_open_in_cell(dnStair, shaft, shaftFloorOpen, i, j) ||
+                    gen::ceil_open_in_cell(upStair, shaft, shaftCeilOpen, i, j)) continue;
                 const float pcx = ox + (static_cast<float>(i) + 0.5f) * cs;
                 const float pcz = oz + (static_cast<float>(j) + 0.5f) * cs;
                 push_box(c.vertices, pcx - ps, baseY, pcz - ps, pcx + ps, baseY + kWallHeight, pcz + ps,

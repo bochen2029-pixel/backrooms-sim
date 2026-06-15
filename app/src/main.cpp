@@ -73,6 +73,7 @@ struct Options {
     bool walkbot = false, topdown = false, version = false, shot = false;
     bool render_wav = false, footsteps = false, audiosoak = false, audio = false;
     bool biomeat = false, descend = false, ascend = false, vstream = false, shaftfall = false, abyss = false, post = false, dxr_probe = false, dxr_test = false, dxr = false;
+    bool livedescent = false;   // M30: headless proof that the live-walk holed floor lets you fall through a down-stair hole + land
     bool screensaver = false, scr_config = false;   // Windows .scr: /s run, /p <hwnd> preview, /c config
     std::string scr_preview;                         // /p <hwnd>: parent HWND to render the preview into
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
@@ -168,6 +169,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--ascend") == 0) o.ascend = true;
         else if (std::strcmp(a, "--vstream") == 0) o.vstream = true;
         else if (std::strcmp(a, "--shaftfall") == 0) o.shaftfall = true;
+        else if (std::strcmp(a, "--livedescent") == 0) o.livedescent = true;
         else if (std::strcmp(a, "--abyss") == 0) o.abyss = true;
         else if (std::strcmp(a, "--post") == 0) o.post = true;
         else if (std::strcmp(a, "--dxr-probe") == 0) o.dxr_probe = true;
@@ -395,6 +397,39 @@ void apply_head_bob(contracts::CameraPose& cam, const br::core::WorldState& s) {
 // M21b live brain without duplicating the scheme/path-stripping logic.
 namespace { void parse_host_port(const std::string& url, std::string& host, int& port); }
 
+// M30 (live descent): build the live-walk collision world for the wanderer's CURRENT floor --
+// the chunks' wall/stair/pillar collision over the 3x3 neighbourhood PLUS a PER-CELL solid floor
+// at this level's baseY, but with HOLES at the open cells (down-stair holes + shaft voids, via
+// gen::floor_hole_at -- the SAME predicate GenerateChunk cuts the floor mesh with, so collision
+// matches what you see). The old single {-1e6..1e6} ground plane sealed every hole, so you could
+// see the abyss but never fall in; the holed floor lets you fall through and the level BELOW's
+// floor soft-catches you on the next per-level rebuild (the despair gradient, live). Each cell's
+// slab is baseY-1..baseY -- top surface at baseY, identical to the old plane, so walking on solid
+// ground is unchanged. Presentation/interaction only: never touches WorldState, so determinism
+// (INV-1) is untouched (run_play/run_game/run_screensaver are interactive, non-gated paths).
+static void build_walk_collision(std::vector<br::core::Aabb>& out, uint64_t seed, contracts::ChunkKey c) {
+    out.clear();
+    const float baseY = contracts::level_base_y(c.level);
+    const float cs = br::gen::kCellSize;
+    const int G = br::gen::kCellsPerChunk;
+    for (int64_t dx = -1; dx <= 1; ++dx)
+        for (int64_t dz = -1; dz <= 1; ++dz) {
+            const contracts::ChunkKey k{ c.level, c.cx + dx, c.cz + dz };
+            const float ox = static_cast<float>(k.cx) * contracts::kChunkSize;
+            const float oz = static_cast<float>(k.cz) * contracts::kChunkSize;
+            for (int i = 0; i < G; ++i)
+                for (int j = 0; j < G; ++j) {
+                    if (br::gen::floor_hole_at(seed, k.level, k.cx, k.cz, i, j)) continue;  // open -> you fall through
+                    const float x0 = ox + static_cast<float>(i) * cs, x1 = ox + static_cast<float>(i + 1) * cs;
+                    const float z0 = oz + static_cast<float>(j) * cs, z1 = oz + static_cast<float>(j + 1) * cs;
+                    out.push_back(br::core::Aabb{ {x0, baseY - 1.0f, z0}, {x1, baseY, z1} });
+                }
+            const contracts::ChunkData cd = contracts::GenerateChunk(seed, k);
+            for (const auto& b : cd.collision)
+                out.push_back(br::core::Aabb{ {b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]} });
+        }
+}
+
 int run_play(const Options& o) {
     using namespace br::core;
     using namespace std::chrono;
@@ -411,17 +446,7 @@ int run_play(const Options& o) {
 
     std::vector<Aabb> collision;
     contracts::ChunkKey cached{ 0, static_cast<int64_t>(1) << 40, 0 };
-    auto rebuild = [&](contracts::ChunkKey c) {
-        collision.clear();
-        const float baseY = contracts::level_base_y(c.level);  // M26: the wanderer's current floor
-        collision.push_back(Aabb{ {-1.0e6f, baseY - 1.0f, -1.0e6f}, {1.0e6f, baseY, 1.0e6f} });
-        for (int64_t dx = -1; dx <= 1; ++dx)
-            for (int64_t dz = -1; dz <= 1; ++dz) {
-                const contracts::ChunkData cd = contracts::GenerateChunk(o.seed, contracts::ChunkKey{ c.level, c.cx + dx, c.cz + dz });
-                for (const auto& b : cd.collision) collision.push_back(Aabb{ {b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]} });
-            }
-        cached = c;
-    };
+    auto rebuild = [&](contracts::ChunkKey c) { build_walk_collision(collision, o.seed, c); cached = c; };  // M30: holed floor -> live descent
     // M19: lazy DXR for --play --rt (ray tracing at 2/3 internal res, upscaled to the window).
     std::unique_ptr<br::render_dxr::DxrRenderer> dxr;
     uint32_t dxrW = 0, dxrH = 0;
@@ -891,17 +916,7 @@ int run_game(const Options& o) {
     std::vector<Aabb> collision;
     contracts::ChunkKey cached{ 0, static_cast<int64_t>(1) << 40, 0 };
     uint64_t texSeed = model.seed;
-    auto rebuild = [&](contracts::ChunkKey c) {
-        collision.clear();
-        const float baseY = contracts::level_base_y(c.level);  // M26: the wanderer's current floor
-        collision.push_back(Aabb{ {-1.0e6f, baseY - 1.0f, -1.0e6f}, {1.0e6f, baseY, 1.0e6f} });
-        for (int64_t dx = -1; dx <= 1; ++dx)
-            for (int64_t dz = -1; dz <= 1; ++dz) {
-                const contracts::ChunkData cd = contracts::GenerateChunk(texSeed, contracts::ChunkKey{ c.level, c.cx + dx, c.cz + dz });
-                for (const auto& b : cd.collision) collision.push_back(Aabb{ {b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]} });
-            }
-        cached = c;
-    };
+    auto rebuild = [&](contracts::ChunkKey c) { build_walk_collision(collision, texSeed, c); cached = c; };  // M30: holed floor -> live descent
     uint64_t prevSteps = 0;
     auto start_session = [&](uint64_t seed) {
         texSeed = seed;
@@ -1777,6 +1792,9 @@ int run_soak(const Options& o) {
     auto rebuild_collision = [&](contracts::ChunkKey c) {
         collision.clear();
         const float baseY = contracts::level_base_y(c.level);  // M26: the wanderer's current floor
+        // M30: a flat SEALED floor (no holes) on purpose -- this is a GATED level-0 soak/PT path;
+        // letting the walk-bot fall down a shaft/down-stair would perturb its pacing + the gate.
+        // Live descent (build_walk_collision, holed floor) is for the interactive walks only.
         collision.push_back(Aabb{ {-1.0e6f, baseY - 1.0f, -1.0e6f}, {1.0e6f, baseY, 1.0e6f} });
         for (int64_t dx = -1; dx <= 1; ++dx)
             for (int64_t dz = -1; dz <= 1; ++dz) {
@@ -2942,6 +2960,89 @@ int run_shaftfall(const Options& o) {
     return landed ? 0 : 6;
 }
 
+// ----- M30: scripted LIVE DESCENT through a procedural DOWN-STAIR hole (headless) -
+// Live descent is the despair gradient in-game: the interactive walks (run_play/run_game/
+// run_screensaver) now build their floor PER CELL with HOLES at the open cells (down-stair
+// holes + shaft voids) instead of one sealed ground plane, so you fall through real openings.
+// This proves THAT exact path with no window -- it builds the SAME build_walk_collision world
+// and rebuilds it per level as the wanderer falls, exactly like the live loop. Asserts both
+// halves of a correct holed floor: (A) a SOLID cell still HOLDS the wanderer up, and (B) the
+// open DOWN-STAIR hole DROPS it a floor + the level below soft-catches it. Reports the descent +
+// the determinism hash (the gate runs it twice). Model-free, deterministic.
+int run_livedescent(const Options& o) {
+    using namespace br::core;
+    // Find a CLEAN level-0 down-stair hole: an interior cell where the level BELOW (-1) has an
+    // up-stair (so it pokes up through level 0's floor -> floor_hole_at is true), and where level 0
+    // does NOT itself build an up-stairwell at the same cell (a co-located up-stair fills the cell
+    // with steps that catch you on level 0 -- a stacked stair-junction, traversable but not a clean
+    // fall). Picking a clean hole is fixture choice, exactly like run_ascend picks an interior up-stair.
+    int64_t scx = 0, scz = 0;
+    int ci = 0, cj = 0;
+    bool found = false;
+    for (int64_t r = 0; r < 64 && !found; ++r)
+        for (int64_t cz = -r; cz <= r && !found; ++cz)
+            for (int64_t cx = -r; cx <= r && !found; ++cx) {
+                const br::gen::StairSpec dn = br::gen::stair_at(o.seed, -1, cx, cz);  // up-stair below -> my floor hole
+                const br::gen::StairSpec up = br::gen::stair_at(o.seed,  0, cx, cz);  // my own up-stairwell?
+                const bool clear = !(up.present && up.cell_i == dn.cell_i && up.cell_j == dn.cell_j);
+                if (dn.present && clear && dn.cell_i >= 1 && dn.cell_i <= 6 && dn.cell_j >= 1 && dn.cell_j <= 6) {
+                    scx = cx; scz = cz; ci = dn.cell_i; cj = dn.cell_j; found = true;
+                }
+            }
+    if (!found) { std::printf("no_downhole_found: 1\n"); return 6; }
+
+    const float cs = br::gen::kCellSize;
+    const float holex = static_cast<float>(scx) * contracts::kChunkSize + (static_cast<float>(ci) + 0.5f) * cs;
+    const float holez = static_cast<float>(scz) * contracts::kChunkSize + (static_cast<float>(cj) + 0.5f) * cs;
+
+    // Per-tick rebuild keyed on the wanderer's current floor -- IDENTICAL to run_play's loop.
+    std::vector<Aabb> col;
+    contracts::ChunkKey cached{ 999, 0, 0 };  // sentinel -> always rebuilds on the first step
+    auto step_world = [&](WorldState& w, uint32_t ticks) {
+        const contracts::InputCommand in{};  // no input: pure gravity
+        for (uint32_t t = 0; t < ticks; ++t) {
+            const contracts::ChunkKey here = contracts::chunk_key_at(
+                contracts::level_from_y(w.wanderer.pos.y), w.wanderer.pos.x, w.wanderer.pos.z);
+            if (here != cached) { build_walk_collision(col, o.seed, here); cached = here; }
+            tick(w, in, col);
+        }
+    };
+
+    // (A) a SOLID cell holds the wanderer up. Pick the first interior cell that is NOT a hole.
+    int si = ci, sj = cj;
+    for (int jj = 1; jj <= 6 && si == ci && sj == cj; ++jj)
+        for (int ii = 1; ii <= 6 && si == ci && sj == cj; ++ii)
+            if (!br::gen::floor_hole_at(o.seed, 0, scx, scz, ii, jj)) { si = ii; sj = jj; }
+    const float solidx = static_cast<float>(scx) * contracts::kChunkSize + (static_cast<float>(si) + 0.5f) * cs;
+    const float solidz = static_cast<float>(scz) * contracts::kChunkSize + (static_cast<float>(sj) + 0.5f) * cs;
+    WorldState ssolid(o.seed);
+    ssolid.wanderer.pos = Vec3{ solidx, contracts::level_base_y(0) + kWandererHalfHeight + 0.5f, solidz };
+    cached = contracts::ChunkKey{ 999, 0, 0 };
+    step_world(ssolid, 240u);
+    const bool solid_holds = (contracts::level_from_y(ssolid.wanderer.pos.y) == 0) && ssolid.wanderer.on_ground;
+
+    // (B) the open down-stair hole drops you a floor; the level below soft-catches you.
+    WorldState s(o.seed);
+    s.wanderer.pos = Vec3{ holex, contracts::level_base_y(0) + kWandererHalfHeight + 0.5f, holez };
+    const int32_t startLevel = contracts::level_from_y(s.wanderer.pos.y);
+    cached = contracts::ChunkKey{ 999, 0, 0 };
+    step_world(s, 600u);
+    const int32_t endLevel = contracts::level_from_y(s.wanderer.pos.y);
+    const bool descended = (endLevel < startLevel) && s.wanderer.on_ground;
+
+    std::printf("seed: %llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("downhole_chunk: %lld %lld cell %d %d\n",
+                static_cast<long long>(scx), static_cast<long long>(scz), ci, cj);
+    std::printf("solid_cell: %d %d\n", si, sj);
+    std::printf("solid_holds: %d\n", solid_holds ? 1 : 0);
+    std::printf("start_level: %d\n", startLevel);
+    std::printf("end_level: %d\n", endLevel);
+    std::printf("descended: %d\n", descended ? 1 : 0);
+    std::printf("landed: %d\n", s.wanderer.on_ground ? 1 : 0);
+    std::printf("final_hash: %016llx\n", static_cast<unsigned long long>(world_state_hash(s)));
+    return (solid_holds && descended) ? 0 : 6;
+}
+
 // ----- M30: headless ABYSS render proof (look DOWN an open shaft) -------------
 // Finds a shaft, points a camera down its void from the top floor, and renders with a BAND
 // of floors resident (the abyss) vs just the top floor. The band shows several floors down
@@ -3241,6 +3342,9 @@ int run_dxr_walk(const Options& o) {
     auto rebuild_collision = [&](contracts::ChunkKey c) {
         collision.clear();
         const float baseY = contracts::level_base_y(c.level);  // M26: the wanderer's current floor
+        // M30: a flat SEALED floor (no holes) on purpose -- this is a GATED level-0 soak/PT path;
+        // letting the walk-bot fall down a shaft/down-stair would perturb its pacing + the gate.
+        // Live descent (build_walk_collision, holed floor) is for the interactive walks only.
         collision.push_back(Aabb{ {-1.0e6f, baseY - 1.0f, -1.0e6f}, {1.0e6f, baseY, 1.0e6f} });
         for (int64_t dx = -1; dx <= 1; ++dx)
             for (int64_t dz = -1; dz <= 1; ++dz) {
@@ -3674,17 +3778,7 @@ int run_screensaver(const Options& o) {
 
     std::vector<Aabb> collision;
     contracts::ChunkKey cached{ 0, static_cast<int64_t>(1) << 40, 0 };
-    auto rebuild = [&](contracts::ChunkKey c) {
-        collision.clear();
-        const float baseY = contracts::level_base_y(c.level);
-        collision.push_back(Aabb{ {-1.0e6f, baseY - 1.0f, -1.0e6f}, {1.0e6f, baseY, 1.0e6f} });
-        for (int64_t dx = -1; dx <= 1; ++dx)
-            for (int64_t dz = -1; dz <= 1; ++dz) {
-                const contracts::ChunkData cd = contracts::GenerateChunk(texSeed, contracts::ChunkKey{ c.level, c.cx + dx, c.cz + dz });
-                for (const auto& b : cd.collision) collision.push_back(Aabb{ {b.mn[0], b.mn[1], b.mn[2]}, {b.mx[0], b.mx[1], b.mx[2]} });
-            }
-        cached = c;
-    };
+    auto rebuild = [&](contracts::ChunkKey c) { build_walk_collision(collision, texSeed, c); cached = c; };  // M30: holed floor -> live descent (the screensaver can wander into the abyss)
     rebuild(contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z));
 
     const int rad = (o.radius > 0) ? static_cast<int>(o.radius) : 6;
@@ -3795,6 +3889,7 @@ int main(int argc, char** argv) {
     if (o.ascend)     return run_ascend(o);
     if (o.vstream)    return run_vstream(o);
     if (o.shaftfall)  return run_shaftfall(o);
+    if (o.livedescent) return run_livedescent(o);
     if (o.abyss)      return run_abyss(o);
     if (o.dxr_probe)  return run_dxr_probe(o);
     if (o.dxr_test)   return run_dxr_test(o);

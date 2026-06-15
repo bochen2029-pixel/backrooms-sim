@@ -43,8 +43,19 @@ intact.
 descending step set piece connecting two levels (collision-only). The wanderer
 descends it under gravity (`app --descend`), deterministically.
 
-**Planned.** Flooded / poolroom set-piece geometry; in-world stairwell placement
-+ rendered stairwells (a later milestone).
+**Verticality (Phase IV — M26–M30).** In-world vertical connectivity via pure
+shared-seam hashes (the Z-analogue of the edge-doorway protocol; no neighbour query):
+`stair_at` (M27, hybrid density + 4×4 backstop up-stairs) and `shaft_at` (M30, rare
+deep voids) + `shaft_passes` / `validate_vertical_connectivity`. `GenerateChunk` cuts
+aligned floor/ceiling holes + builds climbable stairwells at these cells. The floor/
+ceiling **opening tests are the single source of truth** — inline `shaft_floor_open` /
+`shaft_ceil_open` / `floor_open_in_cell` / `ceil_open_in_cell` (used by `GenerateChunk`,
+mesh bit-identical) + public `floor_hole_at` / `ceiling_hole_at` (used by the app's
+live-walk collision so it falls through exactly the openings the floor mesh omits — ADR-057).
+Pillars skip hole cells (no column over a void). `build_stairwell` is the legacy M7
+set-piece (still used by the `--descend` test harness).
+
+**Planned.** Flooded / poolroom set-piece geometry.
 
 **Status:** M7 (in progress) — biome field wired into generation (per-biome carve
 ratio + tint); distribution within ±2 % over 102,400 chunks; per-biome 10k-chunk

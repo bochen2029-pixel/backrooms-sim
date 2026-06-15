@@ -2862,6 +2862,26 @@ function Invoke-GateM30 {
         Write-Note 'soft-catch fall: seeds 1/7/42 fall the full shaft depth (10/9/9 floors) + land, bounded, bit-identical x2 -- the despair gradient'
     }
 
+    # LIVE DESCENT: the interactive walks (run_play/run_game/run_screensaver) now build their floor
+    # PER CELL with HOLES at the open cells (down-stair holes + shaft voids, via build_walk_collision)
+    # instead of one sealed {-1e6..1e6} ground plane, so you fall through real openings IN-GAME (the
+    # despair gradient, live -- not just visible). --livedescent proves that exact path headlessly:
+    # a SOLID cell still HOLDS the wanderer up, and a real DOWN-STAIR hole DROPS him a floor + the
+    # level below soft-catches him. Deterministic (bit-identical x2), model-free.
+    Assert-Gate 'live descent: the holed live-walk floor drops you through a down-stair hole + lands, deterministic' {
+        foreach ($seed in 1, 7, 42) {
+            $r1 = Invoke-AppCapture @('--livedescent', '--seed', "$seed")
+            if ($r1.Exit -ne 0) { throw "livedescent seed $seed exited $($r1.Exit): $($r1.Out)" }
+            if ((Get-Metric $r1.Out 'solid_holds') -ne 1) { throw "seed ${seed}: a solid cell did not hold the wanderer up (the holed floor lost its solid tiles)" }
+            if ((Get-Metric $r1.Out 'descended') -ne 1) { throw "seed ${seed}: did not descend through the down-stair hole" }
+            $end = [int](Get-Metric $r1.Out 'end_level')
+            if ($end -ge 0) { throw "seed ${seed}: end_level $end did not drop below level 0" }
+            $r2 = Invoke-AppCapture @('--livedescent', '--seed', "$seed")
+            if ((Get-MetricStr $r1.Out 'final_hash') -ne (Get-MetricStr $r2.Out 'final_hash')) { throw "seed $seed live-descent hash not reproducible" }
+        }
+        Write-Note 'live descent: the holed per-cell floor drops the wanderer through a real down-stair hole to the floor below + soft-catches him, bit-identical x2 -- the despair gradient is now LIVE in-game, not just visible'
+    }
+
     # The abyss renders: look DOWN a shaft with a band of floors resident -> the depths show through
     # the void (then black where the bounded ring ends = fog-to-black), debug-clean + bounded.
     Assert-Gate 'abyss render: floors show down a shaft (fog-to-black), bounded + debug-clean' {

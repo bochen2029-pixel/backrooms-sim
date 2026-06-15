@@ -101,5 +101,37 @@ ShaftSpec shaft_at(uint64_t world_seed, int64_t cx, int64_t cz);
 inline bool shaft_passes(const ShaftSpec& s, int32_t level) {
     return s.present && level <= s.top_level && level >= s.top_level - s.depth;
 }
+// A shaft's FLOOR is open on every spanned level EXCEPT the bottom (you LAND there); its
+// CEILING is open on every spanned level EXCEPT the top (you FALL IN there). (Mirror chunk.cpp.)
+inline bool shaft_floor_open(const ShaftSpec& s, int32_t level) {
+    return s.present && level >  s.top_level - s.depth && level <= s.top_level;
+}
+inline bool shaft_ceil_open(const ShaftSpec& s, int32_t level) {
+    return s.present && level >= s.top_level - s.depth && level <  s.top_level;
+}
+
+// M30 (live descent): the per-cell floor/ceiling opening tests, factored so GenerateChunk
+// (which precomputes the stair/shaft specs once per chunk) and the live-walk collision
+// (floor_hole_at, per cell) share ONE definition -- no drift. A floor cell opens iff a
+// DOWN-stair from the level below lands here, or a passing shaft is floor-open at this level;
+// the ceiling mirror: an UP-stair leaves here, or a shaft is ceiling-open here. (cell indices
+// are 0..G-1 within the chunk.) Pure boolean shape -- evaluation order matches chunk.cpp so the
+// floor/ceiling mesh stays bit-identical after the extraction.
+inline bool floor_open_in_cell(const StairSpec& dn_stair, const ShaftSpec& shaft,
+                               bool shaft_floor_is_open, int cell_i, int cell_j) {
+    return (dn_stair.present && dn_stair.cell_i == cell_i && dn_stair.cell_j == cell_j)
+        || (shaft_floor_is_open && shaft.cell_i == cell_i && shaft.cell_j == cell_j);
+}
+inline bool ceil_open_in_cell(const StairSpec& up_stair, const ShaftSpec& shaft,
+                              bool shaft_ceil_is_open, int cell_i, int cell_j) {
+    return (up_stair.present && up_stair.cell_i == cell_i && up_stair.cell_j == cell_j)
+        || (shaft_ceil_is_open && shaft.cell_i == cell_i && shaft.cell_j == cell_j);
+}
+// Standalone per-cell predicates (recompute the specs internally) -- the SINGLE SOURCE OF
+// TRUTH the live-walk collision skips floor cells with, so the wanderer falls through exactly
+// the openings GenerateChunk cuts in the floor mesh (down-stair holes + shaft voids). Pure/total
+// (hash evals only; one stair_at + one shaft_at). Used off the sim hash (presentation/interaction).
+bool floor_hole_at(uint64_t world_seed, int32_t level, int64_t cx, int64_t cz, int cell_i, int cell_j);
+bool ceiling_hole_at(uint64_t world_seed, int32_t level, int64_t cx, int64_t cz, int cell_i, int cell_j);
 
 }  // namespace br::gen

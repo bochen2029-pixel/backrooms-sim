@@ -99,8 +99,11 @@ as the oracle, `m<N>-green` as the revert anchor, SESSION_LOG/PROGRESS/memory as
   void has no floor, gravity drops you, the bottom level's solid floor stops you via swept collision (no
   fail-state). **Gate PASSED:** `[m30]` placement (rare/deep/deterministic/per-seed) + `--shaftfall` (full-
   depth fall, lands, bounded, bit-identical ×2) + debug-clean shaft renders + M5 golden bit-identical (voids
-  miss the views) + M27/M28 regressions. ADR-055. **Tracked polish (not blocking):** the draft-audio
-  telegraph (decision 6), multi-floor fog-to-black render, a deep-descent memory soak. **Deps:** M27, M28.
+  miss the views) + M27/M28 regressions. ADR-055. **Polish status:** ✅ live in-game descent (ADR-057, `gate
+  M30` green — the interactive walks build a HOLED per-cell floor via `build_walk_collision`, so you fall
+  through real down-stair holes + shaft voids in-game; + a pillar-over-void generation fix; all level-0 goldens
+  bit-identical) · ✅ multi-floor fog-to-black abyss render (`1a067bb`) · ⏳ remaining: draft-audio telegraph
+  (decision 6, off the sim hash) + a deep-descent memory soak (now unblocked by live descent). **Deps:** M27, M28.
 
 ### Deferred / leftover (decide-and-document, or operator-gate)
 - `[?] M31` · **floating-origin rebase** for *true*-unbounded XYZ (fixes the float horizon in 2-D too).
