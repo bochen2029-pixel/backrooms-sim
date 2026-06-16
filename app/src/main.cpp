@@ -1428,6 +1428,9 @@ int run_game(const Options& o) {
             }
             contracts::CameraPose cam = wanderer_camera(s, aspect);
             apply_head_bob(cam, s);  // M18 head-bob (view-only)
+            // Director subtitle active this frame? Shown in BOTH the ray-traced and raster paths.
+            const bool showCap = model.settings.director && model.settings.subtitles
+                                 && !capText.empty() && now < capUntil;
             if (model.settings.rt) {
                 // M19 ray-traced path: DXR at 2/3 internal res -> present (upscaled).
                 const uint32_t rw = (curW * 2u) / 3u, rh = (curH * 2u) / 3u;
@@ -1446,18 +1449,26 @@ int run_game(const Options& o) {
                     dxr->render_pt_frame(cam, 4u, static_cast<uint32_t>(texSeed) + static_cast<uint32_t>(frames), true,
                                          true, static_cast<uint32_t>(frames));  // creature animates -> fresh frame; denoise ON
                     std::vector<uint8_t> rt;
-                    if (dxr->readback(rt)) renderer.present_overlay_windowed(rt.data(), dxrW, dxrH);
+                    if (dxr->readback(rt)) {
+                        if (showCap) {  // CPU-composite the subtitle INTO the RT frame (same alpha blend as --caption-shot)
+                            app::build_caption_overlay(capOvl, dxrW, dxrH, capText);
+                            const size_t n = static_cast<size_t>(dxrW) * dxrH;
+                            for (size_t p = 0; p < n; ++p) {
+                                const uint8_t* sc = &capOvl[p * 4]; uint8_t* dp = &rt[p * 4];
+                                const float a = static_cast<float>(sc[3]) / 255.0f;
+                                for (int k = 0; k < 3; ++k) dp[k] = static_cast<uint8_t>(static_cast<float>(sc[k]) * a + static_cast<float>(dp[k]) * (1.0f - a));
+                            }
+                        }
+                        renderer.present_overlay_windowed(rt.data(), dxrW, dxrH);
+                    }
                 }
             }
             if (!model.settings.rt) {
                 app::build_shoggoth_mesh(shogBody, shog.pos, shog.writhe, 1.4f);  // M20b in-world body
                 std::vector<contracts::ResidentChunk> withShog = sm->resident();
                 withShog.push_back(contracts::ResidentChunk{contracts::ChunkKey{9999, static_cast<int64_t>(frames), 0}, shogBody.data(), static_cast<uint32_t>(shogBody.size())});
-                // Director SUBTITLES: paint the latest line as a plain alpha-blended overlay over the world
-                // (drawn inside render_chunks_windowed, same frame, no HUD/post pass). The text was uploaded
-                // when it arrived; here we just ask for the draw while the line is fresh (~6 s).
-                const bool showCap = model.settings.director && model.settings.subtitles
-                                     && !capText.empty() && now < capUntil;
+                // Director SUBTITLES (raster path): alpha-blended overlay drawn over the world inside
+                // render_chunks_windowed (same frame, no HUD/post pass) while the line is fresh (~6 s).
                 uint32_t drawn = 0;
                 if (!renderer.render_chunks_windowed(cam, withShog, 8u, s.tick, &drawn, showCap)) {
                     std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); ShowCursor(TRUE); return 1;
@@ -3244,12 +3255,25 @@ int run_caption_shot(const Options& o) {
     const std::string text = o.say_text.empty() ? std::string("EVACUATE SECTOR FIVE - CONTAINMENT BREACH DETECTED") : o.say_text;
     std::vector<uint8_t> cap;
     app::build_caption_overlay(cap, W, H, text);
-    std::vector<uint8_t> img(static_cast<size_t>(W) * H * 4u);
-    const uint8_t bg = 92;  // mid-gray stand-in for the world behind the subtitle
+    // The "world" behind the subtitle: a flat gray by default, or an ACTUAL ray-traced frame with --rt
+    // (mirrors the operator's renderer=1 path -- the caption is CPU-composited into the RT readback exactly here).
+    std::vector<uint8_t> img(static_cast<size_t>(W) * H * 4u, 92u);
+    for (size_t p = 0; p < static_cast<size_t>(W) * H; ++p) img[p * 4 + 3] = 255u;
+    if (o.rt) {
+        br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+        const auto ctr = contracts::chunk_key_at(0, 16.0f, 16.0f);
+        sm.update(ctr); sm.wait_idle(); sm.update(ctr);
+        br::render_dxr::DxrRenderer r;
+        contracts::CameraPose cam{};
+        cam.pos[0] = 16.0f; cam.pos[1] = br::core::kWandererHalfHeight + 0.02f + br::core::kEyeHeight; cam.pos[2] = 16.0f;
+        cam.yaw = 0.7853982f; cam.fov_y = 1.2217305f; cam.aspect = static_cast<float>(W) / static_cast<float>(H);
+        if (r.init(W, H) && r.build_scene(sm.resident()) && r.render_pt_frame(cam, 64u, static_cast<uint32_t>(o.seed), true, true, 0u))
+            r.readback(img);  // overwrite the gray bg with the real RT frame
+    }
     for (size_t p = 0; p < static_cast<size_t>(W) * H; ++p) {
         const uint8_t* s = &cap[p * 4]; uint8_t* d = &img[p * 4];
         const float a = static_cast<float>(s[3]) / 255.0f;
-        for (int k = 0; k < 3; ++k) d[k] = static_cast<uint8_t>(static_cast<float>(s[k]) * a + static_cast<float>(bg) * (1.0f - a));
+        for (int k = 0; k < 3; ++k) d[k] = static_cast<uint8_t>(static_cast<float>(s[k]) * a + static_cast<float>(d[k]) * (1.0f - a));
         d[3] = 255;
     }
     const std::string out = o.out.empty() ? std::string("runs/caption.png") : o.out;
