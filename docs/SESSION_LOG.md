@@ -86,6 +86,19 @@ copy broke the build when the screensaver was RUNNING (locked file) -- now a NON
 (`scripts/make_scr.cmake`) keeps the running copy + refreshes on the next free build. `gate M30` green; ctest
 100/100; Desktop `.scr` refreshed.
 
+**Follow-up 6 — the double-click "crash" + game LLM auto-start (ADR-064).** Operator: double-clicking
+`backrooms.exe` "always crapped out a fraction of a second after launch." Root cause: with NO mode flag (what
+a double-click passes), `main` fell through to a `printf` of the version + `return 0` -- it flashed and exited.
+Fixed: the no-arg fall-through now `return run_game(o)` (a bare double-click launches the playable game; verified
+`--seconds 3` -> 426 frames, debug-clean, exit 0). Also wired a best-effort `try_start_sidecar()` in `run_game`:
+fire-once, `CreateProcessW` launches `C:\keel-sidecar-7071\start.cmd` hidden+detached IF present, so the game
+brings the creature's LLM up itself (graceful no-op if absent / model down; the WinHTTP brain host reconnects
+once it answers). The operator was launching a STALE `build-release\bin\backrooms.exe` (a separate Release
+config, 6/14, now un-rebuildable from CLI -- its toolchain env is gone); overwrote it with the current working
+exe + delivered Desktop `Backrooms.exe` + refreshed `Backrooms_v2.scr`. ctest 100/100. **Gotcha:** the .scr
+POST_BUILD copy (ADR-062 era) failed the build when the .scr was running (locked) -- already fixed non-fatal
+in Follow-up 5.
+
 ---
 
 ## Session 32 — M30 polish ×3: live descent + deep-descent soak + draft telegraph  ✅ — `gate M30` green; model-free Phase IV EXHAUSTED

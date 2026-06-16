@@ -455,6 +455,26 @@ void apply_organic_bob(contracts::CameraPose& cam, const br::core::WorldState& s
 // M21b live brain without duplicating the scheme/path-stripping logic.
 namespace { void parse_host_port(const std::string& url, std::string& host, int& port); }
 
+// Best-effort: launch the operator's KEEL sidecar (the creature's LLM at :7071) so the game lights up
+// the brain on its own, instead of needing a manual start. Silent + non-blocking + fire-once: if the
+// launcher isn't installed at the known path, or the model backend is down, the creature simply runs on
+// its deterministic AI (the graceful no-op). The brain host (WinHTTP, per-request) reconnects on its
+// own once the sidecar answers, so we don't wait. Hidden, detached -> the sidecar outlives the game.
+static void try_start_sidecar() {
+    static bool tried = false;
+    if (tried) return;
+    tried = true;
+    const wchar_t* kLauncher = L"C:\\keel-sidecar-7071\\start.cmd";
+    if (GetFileAttributesW(kLauncher) == INVALID_FILE_ATTRIBUTES) return;  // not installed here -> skip (stays portable)
+    wchar_t cmdline[] = L"cmd.exe /c \"C:\\keel-sidecar-7071\\start.cmd\"";  // mutable buffer (CreateProcess may write)
+    STARTUPINFOW si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(nullptr, cmdline, nullptr, nullptr, FALSE,
+                       CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    }
+}
+
 // M30 (live descent): build the live-walk collision world for the wanderer's CURRENT floor --
 // the chunks' wall/stair/pillar collision over the 3x3 neighbourhood PLUS a PER-CELL solid floor
 // at this level's baseY, but with HOLES at the open cells (down-stair holes + shaft voids, via
@@ -1046,6 +1066,7 @@ int run_game(const Options& o) {
     // --no-shoggoth-brain kills it; graceful no-op if KEEL is down. Only fed while in Play.
     std::unique_ptr<app::ShoggothBrainHost> brain;
     if (!o.no_shoggoth_brain) {
+        try_start_sidecar();   // best-effort: bring the LLM up so the creature can think (graceful if it can't)
         std::string bh; int bp; parse_host_port(o.director_url, bh, bp);
         brain = std::make_unique<app::ShoggothBrainHost>(bh, bp);
     }
@@ -4484,7 +4505,7 @@ int main(int argc, char** argv) {
     if (o.scene)   return run_scene(o);
     if (o.headless || o.windowed) return run_clear(o);
 
-    std::printf("Backrooms Sim v%s\n", br::core::core_version());
-    std::printf("modes: --headless --scene --sim --window  (see --version)\n");
-    return 0;
+    // No mode flag (e.g. a double-click) -> launch the GAME. (Before this, a no-arg run just printed the
+    // version and exited instantly, which looked like an immediate crash when double-clicked.)
+    return run_game(o);
 }
