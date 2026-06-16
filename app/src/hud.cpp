@@ -264,9 +264,13 @@ void build_caption_overlay(std::vector<uint8_t>& rgba, uint32_t width, uint32_t 
     // Uppercase-fold to the bitmap font's charset (lowercase -> upper; unsupported glyphs render as space).
     std::string t = text;
     for (char& c : t) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
-    const int scale = (width >= 1600) ? 3 : 2;
+    // Scale the font with the render width -- a fixed scale was tiny at 4K -- and sit the line well up from
+    // the bottom (a fixed ~100 px margin left it nearly off-screen at 4K). A prominent lower-third subtitle.
+    int scale = static_cast<int>(width) / 512;
+    if (scale < 2) scale = 2;
+    if (scale > 8) scale = 8;
     const int cx = static_cast<int>(width) / 2;
-    const int y = static_cast<int>(height) - 11 * scale * 3;  // a few lines up from the bottom edge
+    const int y = static_cast<int>(height) - static_cast<int>(height) / 7;  // ~14% up from the bottom edge
     const int tw = text_px(t.c_str(), scale);
     fill_rect(rgba, width, height, cx - tw / 2 - 6 * scale, y - 3 * scale, tw + 12 * scale, 7 * scale + 6 * scale, 6, 8, 7, 175);  // dim backing bar
     draw_centered(rgba, width, height, cx, y, scale, t.c_str(), 200, 255, 210, 240);  // CRT phosphor green

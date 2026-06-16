@@ -51,6 +51,10 @@ the reply. `kSettingsItems` 9→10 (Subtitles→8, Back→9; menu test pins only
 it holds). Verified `--menu-shot --screen settings --sel 7 --width 3840 --height 2160` (10 items, hint under the
 menu); ctest 100/100. The operator's real-voice Settings test is the final confirm. Note: "doesn't seem to work"
 was likely because DIRECTOR was OFF in their cfg (in-game voice is gated on it) — the in-Settings mic test sidesteps that.
+Then a further pass on operator feedback: the **in-game subtitle** was also tiny + bottom-stuck at 4K
+(`build_caption_overlay` used a fixed `scale=3` + `y=height-99`) → now `scale=width/512` (~49 px at 4K vs ~21) and
+`y=height-height/7` (prominent lower-third, consistent raster + RT). Refreshed `README.md` + the GitHub repo
+description to cover the interactive Director (sees you + two-way voice). Pushed.
 
 ## Session 34 — Director SEES the player: VLM-grounded narration (RT)  ✅ — ADR-073, gates M30 + M9 green
 

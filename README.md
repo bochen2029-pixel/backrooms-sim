@@ -107,6 +107,16 @@ The Director is **enhancement-only** (INV-6): `--no-director` (the default) runs
 full sim with no LLM. Determinism is preserved — the model's output enters the sim
 only as a recorded event log, so a replay is **bit-identical with the model offline**.
 
+**It sees you — and you can talk back.** With the Director ON in ray-traced mode, it
+periodically *looks at your actual view* (a local **Qwen-VL** vision model) and narrates
+**what is really on screen** — the yellow corridor, a doorway, the entity behind you —
+instead of canned flavor. And the conversation goes both ways: **speak into your mic** and
+the facility intelligence answers you, *in character* and grounded in what it sees — spoken
+aloud through the procedural PA voice and shown as a subtitle (whisper.cpp transcribes you;
+the reply is the local model; the mic is echo-gated so it never hears itself). Settings →
+**Test Microphone** runs the whole loop — mic → transcription → reply → caption + voice — as
+a one-press diagnostic. All of it is presentation-only and never touches determinism.
+
 ## Layout
 
 `core` `gen` `stream` `render_d3d12` `render_dxr` `audio` `telemetry`
