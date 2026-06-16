@@ -60,6 +60,7 @@
 #include "shoggoth_brain.h"
 #include "shoggoth_brain_host.h"
 #include "shoggoth_vision.h"
+#include "director_vision.h"
 #include "shoggoth_hearing.h"
 #include "tts.h"
 #include "base64.h"
@@ -1106,6 +1107,55 @@ int run_menu_smoke(const Options& o) {
     return dbg == 0 ? 0 : 3;
 }
 
+// Downscale a clean RGBA frame (the RT readback) to the proven 384x216 vision size, PNG-encode it in
+// memory, and base64 it -- the payload director::keel_complete_vision wants. Box-averages source pixels
+// (cheap; runs once per ~28 s cadence on the frame thread). Empty string on bad input.
+static std::string encode_pov_b64(const std::vector<uint8_t>& rgba, uint32_t w, uint32_t h) {
+    constexpr uint32_t SW = 384, SH = 216;
+    if (w == 0 || h == 0 || rgba.size() < static_cast<size_t>(w) * h * 4u) return std::string();
+    std::vector<uint8_t> small(static_cast<size_t>(SW) * SH * 4u);
+    for (uint32_t y = 0; y < SH; ++y) {
+        uint32_t sy0 = y * h / SH, sy1 = (y + 1u) * h / SH;
+        if (sy1 <= sy0) sy1 = sy0 + 1u;
+        if (sy1 > h) sy1 = h;
+        for (uint32_t x = 0; x < SW; ++x) {
+            uint32_t sx0 = x * w / SW, sx1 = (x + 1u) * w / SW;
+            if (sx1 <= sx0) sx1 = sx0 + 1u;
+            if (sx1 > w) sx1 = w;
+            uint32_t acc[4] = {0, 0, 0, 0}, n = 0;
+            for (uint32_t sy = sy0; sy < sy1; ++sy)
+                for (uint32_t sx = sx0; sx < sx1; ++sx) {
+                    const uint8_t* p = &rgba[(static_cast<size_t>(sy) * w + sx) * 4u];
+                    acc[0] += p[0]; acc[1] += p[1]; acc[2] += p[2]; acc[3] += p[3]; ++n;
+                }
+            uint8_t* d = &small[(static_cast<size_t>(y) * SW + x) * 4u];
+            const uint32_t den = n ? n : 1u;
+            for (int k = 0; k < 4; ++k) d[k] = static_cast<uint8_t>(acc[k] / den);
+        }
+    }
+    std::vector<uint8_t> png;
+    stbi_write_png_to_func([](void* ctx, void* data, int size) {
+        auto* v = static_cast<std::vector<uint8_t>*>(ctx);
+        const uint8_t* p = static_cast<const uint8_t*>(data);
+        v->insert(v->end(), p, p + size);
+    }, &png, static_cast<int>(SW), static_cast<int>(SH), 4, small.data(), static_cast<int>(SW) * 4);
+    if (png.empty()) return std::string();
+    return app::base64_encode(png.data(), png.size());
+}
+
+// The entity-aware sensor line for the vision prompt (the operator's "observation + entity-aware" choice):
+// when the Shoggoth is within ~28 m, a short non-visual cue the narrator MAY weave in; empty (pure
+// observation) when it is far. Distance only -- the creature may ALSO be in the frame (RT material 7).
+static std::string vision_entity_context(const app::Shoggoth& shog, const br::core::Vec3& wanderer) {
+    const float dx = shog.pos.x - wanderer.x, dz = shog.pos.z - wanderer.z;
+    const float dist = std::sqrt(dx * dx + dz * dz);
+    if (dist > 28.0f) return std::string();
+    const char* prox = (dist < 8.0f) ? "very close" : (dist < 16.0f ? "near" : "in the area");
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "a large living entity is %s, roughly %d metres away.", prox, static_cast<int>(dist + 0.5f));
+    return std::string(buf);
+}
+
 // The windowed game shell: boot to the main menu, New Game -> the live walk, Esc ->
 // pause, Settings, Quit. Menu screens present the overlay; Play runs the M13 walk +
 // M14 audio. Synthetic-input transitions are covered by the headless menu tests; this
@@ -1235,6 +1285,14 @@ int run_game(const Options& o) {
     const auto director_interval = milliseconds(18000);
     auto last_director = t_start - director_interval;   // fire the first line promptly
     std::string last_pa_line;
+    // VLM-vision narration (RT path): the Director SEES the player's rendered frame and narrates ONLY what
+    // is visible (director_vision.h) -- the grounded counterpart to the text DirectorHost above, which stays
+    // as the RASTER fallback (the windowed raster path has no frame readback to send). The clean RT readback
+    // is downscaled + handed to an off-thread Qwen-VL narrator every ~28 s. Created lazily on the first Play
+    // frame with Director + RT on; graceful no-op if the VLM/sidecar is down.
+    std::unique_ptr<app::DirectorVisionHost> visionDir;
+    const auto vision_interval = milliseconds(28000);                  // sparse ~28 s cadence (hides VLM latency)
+    auto last_vision = t_start - vision_interval + milliseconds(8000);   // first POV ~8 s in
     uint64_t director_spoke = 0;
     std::string capText;                 // the current on-screen subtitle text (Settings -> Subtitles)...
     auto capUntil = t_start;             // ...shown until this time (a few seconds per line)
@@ -1311,6 +1369,7 @@ int run_game(const Options& o) {
                 start_session(model.seed);
                 shog = app::Shoggoth{};
                 shog.pos = s.wanderer.pos; shog.pos.x += 22.0f; shog.pos.z += 6.0f;  // M20b spawn
+                last_vision = steady_clock::now() - vision_interval + milliseconds(8000);  // first VLM POV ~8 s into a fresh session
             }
             else if (cmd == app::UiCommand::QuitApp) running = false;
             else if (cmd == app::UiCommand::TestConnection) {   // Settings: ping the LLM (async, off the UI thread)
@@ -1377,9 +1436,10 @@ int run_game(const Options& o) {
                 }
                 for (const app::ShoggothIntent& it : brain->poll()) { shog.intent = it; ++brain_intents; }
             }
-            // Director (M11): when Director is ON, ask the LLM (off-thread) for a Directive and SPEAK its caption
-            // via the procedural PA voice -- the narration you HEAR while you walk. Presentation only (INV-1 safe).
-            if (model.settings.director) {
+            // Director (M11) TEXT narration -- RASTER fallback only. The RT path uses the VLM-vision narrator
+            // (below); when RT is off there is no frame readback to send, so raster keeps the text-stats Director.
+            // Off-thread Directive -> SPEAK its caption via the procedural PA voice. Presentation only (INV-1 safe).
+            if (model.settings.director && !model.settings.rt) {
                 if (!director) {
                     try_start_sidecar();
                     std::string dh; int dp; parse_host_port(o.director_url, dh, dp);
@@ -1405,6 +1465,25 @@ int run_game(const Options& o) {
                             app::build_caption_overlay(capOvl, curW, curH, capText);
                             renderer.upload_caption_overlay(capOvl.data(), curW, curH);  // upload once; drawing it is then free
                         }
+                        ++director_spoke;
+                    }
+                }
+            }
+            // Director VISION (RT path): poll the off-thread Qwen-VL narrator. A fresh line is SPOKEN (PA voice)
+            // and shown as a subtitle -- for RT we only set capText/capUntil here; the RT readback block below
+            // composites it into the frame (raster uploads its own overlay). The POV is grabbed + submitted from
+            // the clean readback further down. Presentation only (INV-1 safe).
+            if (model.settings.director && model.settings.rt) {
+                if (!visionDir) {
+                    try_start_sidecar();
+                    std::string dh; int dp; parse_host_port(o.director_url, dh, dp);
+                    visionDir = std::make_unique<app::DirectorVisionHost>(dh, dp);
+                }
+                for (const std::string& line : visionDir->poll()) {
+                    if (!line.empty() && last_pa_line != line) {
+                        last_pa_line = line;
+                        if (audioOn) speak_pa(line, contracts::kAudioSampleRate);
+                        if (model.settings.subtitles) { capText = line; capUntil = now + seconds(8); }
                         ++director_spoke;
                     }
                 }
@@ -1450,6 +1529,14 @@ int run_game(const Options& o) {
                                          true, static_cast<uint32_t>(frames));  // creature animates -> fresh frame; denoise ON
                     std::vector<uint8_t> rt;
                     if (dxr->readback(rt)) {
+                        // Director VISION: every ~28 s hand the CLEAN player frame (before the caption composite
+                        // below) to the off-thread Qwen-VL narrator -- it narrates what it SEES. Cheap on-thread
+                        // (a downscale + PNG encode); the vision call itself runs off the frame thread (INV-6).
+                        if (model.settings.director && visionDir && now - last_vision >= vision_interval) {
+                            last_vision = now;
+                            std::string b64 = encode_pov_b64(rt, dxrW, dxrH);
+                            if (!b64.empty()) visionDir->submit(std::move(b64), vision_entity_context(shog, s.wanderer.pos));
+                        }
                         if (showCap) {  // CPU-composite the subtitle INTO the RT frame (same alpha blend as --caption-shot)
                             app::build_caption_overlay(capOvl, dxrW, dxrH, capText);
                             const size_t n = static_cast<size_t>(dxrW) * dxrH;
@@ -1508,12 +1595,18 @@ int run_game(const Options& o) {
     const unsigned long long dir_req = director ? director->requests() : 0ull;
     const unsigned long long dir_prod = director ? director->produced() : 0ull;
     director.reset();  // join the Director worker thread before exit
+    const unsigned long long vis_req = visionDir ? visionDir->requests() : 0ull;
+    const unsigned long long vis_prod = visionDir ? visionDir->produced() : 0ull;
+    visionDir.reset();  // join the vision narrator worker thread before exit
     PlaySoundW(nullptr, nullptr, SND_PURGE);  // stop any PA line still playing
     std::printf("brain_intents: %llu\n", static_cast<unsigned long long>(brain_intents));
     std::printf("brain_requests: %llu\n", brain_req);
     std::printf("director_spoke: %llu\n", static_cast<unsigned long long>(director_spoke));
     std::printf("director_requests: %llu\n", dir_req);
     std::printf("director_produced: %llu\n", static_cast<unsigned long long>(dir_prod));
+    std::printf("vision_requests: %llu\n", vis_req);
+    std::printf("vision_produced: %llu\n", vis_prod);
+    if (!last_pa_line.empty()) std::printf("director_last_line: %s\n", last_pa_line.c_str());
     std::printf("debug_error_count: %u\n", dbg);
     if (o.auto_play) {
         // Two guards over a Play session. (1) The view must not SELF-spin: the old bug pinned look at the +-0.5

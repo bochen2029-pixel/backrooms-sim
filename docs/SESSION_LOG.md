@@ -4,6 +4,55 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 34 — Director SEES the player: VLM-grounded narration (RT)  ✅ — ADR-073, gates M30 + M9 green
+
+**Operator pivot.** Resumed on the portable-packaging thread (P0) but the operator chose to PIVOT to the parked
+VLM-vision-Director TODO (`docs/TODO_director_vision.md`): the in-game Director narrated from TEXT STATS only
+(`render_prompt(WandererSummary)`) → "fortune-cookie" tropes (dripping faucets that don't exist), never using
+Qwen-VL to SEE. **Packaging is parked, plan intact** in `docs/PACKAGING_PROPOSAL.md` (still the other live thread).
+
+**De-risk experiment first (validated the payoff before any plumbing).** Dumped real walked POVs via
+`--soak --out` (two seeds) and sent them to the local Qwen-VL through keel `:7071` with the EXACT
+`keel_complete_vision` envelope (`scripts/vision_probe.ps1`). Result: **grounded** narration — named the yellow
+walls, central pillars, columns, the corridor receding to light; and on a featureless-wall frame said "no features
+here" instead of confabulating (anti-hallucination holds). tier=local, cost=0. Prompt A (one short clinical
+sentence, surveillance-AI framing) chosen over a verbose variant (too long for the PA voice / subtitle).
+
+**Decisions (operator).** Cadence **sparse ~28 s**; scope **observation + entity-aware** (a short "an entity is
+near, ~N m away" sensor line folded into the prompt when the Shoggoth is within ~28 m). POV source: **the RT
+readback**, NOT a dedicated 2nd renderer — `render_chunks`/`readback` are headless-only, so a dedicated POV render
+in the windowed game would need a 2nd D3D12 device (untested + a per-cadence mesh-upload hitch + debug-layer-clean
+risk), whereas the RT path ALREADY reads the real frame back for the caption composite (free, proven, includes the
+creature in material 7). Operator runs `renderer=1` (RT). Raster keeps the text DirectorHost (gated to `!rt`).
+
+**Built (ADR-073).** New header `app/src/director_vision.h` — pure `render_director_vision_prompt(context)` +
+header-only async `DirectorVisionHost` (exact mirror of `ShoggothBrainHost`: latest-wins `submit(b64,context)` →
+off-thread `keel_complete_vision` → `poll()` lines; graceful no-op when the VLM is down). In `run_game`: grab the
+CLEAN rt readback (BEFORE the caption composite) every ~28 s, `encode_pov_b64` (box-downscale → 384×216 → PNG →
+base64), submit with the entity context; poll → `speak_pa` + subtitle. New telemetry `vision_requests/produced` +
+`director_last_line`.
+
+**Verified.** `--game --auto-play --director --rt`: `vision_requests 2, produced 2, director_spoke 2`,
+`debug_error_count 0`, lookcheck PASS (clamped_frac 0, 3 warps — no spin regression). `director_last_line: "The
+wall is merely a corner of dull gold; the darkness behind your lens contains the entity that is already with
+you."` — grounded sight ("dull gold" = the path-traced yellow) + entity-aware (Shoggoth was near). RT-frame
+readability + the DXR readback color order (`R8G8B8A8_UNORM`, RGBA) confirmed before sending to the VLM.
+**Gate M30 + M9 green, ctest 100/100.** Exe delivered (Desktop + build-release\bin); committed + pushed.
+
+**Determinism.** Untouched — `run_game` is a non-gated live-presentation path; vision never touches sim/replay/
+goldens (INV-1) and only the network call is off the frame thread (INV-6).
+
+**Pending / open.** Raster-mode vision (needs a windowed-frame readback or a 2nd renderer) — deferred; raster uses
+the text Director. Future: faster/alarm cadence when a threat enters view (the "full threat-reaction" option, not
+chosen for v1); per-line PA volume. **Packaging P0 is still the other live thread.**
+
+**Gotchas.** `--caption-shot [--rt]` ALWAYS burns in a caption (default "SECTOR FIVE — CONTAINMENT BREACH") — it's
+a subtitle-composite tester, NOT a clean POV source; the live integration grabs the frame BEFORE the composite.
+The DXR readback is `R8G8B8A8_UNORM` (RGBA, no swizzle) — a BGRA mistake would turn yellow walls cyan and break
+grounding (verified). `--soak --ticks N` runs ticks_per_frame≈30 so frames≈N/30 — set `--shot-every` accordingly.
+
+---
+
 ## Session 33 — screensaver FIX: natural hallway navigation (Stroller) + organic head-bob  ✅ — `gate M30` green
 
 **Operator-reported bug:** the screensaver's autonomous camera was "completely useless" — it bumped wall to
