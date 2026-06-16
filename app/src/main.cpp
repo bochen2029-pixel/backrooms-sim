@@ -13,6 +13,7 @@
 #include <timeapi.h>
 #include <xinput.h>
 #include <mmsystem.h>   // PlaySound -> the Director's procedural PA voice (winmm)
+#include <dxgi.h>       // DXGI adapter VRAM query -> the LLM model-tier auto-select (ADR-076)
 
 #include <algorithm>
 #include <atomic>
@@ -550,29 +551,127 @@ static void speak_pa(const std::string& text, uint32_t sr) {
     g_paSuspendUntilMs.store(GetTickCount64() + ms + 600ull);
 }
 
-// Best-effort: launch the operator's KEEL sidecar (the creature's LLM at :7071) so the game lights up
-// the brain on its own, instead of needing a manual start. Silent + non-blocking + fire-once: if the
-// launcher isn't installed at the known path, or the model backend is down, the creature simply runs on
-// its deterministic AI (the graceful no-op). The brain host (WinHTTP, per-request) reconnects on its
-// own once the sidecar answers, so we don't wait. Hidden, detached -> the sidecar outlives the game.
+// ===== ADR-076: self-contained portable bundle ============================================
+// The portable build ships its runtime + models UNDER the exe: runtime\llama\, runtime\keel\,
+// runtime\whisper\, models\. These resolve exe-relative; if absent (this dev tree, where the
+// exe is in build-release\bin), they fall back to the C:\ dev install -- so the repo keeps
+// building/running while the BUNDLE never needs to look at C:\.
+static std::wstring exe_dir_w() {
+    wchar_t buf[MAX_PATH]; const DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    std::wstring p(buf, (n > 0 && n < MAX_PATH) ? n : 0u);
+    const size_t s = p.find_last_of(L"\\/");
+    return (s == std::wstring::npos) ? std::wstring() : p.substr(0, s + 1);   // includes trailing slash
+}
+static std::string exe_dir_a() {
+    char buf[MAX_PATH]; const DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    std::string p(buf, (n > 0 && n < MAX_PATH) ? n : 0u);
+    const size_t s = p.find_last_of("\\/");
+    return (s == std::string::npos) ? std::string() : p.substr(0, s + 1);
+}
+static std::wstring parent_dir_w(const std::wstring& path) {
+    const size_t s = path.find_last_of(L"\\/");
+    return (s == std::wstring::npos) ? std::wstring() : path.substr(0, s + 1);
+}
+// The bundled path under the exe if it exists, else the C:\ dev fallback.
+static std::wstring bundled_w(const wchar_t* rel, const wchar_t* fallback) {
+    const std::wstring cand = exe_dir_w() + rel;
+    return (GetFileAttributesW(cand.c_str()) != INVALID_FILE_ATTRIBUTES) ? cand : std::wstring(fallback);
+}
+static std::string bundled_a(const char* rel, const char* fallback) {
+    const std::string cand = exe_dir_a() + rel;
+    return (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) ? cand : std::string(fallback);
+}
+// whisper-cli + model defaults: the BUNDLE ships whisper-cli + ggml-base.en under the exe; the dev box
+// falls back to its C:\ install (large-v3-turbo there, so the dev/gate behaviour is byte-unchanged).
+static std::string default_whisper_exe()   { return bundled_a("runtime\\whisper\\whisper-cli.exe", "C:\\whisper.cpp\\whisper-cli.exe"); }
+static std::string default_whisper_model() { return bundled_a("models\\ggml-base.en.bin",          "C:\\models\\ggml-large-v3-turbo.bin"); }
+
+// Largest adapter's dedicated VRAM in MB (DXGI). 0 if unavailable -> treated as unknown (-> default 9B tier).
+static unsigned detect_vram_mb() {
+    IDXGIFactory* f = nullptr;
+    if (FAILED(CreateDXGIFactory(__uuidof(IDXGIFactory), reinterpret_cast<void**>(&f))) || !f) return 0u;
+    unsigned best = 0u;
+    IDXGIAdapter* a = nullptr;
+    for (UINT i = 0; f->EnumAdapters(i, &a) != DXGI_ERROR_NOT_FOUND; ++i) {
+        DXGI_ADAPTER_DESC d{};
+        if (SUCCEEDED(a->GetDesc(&d))) {
+            const unsigned mb = static_cast<unsigned>(d.DedicatedVideoMemory / (1024ull * 1024ull));
+            if (mb > best) best = mb;
+        }
+        a->Release();
+    }
+    f->Release();
+    return best;
+}
+
+static HANDLE g_llmJob = nullptr;                  // holds the LLM-stack children; KILL_ON_JOB_CLOSE
+static std::atomic<bool> g_visionAvailable{true};  // 9B+mmproj tier -> vision; 4B tier -> text-only Director
+
+// Launch a console exe HIDDEN (no window) inside the kill-on-close job; stdio -> a log file. The MS
+// pattern (create-suspended -> assign-to-job -> resume) keeps the child from escaping the job.
+static void launch_hidden_in_job(const std::wstring& exe, const std::wstring& args,
+                                 const std::wstring& cwd, const std::wstring& logPath) {
+    std::wstring cl = L"\"" + exe + L"\" " + args;
+    std::vector<wchar_t> buf(cl.begin(), cl.end()); buf.push_back(L'\0');
+    SECURITY_ATTRIBUTES sa{}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
+    HANDLE hLog = CreateFileW(logPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    STARTUPINFOW si{}; si.cb = sizeof(si);
+    if (hLog != INVALID_HANDLE_VALUE) { si.dwFlags = STARTF_USESTDHANDLES; si.hStdOutput = hLog; si.hStdError = hLog; }
+    PROCESS_INFORMATION pi{};
+    const BOOL ok = CreateProcessW(nullptr, buf.data(), nullptr, nullptr,
+                                   (hLog != INVALID_HANDLE_VALUE) ? TRUE : FALSE,
+                                   CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr,
+                                   cwd.empty() ? nullptr : cwd.c_str(), &si, &pi);
+    if (hLog != INVALID_HANDLE_VALUE) CloseHandle(hLog);
+    if (!ok) return;
+    if (g_llmJob) AssignProcessToJobObject(g_llmJob, pi.hProcess);
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);   // the job keeps the child alive; we don't need these
+}
+
+// Bring up the LLM stack the Director/voice need -- self-contained from the bundle (or the C:\ dev install).
+// HIDDEN + job-managed: no windows, and the servers die when the game exits/crashes (the job handle is held
+// for the process lifetime). Idempotent: a port already answering is left alone. llama-server :8080 starts
+// FIRST (keel probes + reuses it). Fire-once; a missing runtime is a graceful no-op (deterministic AI only).
+// VRAM picks the model tier: >= ~11 GB -> 9B + mmproj (vision); else 4B (text); unknown -> 9B (the default).
 static void try_start_sidecar() {
     static bool tried = false;
     if (tried) return;
     tried = true;
-    // Prefer the FULL-STACK launcher (starts BOTH :8080 llama-server AND :7071 keel-serve) -- the old
-    // start.cmd only started the :7071 sidecar, which is useless without the :8080 model behind it. Both
-    // launchers are idempotent (skip a port already up). If neither is installed here, skip (stays portable).
-    const wchar_t* candidates[] = { L"C:\\keel-sidecar-7071\\start-all.cmd", L"C:\\keel-sidecar-7071\\start.cmd" };
-    const wchar_t* launcher = nullptr;
-    for (const wchar_t* c : candidates) { if (GetFileAttributesW(c) != INVALID_FILE_ATTRIBUTES) { launcher = c; break; } }
-    if (!launcher) return;
-    std::wstring cl = std::wstring(L"cmd.exe /c \"") + launcher + L"\"";
-    std::vector<wchar_t> cmdline(cl.begin(), cl.end()); cmdline.push_back(L'\0');  // mutable buffer for CreateProcess
-    STARTUPINFOW si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi{};
-    if (CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, FALSE,
-                       CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr, nullptr, &si, &pi)) {
-        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+
+    const std::wstring llamaExe = bundled_w(L"runtime\\llama\\llama-server.exe", L"C:\\llama.cpp\\llama-server.exe");
+    const std::wstring keelExe  = bundled_w(L"runtime\\keel\\keel-serve.exe",    L"C:\\keel-sidecar-7071\\keel-serve.exe");
+    const std::wstring model9b  = bundled_w(L"models\\Qwen3.5-9B-Q5_K_M.gguf",   L"C:\\models\\Qwen3.5-9B-Q5_K_M.gguf");
+    const std::wstring model4b  = bundled_w(L"models\\Qwen3.5-4B-Q4_K_M.gguf",   L"C:\\models\\Qwen3.5-4B-Q4_K_M.gguf");
+    const std::wstring mmproj   = bundled_w(L"models\\mmproj-F16.gguf",          L"C:\\models\\mmproj-F16.gguf");
+    const std::wstring logDir   = exe_dir_w() + L"logs\\"; CreateDirectoryW(logDir.c_str(), nullptr);
+
+    const unsigned vram = detect_vram_mb();
+    const bool use9b = (vram == 0u) || (vram >= 11000u);   // unknown/big -> 9B; small -> 4B
+    g_visionAvailable.store(use9b);
+    const std::wstring model = use9b ? model9b : model4b;
+
+    if (!g_llmJob) {
+        g_llmJob = CreateJobObjectW(nullptr, nullptr);
+        if (g_llmJob) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
+            jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(g_llmJob, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
+        }
+    }
+    // 1) llama-server :8080 FIRST (keel reuses it). Skip if a model server already answers there.
+    if (!br::director::service_up("127.0.0.1", 8080, 700) &&
+        GetFileAttributesW(llamaExe.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        std::wstring args = L"-m \"" + model + L"\"";
+        if (use9b) args += L" --mmproj \"" + mmproj + L"\"";
+        args += L" --host 127.0.0.1 --port 8080 -ngl 99 -c 8192";
+        launch_hidden_in_job(llamaExe, args, parent_dir_w(llamaExe), logDir + L"llama.log");
+    }
+    // 2) keel-serve :7071 (cwd = its dir; reads keel.lock; reuses :8080). Skip if already up.
+    if (!br::director::service_up("127.0.0.1", 7071, 700) &&
+        GetFileAttributesW(keelExe.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        launch_hidden_in_job(keelExe, L"keel.lock", parent_dir_w(keelExe), logDir + L"keel.log");
     }
 }
 
@@ -1203,7 +1302,7 @@ int run_menu_smoke(const Options& o) {
 static std::string encode_pov_b64(const std::vector<uint8_t>& rgba, uint32_t w, uint32_t h) {
     constexpr uint32_t SW = 384, SH = 216;
     if (w == 0 || h == 0 || rgba.size() < static_cast<size_t>(w) * h * 4u) return std::string();
-    std::vector<uint8_t> small(static_cast<size_t>(SW) * SH * 4u);
+    std::vector<uint8_t> dst(static_cast<size_t>(SW) * SH * 4u);   // NB: not "small" -- dxgi.h pulls rpcndr.h's `#define small char`
     for (uint32_t y = 0; y < SH; ++y) {
         uint32_t sy0 = y * h / SH, sy1 = (y + 1u) * h / SH;
         if (sy1 <= sy0) sy1 = sy0 + 1u;
@@ -1218,7 +1317,7 @@ static std::string encode_pov_b64(const std::vector<uint8_t>& rgba, uint32_t w, 
                     const uint8_t* p = &rgba[(static_cast<size_t>(sy) * w + sx) * 4u];
                     acc[0] += p[0]; acc[1] += p[1]; acc[2] += p[2]; acc[3] += p[3]; ++n;
                 }
-            uint8_t* d = &small[(static_cast<size_t>(y) * SW + x) * 4u];
+            uint8_t* d = &dst[(static_cast<size_t>(y) * SW + x) * 4u];
             const uint32_t den = n ? n : 1u;
             for (int k = 0; k < 4; ++k) d[k] = static_cast<uint8_t>(acc[k] / den);
         }
@@ -1228,7 +1327,7 @@ static std::string encode_pov_b64(const std::vector<uint8_t>& rgba, uint32_t w, 
         auto* v = static_cast<std::vector<uint8_t>*>(ctx);
         const uint8_t* p = static_cast<const uint8_t*>(data);
         v->insert(v->end(), p, p + size);
-    }, &png, static_cast<int>(SW), static_cast<int>(SH), 4, small.data(), static_cast<int>(SW) * 4);
+    }, &png, static_cast<int>(SW), static_cast<int>(SH), 4, dst.data(), static_cast<int>(SW) * 4);
     if (png.empty()) return std::string();
     return app::base64_encode(png.data(), png.size());
 }
@@ -1394,8 +1493,8 @@ int run_game(const Options& o) {
     bool wantChatPov = false;            // an utterance awaits the next RT POV grab
     std::string pendingChatWav, pendingChatCtx;
     uint32_t micUtterN = 0;              // rotating WAV name per utterance (bounded, no cross-turn race)
-    const std::string wexe = o.whisper_exe.empty() ? std::string("C:\\whisper.cpp\\whisper-cli.exe") : o.whisper_exe;
-    const std::string wmodel = o.whisper_model.empty() ? std::string("C:\\models\\ggml-large-v3-turbo.bin") : o.whisper_model;
+    const std::string wexe = o.whisper_exe.empty() ? default_whisper_exe() : o.whisper_exe;
+    const std::string wmodel = o.whisper_model.empty() ? default_whisper_model() : o.whisper_model;
     char tmpbuf[MAX_PATH]; const DWORD tmpn = GetTempPathA(MAX_PATH, tmpbuf);
     const std::string tmpDir = (tmpn > 0 && tmpn < MAX_PATH) ? std::string(tmpbuf) : std::string("runs\\");
     uint64_t director_spoke = 0;
@@ -1550,7 +1649,7 @@ int run_game(const Options& o) {
             // Director (M11) TEXT narration -- RASTER fallback only. The RT path uses the VLM-vision narrator
             // (below); when RT is off there is no frame readback to send, so raster keeps the text-stats Director.
             // Off-thread Directive -> SPEAK its caption via the procedural PA voice. Presentation only (INV-1 safe).
-            if (model.settings.director && !model.settings.rt) {
+            if (model.settings.director && !(model.settings.rt && g_visionAvailable.load())) {
                 if (!director) {
                     try_start_sidecar();
                     std::string dh; int dp; parse_host_port(o.director_url, dh, dp);
@@ -1584,7 +1683,7 @@ int run_game(const Options& o) {
             // and shown as a subtitle -- for RT we only set capText/capUntil here; the RT readback block below
             // composites it into the frame (raster uploads its own overlay). The POV is grabbed + submitted from
             // the clean readback further down. Presentation only (INV-1 safe).
-            if (model.settings.director && model.settings.rt) {
+            if (model.settings.director && model.settings.rt && g_visionAvailable.load()) {
                 if (!visionDir) {
                     try_start_sidecar();
                     std::string dh; int dp; parse_host_port(o.director_url, dh, dp);
@@ -1622,8 +1721,8 @@ int run_game(const Options& o) {
                         std::string err;
                         if (audio::write_wav(std::string(wp), utter, app::MicCapture::kRate, static_cast<uint16_t>(1), err)) {
                             const std::string ctx = vision_entity_context(shog, s.wanderer.pos);
-                            if (model.settings.rt) { pendingChatWav = wp; pendingChatCtx = ctx; wantChatPov = true; }
-                            else if (chat) chat->submit(std::string(wp), std::string(), ctx);   // raster: text-only turn
+                            if (model.settings.rt && g_visionAvailable.load()) { pendingChatWav = wp; pendingChatCtx = ctx; wantChatPov = true; }
+                            else if (chat) chat->submit(std::string(wp), std::string(), ctx);   // raster / 4B: text-only turn
                         }
                     }
                 }
@@ -3221,8 +3320,8 @@ int run_mic_test(const Options& o) {
     app::MicCapture mic;
     if (!mic.start()) { std::fprintf(stderr, "mic: no capture device (waveInOpen failed)\n"); std::printf("mic_device: 0\n"); return 1; }
     std::printf("mic_device: 1\n");
-    const std::string wexe = o.whisper_exe.empty() ? std::string("C:\\whisper.cpp\\whisper-cli.exe") : o.whisper_exe;
-    const std::string wmodel = o.whisper_model.empty() ? std::string("C:\\models\\ggml-large-v3-turbo.bin") : o.whisper_model;
+    const std::string wexe = o.whisper_exe.empty() ? default_whisper_exe() : o.whisper_exe;
+    const std::string wmodel = o.whisper_model.empty() ? default_whisper_model() : o.whisper_model;
     const uint32_t secs = (o.seconds > 0) ? o.seconds : 12u;
     std::printf("listening %u s -- speak into the mic...\n", secs);
     std::fflush(stdout);
@@ -3256,8 +3355,8 @@ int run_mic_test(const Options& o) {
 // -> Qwen-VL -> reply. --say sets the utterance; --out is an optional POV PNG the Director "sees".
 int run_chat_test(const Options& o) {
     std::string host; int port; parse_host_port(o.director_url, host, port);
-    const std::string wexe = o.whisper_exe.empty() ? std::string("C:\\whisper.cpp\\whisper-cli.exe") : o.whisper_exe;
-    const std::string wmodel = o.whisper_model.empty() ? std::string("C:\\models\\ggml-large-v3-turbo.bin") : o.whisper_model;
+    const std::string wexe = o.whisper_exe.empty() ? default_whisper_exe() : o.whisper_exe;
+    const std::string wmodel = o.whisper_model.empty() ? default_whisper_model() : o.whisper_model;
     const std::string said = o.say_text.empty() ? std::string("what is this place and how do I get out") : o.say_text;
     const std::vector<int16_t> pcm = app::synthesize_speech(said, app::MicCapture::kRate);  // stand-in for the mic
     std::string err;
@@ -3290,7 +3389,7 @@ int run_chat_test(const Options& o) {
 int run_shoggoth_hearing_record(const Options& o) {
     using namespace br::core;
     std::string host; int port; parse_host_port(o.director_url, host, port);
-    const std::string wexe = o.whisper_exe.empty() ? std::string("C:\\whisper.cpp\\whisper-cli.exe") : o.whisper_exe;
+    const std::string wexe = o.whisper_exe.empty() ? default_whisper_exe() : o.whisper_exe;
     const std::string wmodel = o.whisper_model.empty() ? std::string("C:\\models\\ggml-base.en.bin") : o.whisper_model;
     const uint64_t N = (o.ticks > 0) ? o.ticks : 1800u;
     const uint64_t kBrainEvery = 240u;
@@ -3392,10 +3491,10 @@ bool shoggoth_pa_listen_wav(const app::Shoggoth& sh, const br::core::Vec3& wande
 int run_shoggoth_pa_record(const Options& o) {
     using namespace br::core;
     std::string host; int port; parse_host_port(o.director_url, host, port);
-    const std::string wexe = o.whisper_exe.empty() ? std::string("C:\\whisper.cpp\\whisper-cli.exe") : o.whisper_exe;
+    const std::string wexe = o.whisper_exe.empty() ? default_whisper_exe() : o.whisper_exe;
     // The PA carries WORDS, so default to the stronger model for clean word recovery
     // (M23's ambient tags were fine on base.en; speech wants large-v3-turbo).
-    const std::string wmodel = o.whisper_model.empty() ? std::string("C:\\models\\ggml-large-v3-turbo.bin") : o.whisper_model;
+    const std::string wmodel = o.whisper_model.empty() ? default_whisper_model() : o.whisper_model;
     const uint64_t N = (o.ticks > 0) ? o.ticks : 1800u;
     const uint64_t kBrainEvery = 240u;
     const std::string wav = o.out.empty() ? std::string("runs/shoggoth_pa.wav") : o.out;
@@ -3616,8 +3715,8 @@ int run_tts_check(const Options& o) {
     const std::string wav = o.out.empty() ? std::string("runs/tts_check.wav") : o.out;
     std::string werr;
     if (!audio::write_wav(wav, pcm, sr, 1u, werr)) { std::fprintf(stderr, "wav: %s\n", werr.c_str()); return 1; }
-    const std::string wexe = o.whisper_exe.empty() ? std::string("C:\\whisper.cpp\\whisper-cli.exe") : o.whisper_exe;
-    const std::string wmodel = o.whisper_model.empty() ? std::string("C:\\models\\ggml-large-v3-turbo.bin") : o.whisper_model;
+    const std::string wexe = o.whisper_exe.empty() ? default_whisper_exe() : o.whisper_exe;
+    const std::string wmodel = o.whisper_model.empty() ? default_whisper_model() : o.whisper_model;
     const std::string heard = whisper_transcribe(wav, wexe, wmodel);
 
     // lowercase the transcript, then count how many spoken words (>=3 letters) are

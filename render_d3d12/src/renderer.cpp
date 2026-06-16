@@ -206,6 +206,27 @@ void Renderer::shutdown() {
 
 namespace {
 
+// A freshly-created device can be "born removed" if the GPU is mid-reset (e.g. a TDR after another
+// process crashed/was-killed on the driver): D3D12CreateDevice SUCCEEDS but the device is already dead,
+// so the first real resource (the texture array) fails with DXGI_ERROR_DEVICE_REMOVED. Probe the device
+// with a trivial allocation so we reject a dead one here and fall through (next adapter, then WARP) --
+// graceful degradation instead of a hard crash for a user whose driver hiccups. Cheap; runs once at init.
+bool device_usable(ID3D12Device* dev) {
+    if (!dev) return false;
+    // Mirror the real texture array (a DEFAULT-heap VRAM texture): on a dead/TDR'd device the small
+    // buffer alloc still succeeds but the texture alloc fails, so probe with the actual resource shape.
+    D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC rd = {};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width = static_cast<UINT64>(kTexSize); rd.Height = static_cast<UINT>(kTexSize);
+    rd.DepthOrArraySize = static_cast<UINT16>(kTexCount); rd.MipLevels = 1;
+    rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    Microsoft::WRL::ComPtr<ID3D12Resource> probe;
+    return SUCCEEDED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&probe)));
+}
+
 // Shared device/queue/fence/list bring-up used by both headless and windowed.
 bool create_device_core(Renderer::Impl& d, std::string& err) {
     UINT factoryFlags = 0;
@@ -242,7 +263,8 @@ bool create_device_core(Renderer::Impl& d, std::string& err) {
         adapter->GetDesc1(&desc);
         if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0 &&
             SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0,
-                                        IID_PPV_ARGS(&d.device)))) {
+                                        IID_PPV_ARGS(&d.device))) &&
+            device_usable(d.device.Get())) {   // reject a born-removed device (post-TDR) -> next adapter, then WARP
             break;
         }
         adapter.Reset();
@@ -1104,9 +1126,13 @@ bool upload_textures(Renderer::Impl& d, uint64_t seed, std::string& err) {
     td.SampleDesc.Count = 1;
     td.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     const D3D12_HEAP_PROPERTIES def = heap_props(D3D12_HEAP_TYPE_DEFAULT);
-    if (FAILED(d.device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&d.texArray)))) {
-        err = "texture array create failed"; return false;
+    const HRESULT thr = d.device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&d.texArray));
+    if (FAILED(thr)) {
+        const HRESULT rr = d.device ? d.device->GetDeviceRemovedReason() : 0;
+        char hb[96]; std::snprintf(hb, sizeof(hb), "texture array create failed (hr=0x%08lX removed=0x%08lX)",
+                                   static_cast<unsigned long>(thr), static_cast<unsigned long>(rr));
+        err = hb; return false;
     }
 
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp[kTexCount] = {};

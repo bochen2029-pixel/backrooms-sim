@@ -4,6 +4,40 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 36 — SELF-CONTAINED portable bundle (exe-relative paths + hidden launcher + VRAM auto-tier)  ⏳ — ADR-076, render test pending GPU recovery
+
+**Operator ask.** Ship ONE portable folder (copies of the models + llama.cpp + whisper.cpp + keel under the exe)
+that "never needs to look for C:\models / C:\llama.cpp / C:\whisper.cpp", zip it, upload to itch.io — plug-and-play
+on Win10/11 + RTX. Auto-pick 9B vs 4B by VRAM, default 9B. Test before zipping.
+
+**Built (ADR-076).** (1) Exe-relative resolvers (`bundled_w/a` in `main.cpp`): the bundle resolves `runtime\{llama,
+keel,whisper}\` + `models\` beside the exe; absent (dev tree) → C:\ fallback (no regression, bundle never touches
+C:\). (2) **Hidden Job-Object launcher** replaces `start-all.cmd`: `CreateProcessW` + `CREATE_NO_WINDOW` under a
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` job → no DOS windows, servers die with the game; llama :8080 first (keel
+probes+reuses it), idempotent via `director::service_up` (WinHTTP /health), stdio → `logs\`. (3) **VRAM auto-tier**
+`detect_vram_mb()` (DXGI) ≥11 GB → 9B+mmproj (vision), else 4B (text); `g_visionAvailable` gates the Director so
+BOTH tiers work (9B vision / 4B text narration + text voice). (4) whisper → bundled base.en (dev keeps
+large-v3-turbo via C:\ fallback → gate behaviour unchanged). (5) `scripts/package.ps1` stages `dist\Backrooms\`
+(exe + dxc at root, all llama/whisper DLLs, keel, the 4 models, licenses) + store-mode zip. Bundle = **10.9 GB,
+55 files**, staged + structure-verified.
+
+**Renderer robustness (found while testing).** `render_d3d12` now reports the HRESULT + device-removed reason on a
+texture-array failure, and probes a fresh device (`device_usable`, a trivial texture alloc) so a born-removed
+device falls through to the WARP fallback instead of hard-crashing.
+
+**⏳ PENDING — the final on-GPU bundle test is BLOCKED by a test-env GPU TDR.** Repeated CUDA `llama-server` kills
+during testing put the dev GPU into a stuck TDR: **debug renders on WARP at ~28 FPS (the hardware D3D12 device is
+dead until a reboot)**; the release build accepts the dead hardware device and fails at the texture array
+(`hr=0x887A0005 DEVICE_REMOVED`). This is NOT a bundle/code bug — v2.0 shipped, the operator plays the release
+build, and the new launcher produced `vision_produced=1` on the dev path before the GPU was thrashed. The clean
+bundle smoke (its own servers start hidden, vision/voice work, servers die on exit) + gates M30/M9 must run on a
+**recovered GPU (reboot)**. Code committed; build clean, ctest 100/100.
+
+**Gotchas.** Don't hard-kill CUDA (`llama-server -ngl 99`) in a loop — it TDRs the GPU into a state where only the
+WARP path renders. `kTexCount`/`kTexSize` make the texture array just 1.3 MB (so "texture array create failed" was
+never VRAM — it was the dead device). `dxgi.h` pulls `rpcndr.h`'s `#define small char` (renamed a local). dist\ is
+gitignored. Next session: verify on a fresh-boot GPU, run M30/M9, then zip + (optionally) `butler` push.
+
 ## Session 35 — TWO-WAY VOICE: the wanderer speaks, the Director answers in register  ✅ — ADR-074, gates M30 + M9 green
 
 **Operator ask (mid-session, on top of ADR-073).** "Now the user can talk back (via mic) to the game ... and the

@@ -36,4 +36,9 @@ KeelResponse keel_complete(const std::string& host, int port, const std::string&
 KeelResponse keel_complete_vision(const std::string& host, int port, const std::string& prompt,
                                   const std::string& image_base64, uint32_t timeout_ms = 30000);
 
+// Lightweight liveness probe: a short GET to http://<host>:<port>/health. Returns true if anything
+// answers (any HTTP status reached), false on connect/timeout failure. Used by the bundle launcher to
+// skip a server whose port is already serving (idempotent bring-up). Never throws.
+bool service_up(const std::string& host, int port, uint32_t timeout_ms = 800);
+
 }  // namespace br::director

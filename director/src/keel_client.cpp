@@ -119,4 +119,21 @@ KeelResponse keel_complete_vision(const std::string& host, int port, const std::
     return keel_post(host, port, body, timeout_ms);
 }
 
+bool service_up(const std::string& host, int port, uint32_t timeout_ms) {
+    WinHandle session, connect, request;
+    session.h = WinHttpOpen(L"backrooms-probe/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
+                            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session.h) return false;
+    WinHttpSetTimeouts(session.h, static_cast<int>(timeout_ms), static_cast<int>(timeout_ms),
+                       static_cast<int>(timeout_ms), static_cast<int>(timeout_ms));
+    connect.h = WinHttpConnect(session.h, widen(host).c_str(), static_cast<INTERNET_PORT>(port), 0);
+    if (!connect.h) return false;
+    request.h = WinHttpOpenRequest(connect.h, L"GET", L"/health", nullptr,
+                                   WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!request.h) return false;
+    if (!WinHttpSendRequest(request.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0))
+        return false;
+    return WinHttpReceiveResponse(request.h, nullptr) != FALSE;  // anything answered -> the port is serving
+}
+
 }  // namespace br::director
