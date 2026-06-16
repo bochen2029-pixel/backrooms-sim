@@ -79,6 +79,7 @@ struct Options {
     bool screensaver = false, scr_config = false;   // Windows .scr: /s run, /p <hwnd> preview, /c config
     std::string scr_preview;                         // /p <hwnd>: parent HWND to render the preview into
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
+    bool dxr_denoise = false;   // headless: does the spatial denoiser bring a noisy few-spp frame closer to ground truth?
     bool soak = false, crash_test = false, director_probe = false;
     bool director_record = false, director_replay = false;
     bool director = false, no_director = false;   // --director enables; --no-director forces off (INV-6 kill switch)
@@ -185,6 +186,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--dxr-fps") == 0) o.dxr_fps = true;
         else if (std::strcmp(a, "--dxr-ghost") == 0) o.dxr_ghost = true;
         else if (std::strcmp(a, "--dxr-walk") == 0) o.dxr_walk = true;
+        else if (std::strcmp(a, "--dxr-denoise") == 0) o.dxr_denoise = true;
         else if (std::strcmp(a, "--soak") == 0) o.soak = true;
         else if (std::strcmp(a, "--crash-test") == 0) o.crash_test = true;
         else if (std::strcmp(a, "--crash-dir") == 0) { if (!str(o.crash_dir)) return false; }
@@ -736,7 +738,8 @@ int run_play(const Options& o) {
                 app::build_shoggoth_mesh(shogBody, shog.pos, shog.writhe, 1.4f);
                 for (auto& v : shogBody) v.material = 7.0f;
                 dxr->update_creature(shogBody.data(), static_cast<uint32_t>(shogBody.size()));
-                dxr->render_pt_frame(cam, 4u, static_cast<uint32_t>(o.seed) + static_cast<uint32_t>(frames), true);  // creature animates -> fresh frame each frame
+                dxr->render_pt_frame(cam, 4u, static_cast<uint32_t>(o.seed) + static_cast<uint32_t>(frames), true,
+                                     true, static_cast<uint32_t>(frames));  // creature animates -> fresh frame; denoise ON
                 std::vector<uint8_t> rt;
                 if (dxr->readback(rt) && renderer.present_overlay_windowed(rt.data(), dxrW, dxrH)) {
                     ++rtFrames;
@@ -1297,7 +1300,8 @@ int run_game(const Options& o) {
                     app::build_shoggoth_mesh(shogBody, shog.pos, shog.writhe, 1.4f);
                     for (auto& v : shogBody) v.material = 7.0f;
                     dxr->update_creature(shogBody.data(), static_cast<uint32_t>(shogBody.size()));
-                    dxr->render_pt_frame(cam, 4u, static_cast<uint32_t>(texSeed) + static_cast<uint32_t>(frames), true);  // creature animates -> fresh frame
+                    dxr->render_pt_frame(cam, 4u, static_cast<uint32_t>(texSeed) + static_cast<uint32_t>(frames), true,
+                                         true, static_cast<uint32_t>(frames));  // creature animates -> fresh frame; denoise ON
                     std::vector<uint8_t> rt;
                     if (dxr->readback(rt)) renderer.present_overlay_windowed(rt.data(), dxrW, dxrH);
                 }
@@ -3888,6 +3892,59 @@ int run_dxr_pt(const Options& o) {
     return dbg == 0 ? 0 : 3;
 }
 
+// Headless denoiser check: the edge-aware spatial filter must bring a noisy FEW-spp frame CLOSER to the
+// converged ground truth than the raw noisy frame (not merely blur it). Renders a high-spp reference, then a
+// low-spp frame denoise-OFF and denoise-ON, and reports the mean abs channel error (0..255) of each vs the ref.
+int run_dxr_denoise(const Options& o) {
+    const uint32_t W = o.width ? o.width : 320u, H = o.height ? o.height : 180u;
+    const float ex = 16.0f, ez = 16.0f;
+    const float ey = br::core::kWandererHalfHeight + 0.02f + br::core::kEyeHeight;
+    contracts::CameraPose cam{};
+    cam.pos[0] = ex; cam.pos[1] = ey; cam.pos[2] = ez;
+    cam.yaw = 0.7853982f; cam.pitch = 0.0f;     // a corner-ish view: walls, baseboard, a ceiling light
+    cam.fov_y = 1.2217305f; cam.aspect = static_cast<float>(W) / static_cast<float>(H);
+
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    const auto center = contracts::chunk_key_at(0, ex, ez);
+    sm.update(center); sm.wait_idle(); sm.update(center);
+
+    br::render_dxr::DxrRenderer r;
+    if (!r.init(W, H)) { std::fprintf(stderr, "dxr init: %s\n", r.last_error().c_str()); return 1; }
+    if (!r.build_scene(sm.resident())) { std::fprintf(stderr, "dxr scene: %s\n", r.last_error().c_str()); return 1; }
+
+    const uint32_t kRefSpp = o.spp ? o.spp : 512u;
+    const uint32_t kLowSpp = 4u;
+    const uint32_t seed = static_cast<uint32_t>(o.seed);
+
+    std::vector<uint8_t> ref, noisy, den;
+    if (!r.render_pt_frame(cam, kRefSpp, seed, true, false, 0u) || !r.readback(ref))   { std::fprintf(stderr, "ref: %s\n", r.last_error().c_str()); return 1; }
+    if (!r.render_pt_frame(cam, kLowSpp, seed, true, false, 0u) || !r.readback(noisy)) { std::fprintf(stderr, "noisy: %s\n", r.last_error().c_str()); return 1; }
+    if (!r.render_pt_frame(cam, kLowSpp, seed, true, true,  0u) || !r.readback(den))   { std::fprintf(stderr, "den: %s\n", r.last_error().c_str()); return 1; }
+
+    auto mad = [&](const std::vector<uint8_t>& a) {
+        double s = 0.0; const size_t n = static_cast<size_t>(W) * H;
+        for (size_t p = 0; p < n; ++p)
+            for (int k = 0; k < 3; ++k) { int dpx = static_cast<int>(a[p*4+k]) - static_cast<int>(ref[p*4+k]); if (dpx < 0) dpx = -dpx; s += dpx; }
+        return s / (static_cast<double>(n) * 3.0);
+    };
+    const double err_off = mad(noisy);
+    const double err_on  = mad(den);
+    const uint32_t dbg = r.debug_error_count();
+    std::printf("ref_spp: %u\n", kRefSpp);
+    std::printf("low_spp: %u\n", kLowSpp);
+    std::printf("err_off: %.3f\n", err_off);     // mean abs channel error vs ground truth, denoiser OFF
+    std::printf("err_on: %.3f\n", err_on);       // ... denoiser ON
+    std::printf("err_ratio: %.3f\n", err_off > 1e-6 ? err_on / err_off : 1.0);
+    std::printf("debug_error_count: %u\n", dbg);
+    if (!o.out.empty()) {
+        stbi_write_png(o.out.c_str(), static_cast<int>(W), static_cast<int>(H), 4, den.data(), static_cast<int>(W) * 4);
+        std::string np = o.out; const size_t dot = np.rfind(".png");
+        if (dot != std::string::npos) np.insert(dot, "_noisy"); else np += "_noisy.png";
+        stbi_write_png(np.c_str(), static_cast<int>(W), static_cast<int>(H), 4, noisy.data(), static_cast<int>(W) * 4);
+    }
+    return dbg == 0 ? 0 : 3;
+}
+
 // ----- M9 phase 4: interactive PT frame rate (gate #3, ">= 60 FPS while walking") -
 // Times reduced-sample frames (the moving path resets accumulation every frame).
 int run_dxr_fps(const Options& o) {
@@ -4581,6 +4638,7 @@ int main(int argc, char** argv) {
     if (o.dxr_fps)    return run_dxr_fps(o);
     if (o.dxr_ghost)  return run_dxr_ghost(o);
     if (o.dxr_walk)   return run_dxr_walk(o);
+    if (o.dxr_denoise) return run_dxr_denoise(o);
     if (o.dxr)        return run_dxr(o);
     if (o.director_probe) return run_director_probe(o);
     if (o.director_eval)  return run_director_eval(o);

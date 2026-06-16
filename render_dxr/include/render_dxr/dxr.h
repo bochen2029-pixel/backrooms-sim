@@ -72,8 +72,14 @@ public:
     // refine the converging image across frames. Resolves to RGBA + NDC depth each
     // call. The per-sample RNG indexes continue across frames, so accumulation is
     // progressive and deterministic.
+    //
+    // `denoise` (default off): run an edge-aware multi-scale spatial filter over the
+    // accumulated radiance (geometry-guided depth+normal edge-stopping) before tonemap —
+    // turns a noisy few-spp frame clean. INTERACTIVE ONLY; leave off for the converged
+    // goldens (their seed/output must stay bit-stable). `frame` decorrelates the per-pixel
+    // RNG across frames (0 for the deterministic offline path).
     bool render_pt_frame(const contracts::CameraPose& camera, uint32_t samples,
-                         uint32_t seed, bool reset);
+                         uint32_t seed, bool reset, bool denoise = false, uint32_t frame = 0);
 
     // Samples accumulated into the current (un-reset) image — 0 right after a reset.
     uint32_t accum_samples() const;

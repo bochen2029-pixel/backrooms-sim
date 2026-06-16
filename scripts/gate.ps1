@@ -974,6 +974,21 @@ function Invoke-GateM9 {
         }
     }
 
+    # The interactive spatial DENOISER must REDUCE noise, not just blur: a denoised few-spp frame has to land
+    # CLOSER to the converged ground truth than the raw noisy frame. --dxr-denoise renders a high-spp reference,
+    # then a 4-spp frame denoise-OFF and denoise-ON, and reports the mean abs channel error of each vs the ref.
+    Assert-Gate 'interactive PT denoiser cuts noise toward ground truth (edge-aware spatial filter)' {
+        $rd = Invoke-AppCapture @('--dxr-denoise', '--seed', '1', '--spp', '512', '--width', '320', '--height', '180')
+        if ($rd.Exit -ne 0) { throw "--dxr-denoise exited $($rd.Exit): $($rd.Out)" }
+        if ((Get-Metric $rd.Out 'debug_error_count') -ne 0) { throw "denoise run had debug-layer messages: $($rd.Out)" }
+        $eoff = Get-MetricFloat $rd.Out 'err_off'
+        $eon  = Get-MetricFloat $rd.Out 'err_on'
+        $ratio = Get-MetricFloat $rd.Out 'err_ratio'
+        if ($eon -ge $eoff) { throw "denoiser made it WORSE: err_on $eon >= err_off $eoff (it should move toward ground truth)" }
+        if ($ratio -ge 0.7) { throw "denoiser too weak: err_ratio $ratio >= 0.7 (expect a clear noise cut, ~0.36 observed)" }
+        Write-Note "interactive PT denoiser: 4-spp error vs ground truth $eoff -> $eon (ratio $ratio) -- edge-aware spatial filter, ~$([math]::Round((1.0-$ratio)*100))% noise cut, debug-clean"
+    }
+
     # Exit gate #3: interactive PT. (a) >= 60 FPS while walking (1-spp moving frames
     # at 1440p); (b) accumulation resets on movement (no-ghost) -- a clean reset
     # matches a fresh render, while NOT resetting blends the prior pose in (large

@@ -190,6 +190,7 @@ struct DxrRenderer::Impl {
 
     // Path-traced lighting (M9 phase 3): inline RayQuery + radiance accumulation.
     ComPtr<ID3D12Resource> accumTex;       // RGBA32F radiance accumulator (u2)
+    ComPtr<ID3D12Resource> guideTex;       // RGBA32F denoiser guide: world normal.xyz + view-Z in .w (u3)
     ComPtr<ID3D12Resource> shadeVb;        // concatenated chunk verts (StructuredBuffer t1)
     uint32_t shadeVertCount = 0;
     // M25: a single DYNAMIC creature (the Shoggoth body) updated per-frame without
@@ -291,9 +292,9 @@ bool DxrRenderer::init(uint32_t w, uint32_t h) {
             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&d.readbackBuf)))) { last_error_ = "readback"; return false; }
 
     // Shader-visible UAV heap: slot 0 = color (u0), slot 1 = depth (u1),
-    // slot 2 = PT radiance accumulator (u2).
+    // slot 2 = PT radiance accumulator (u2), slot 3 = denoiser guide (u3).
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
-    hd.NumDescriptors = 3; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    hd.NumDescriptors = 4; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(d.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&d.uavHeap)))) { last_error_ = "uav heap"; return false; }
     const UINT uavInc = d.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
@@ -326,6 +327,15 @@ bool DxrRenderer::init(uint32_t w, uint32_t h) {
     D3D12_CPU_DESCRIPTOR_HANDLE accumUavCpu = d.uavHeap->GetCPUDescriptorHandleForHeapStart();
     accumUavCpu.ptr += static_cast<SIZE_T>(uavInc) * 2;  // slot 2
     d.device->CreateUnorderedAccessView(d.accumTex.Get(), nullptr, &aud, accumUavCpu);
+
+    // Denoiser guide (RGBA32F): world normal.xyz + view-space Z in .w, written by the PT resolve and read
+    // by the edge-aware filter pass (u3, heap slot 3). Geometry-only -> stops the blur at depth/normal edges.
+    D3D12_RESOURCE_DESC gt = at;  // same R32G32B32A32_FLOAT 2D UAV
+    if (FAILED(d.device->CreateCommittedResource(&defHeap, D3D12_HEAP_FLAG_NONE, &gt,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&d.guideTex)))) { last_error_ = "guide tex"; return false; }
+    D3D12_CPU_DESCRIPTOR_HANDLE guideUavCpu = d.uavHeap->GetCPUDescriptorHandleForHeapStart();
+    guideUavCpu.ptr += static_cast<SIZE_T>(uavInc) * 3;  // slot 3
+    d.device->CreateUnorderedAccessView(d.guideTex.Get(), nullptr, &aud, guideUavCpu);
 
     // Global root signature: one UAV descriptor table (u0).
     D3D12_DESCRIPTOR_RANGE range{};
@@ -549,11 +559,13 @@ cbuffer PT : register(b0) {
     float3 uRight; float uNear;
     float3 uUp;    float uFar;
     uint uSampleStart; uint uSampleCount; uint uTotal; uint uSeed;
-    uint uResolve; float uExposure; float uWidth; float uHeight;
+    uint uResolve; float uExposure; float uWidth; float uHeight;  // uResolve: 0 accum, 1 accum+tonemap, 2 accum+guide, 3 denoise
+    uint uFrame; uint uPad0; uint uPad1; uint uPad2;              // uFrame: per-frame decorrelation index (interactive only)
 };
 RWTexture2D<float4> g_out   : register(u0);
 RWTexture2D<float>  g_depth : register(u1);
 RWTexture2D<float4> g_accum : register(u2);
+RWTexture2D<float4> g_guide : register(u3);   // denoiser guide: world normal.xyz + view-Z in .w
 RaytracingAccelerationStructure g_scene : register(t0);
 StructuredBuffer<Vertex> g_verts : register(t1);
 
@@ -633,10 +645,51 @@ Hit trace(float3 origin, float3 dir){
     return h;
 }
 
+float luma(float3 c){ return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+
+// Edge-aware multi-scale denoise (uResolve==3). One dispatch, no ping-pong: blur the accumulated radiance in
+// LINEAR space across several a-trous dilations (1,2,4,8 px), stopping the blur at depth + normal + luminance
+// edges (the geometry guide is exact, so flat walls smooth out while corners/edges stay crisp). Then tonemap.
+void denoise_resolve(uint2 px, uint2 dim){
+    float4 gC = g_guide[px];
+    float3 nC = gC.xyz; float zC = gC.w;
+    float invT = 1.0 / float(max(uTotal, 1u));
+    float3 cC = g_accum[px].rgb * invT;
+    if (zC <= 0.0){                                   // background / miss: nothing to denoise, tonemap raw
+        float3 b = cC * uExposure; b = b / (b + 1.0);
+        g_out[px] = float4(saturate(b), 1.0);
+        return;
+    }
+    float lC = luma(cC);
+    float3 sum = cC; float wsum = 1.0;                // include the centre
+    const float sigZ = 0.6, sigN = 32.0, sigL = 0.35;
+    [unroll] for (uint level = 0u; level < 4u; ++level){
+        int stp = int(1u << level);                   // 1, 2, 4, 8
+        [unroll] for (int dy = -2; dy <= 2; ++dy)
+        [unroll] for (int dx = -2; dx <= 2; ++dx){
+            if (dx == 0 && dy == 0) continue;
+            int2 q = int2(px) + int2(dx, dy) * stp;
+            if (q.x < 0 || q.y < 0 || q.x >= int(dim.x) || q.y >= int(dim.y)) continue;
+            float4 gq = g_guide[uint2(q)];
+            if (gq.w <= 0.0) continue;                 // skip background neighbours
+            float3 cq = g_accum[uint2(q)].rgb * invT;
+            float wz = exp(-abs(zC - gq.w) / (sigZ * max(zC, 1.0)));
+            float wn = pow(max(dot(nC, gq.xyz), 0.0), sigN);
+            float wl = exp(-abs(lC - luma(cq)) / sigL);
+            float w = wz * wn * wl;
+            sum += cq * w; wsum += w;
+        }
+    }
+    float3 outc = sum / max(wsum, 1e-4);
+    float3 c = outc * uExposure; c = c / (c + 1.0);   // Reinhard
+    g_out[px] = float4(saturate(c), 1.0);
+}
+
 [shader("raygeneration")]
 void RayGen(){
     uint2 px = DispatchRaysIndex().xy;
     uint2 dim = DispatchRaysDimensions().xy;
+    if (uResolve == 3u){ denoise_resolve(px, dim); return; }   // filter pass: no tracing
     float2 uv = (float2(px) + 0.5) / float2(dim);
     float sx = (2.0 * uv.x - 1.0) * uTanY * uAspect;
     float sy = (1.0 - 2.0 * uv.y) * uTanY;
@@ -666,7 +719,7 @@ void RayGen(){
     if (diffuse){
         [loop] for (uint s = 0; s < uSampleCount; ++s){
             uint sidx = uSampleStart + s;
-            uint st = px.x * 1973u + px.y * 9277u + (sidx + 1u) * 26699u + uSeed * 68111u + 1u;
+            uint st = px.x * 1973u + px.y * 9277u + (sidx + 1u) * 26699u + uSeed * 68111u + uFrame * 9781u + 1u;
             float u1 = rndf(st), u2 = rndf(st);
             float3 wi = cosine_dir(h.N, u1, u2);
             Hit b = trace(h.P + h.N * 2e-3, wi);
@@ -681,12 +734,17 @@ void RayGen(){
     float3 total = (uSampleStart == 0u) ? local : (g_accum[px].rgb + local);
     g_accum[px] = float4(total, 1.0);
 
-    if (uResolve != 0u){
-        float3 c = total / float(max(uTotal, 1u));
-        c *= uExposure;
-        c = c / (c + 1.0);          // Reinhard
-        g_out[px] = float4(saturate(c), 1.0);
+    if (uResolve >= 1u){                                  // final batch: depth + denoiser guide
         g_depth[px] = ndc;
+        float vz = h.hit ? (h.t * dot(dir, uFwd)) : 0.0;
+        g_guide[px] = float4(h.hit ? h.N : float3(0,0,0), vz);
+        if (uResolve == 1u){                              // denoise OFF: tonemap now (the M9 golden path)
+            float3 c = total / float(max(uTotal, 1u));
+            c *= uExposure;
+            c = c / (c + 1.0);          // Reinhard
+            g_out[px] = float4(saturate(c), 1.0);
+        }
+        // uResolve == 2u: denoise ON -> the separate filter pass writes g_out from g_accum + g_guide
     }
 }
 )";
@@ -899,11 +957,11 @@ bool DxrRenderer::build_scene(const std::vector<contracts::ResidentChunk>& chunk
     // Build the PT state object + SBT once (inline RayQuery, SM 6.5, raygen-only).
     if (!d.ptPso) {
         D3D12_DESCRIPTOR_RANGE prange{};
-        prange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; prange.NumDescriptors = 3; prange.BaseShaderRegister = 0;  // u0,u1,u2
+        prange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; prange.NumDescriptors = 4; prange.BaseShaderRegister = 0;  // u0,u1,u2,u3
         prange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
         D3D12_ROOT_PARAMETER prp[4]{};
         prp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        prp[0].Constants.Num32BitValues = 24; prp[0].Constants.ShaderRegister = 0;
+        prp[0].Constants.Num32BitValues = 28; prp[0].Constants.ShaderRegister = 0;
         prp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         prp[1].DescriptorTable.NumDescriptorRanges = 1; prp[1].DescriptorTable.pDescriptorRanges = &prange;
         prp[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; prp[2].Descriptor.ShaderRegister = 0;  // t0 = TLAS
@@ -1103,7 +1161,8 @@ bool DxrRenderer::render_scene(const contracts::CameraPose& cam) {
     return true;
 }
 
-bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t samples, uint32_t seed, bool reset) {
+bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t samples, uint32_t seed, bool reset,
+                                 bool denoise, uint32_t frame) {
     Impl& d = *impl_;
     if (!d.sceneReady || !d.ptPso || !d.shadeVb) { last_error_ = "pt scene not built"; return false; }
     if (samples == 0) samples = 1;
@@ -1118,47 +1177,55 @@ bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t sam
 
     auto setf = [](uint32_t* arr, int i, float f) { std::memcpy(&arr[i], &f, sizeof(float)); };
 
-    // Accumulate in batches of samples per dispatch (keeps each DispatchRays well
-    // under the GPU watchdog); the final batch resolves accum -> color + depth.
+    // Copy the resolved color (u0) into the readback buffer -- the last step of the resolve batch (denoise
+    // off) or of the filter pass (denoise on). Assumes d.list is open + the color is freshly written.
+    auto copy_color = [&]() {
+        const D3D12_RESOURCE_BARRIER toCopy = transition(d.uav.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        d.list->ResourceBarrier(1, &toCopy);
+        D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = d.readbackBuf.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = d.footprint;
+        D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = d.uav.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+        d.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        const D3D12_RESOURCE_BARRIER back = transition(d.uav.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        d.list->ResourceBarrier(1, &back);
+    };
+    auto bind_pt = [&](const uint32_t* c) {
+        ID3D12DescriptorHeap* heaps[] = { d.uavHeap.Get() };
+        d.list->SetDescriptorHeaps(1, heaps);
+        d.list->SetComputeRootSignature(d.ptRS.Get());
+        d.list->SetComputeRoot32BitConstants(0, 28, c, 0);
+        d.list->SetComputeRootDescriptorTable(1, d.uavHeap->GetGPUDescriptorHandleForHeapStart());
+        d.list->SetComputeRootShaderResourceView(2, d.tlas->GetGPUVirtualAddress());
+        d.list->SetComputeRootShaderResourceView(3, d.shadeVb->GetGPUVirtualAddress());
+        d.list->SetPipelineState1(d.ptPso.Get());
+    };
+    D3D12_DISPATCH_RAYS_DESC dr{};
+    dr.RayGenerationShaderRecord = { d.ptSbt->GetGPUVirtualAddress(), D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT };
+    dr.Width = d.width; dr.Height = d.height; dr.Depth = 1;
+
+    // Accumulate in batches of samples per dispatch (keeps each DispatchRays well under the GPU watchdog).
+    // The final batch resolves: depth + denoiser guide always; tonemap to color now only when denoise is OFF
+    // (uResolve 1). With denoise ON (uResolve 2) the separate filter pass below produces the color.
     const uint32_t kBatch = 64u;
     for (uint32_t start = 0; start < samples; start += kBatch) {
         const uint32_t count = (samples - start < kBatch) ? (samples - start) : kBatch;
         const bool resolve = (start + count >= samples);
 
-        uint32_t c[24] = {};
+        uint32_t c[28] = {};
         setf(c, 0, cam.pos[0]); setf(c, 1, cam.pos[1]); setf(c, 2, cam.pos[2]); setf(c, 3, std::tan(cam.fov_y * 0.5f));
         setf(c, 4, fwd.x);   setf(c, 5, fwd.y);   setf(c, 6, fwd.z);   setf(c, 7, cam.aspect);
         setf(c, 8, right.x); setf(c, 9, right.y); setf(c, 10, right.z); setf(c, 11, kSceneNear);
         setf(c, 12, up.x);   setf(c, 13, up.y);   setf(c, 14, up.z);   setf(c, 15, kSceneFar);
         c[16] = base + start; c[17] = count; c[18] = total; c[19] = seed;
-        c[20] = resolve ? 1u : 0u; setf(c, 21, kPtExposure);
+        c[20] = resolve ? (denoise ? 2u : 1u) : 0u; setf(c, 21, kPtExposure);
         setf(c, 22, static_cast<float>(d.width)); setf(c, 23, static_cast<float>(d.height));
+        c[24] = frame;  // uFrame: per-frame noise decorrelation (0 for the deterministic offline/golden path)
 
         if (FAILED(d.alloc->Reset())) { last_error_ = "pt alloc reset"; return false; }
         if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "pt list reset"; return false; }
-        ID3D12DescriptorHeap* heaps[] = { d.uavHeap.Get() };
-        d.list->SetDescriptorHeaps(1, heaps);
-        d.list->SetComputeRootSignature(d.ptRS.Get());
-        d.list->SetComputeRoot32BitConstants(0, 24, c, 0);
-        d.list->SetComputeRootDescriptorTable(1, d.uavHeap->GetGPUDescriptorHandleForHeapStart());
-        d.list->SetComputeRootShaderResourceView(2, d.tlas->GetGPUVirtualAddress());
-        d.list->SetComputeRootShaderResourceView(3, d.shadeVb->GetGPUVirtualAddress());
-        d.list->SetPipelineState1(d.ptPso.Get());
-
-        D3D12_DISPATCH_RAYS_DESC dr{};
-        dr.RayGenerationShaderRecord = { d.ptSbt->GetGPUVirtualAddress(), D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT };
-        dr.Width = d.width; dr.Height = d.height; dr.Depth = 1;
+        bind_pt(c);
         d.list->DispatchRays(&dr);
 
         if (resolve) {
-            const D3D12_RESOURCE_BARRIER toCopy = transition(d.uav.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            d.list->ResourceBarrier(1, &toCopy);
-            D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = d.readbackBuf.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = d.footprint;
-            D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = d.uav.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
-            d.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-            const D3D12_RESOURCE_BARRIER back = transition(d.uav.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            d.list->ResourceBarrier(1, &back);
-
             const D3D12_RESOURCE_BARRIER dToCopy = transition(d.depthTex.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
             d.list->ResourceBarrier(1, &dToCopy);
             D3D12_TEXTURE_COPY_LOCATION ddst{}; ddst.pResource = d.depthReadback.Get(); ddst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; ddst.PlacedFootprint = d.depthFootprint;
@@ -1166,6 +1233,7 @@ bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t sam
             d.list->CopyTextureRegion(&ddst, 0, 0, 0, &dsrc, nullptr);
             const D3D12_RESOURCE_BARRIER dBack = transition(d.depthTex.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             d.list->ResourceBarrier(1, &dBack);
+            if (!denoise) copy_color();   // denoise off: color is final here
         }
 
         if (FAILED(d.list->Close())) { last_error_ = "pt list close"; return false; }
@@ -1173,6 +1241,25 @@ bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t sam
         d.queue->ExecuteCommandLists(1, lists);
         d.wait_idle();
     }
+
+    if (denoise) {
+        // Edge-aware filter: read the accumulated radiance + the geometry guide, write the resolved color.
+        // The accumulate list already waited, so those writes are complete (no cross-list UAV barrier needed).
+        uint32_t c[28] = {};
+        c[18] = total; c[20] = 3u; setf(c, 21, kPtExposure);
+        setf(c, 22, static_cast<float>(d.width)); setf(c, 23, static_cast<float>(d.height));
+        c[24] = frame;
+        if (FAILED(d.alloc->Reset())) { last_error_ = "pt alloc reset (denoise)"; return false; }
+        if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "pt list reset (denoise)"; return false; }
+        bind_pt(c);
+        d.list->DispatchRays(&dr);
+        copy_color();
+        if (FAILED(d.list->Close())) { last_error_ = "pt denoise list close"; return false; }
+        ID3D12CommandList* lists[] = { d.list.Get() };
+        d.queue->ExecuteCommandLists(1, lists);
+        d.wait_idle();
+    }
+
     d.accumSamples = total;
     return true;
 }

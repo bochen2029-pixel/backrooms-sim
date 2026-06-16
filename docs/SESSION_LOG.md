@@ -140,6 +140,23 @@ counter + an M30 gate assertion: still mouse over ~160 Play frames → **0 curso
 by **direct measurement**, not a theory — and this time the root cause (`SetCursorPos` is the only cursor-mover)
 was unambiguous. Open: the operator's own feel-check (sensitivity) + the interactive alt-tab release.
 
+**Follow-up 10 — fix the noisy ray-traced mode: a procedural denoiser (ADR-068).** Operator: "the ray trace
+mode is horribly static noisy and unoptimized," pointing at their Buddhabrot projects where they "got some DLSS
+working." Fanned out 3 agents: (1) forensics — they never had DLSS; it was the **OptiX AI denoiser** (CUDA);
+(2) DXR diagnosis — the noise was **two bugs**: `reset=true` every frame (accumulator wiped to 4-spp-from-
+scratch, temporal integration disabled) + a **frozen RNG seed** (no per-frame term → identical grain); (3)
+research — real DLSS-RR ships ~40–90 MB proprietary DLLs (asset files, breaks the no-assets rule) vs from-scratch
+**SVGF** = ~90% quality, zero deps. Asked the operator; they chose **procedural**. **Built** a single-pass,
+multi-scale, edge-aware spatial denoiser into the existing PT pipeline (no new pipeline/SBT/deps): a guide
+G-buffer (world normal + view-Z, u3), an à-trous-style filter mode (`uResolve==3`) that blurs the radiance in
+linear space across dilations {1,2,4,8} px with depth+normal+luminance edge-stopping, gated `denoise=true`
+interactive-only + a per-frame `uFrame` seed decorrelation. The **offline goldens keep denoise off + uFrame 0 →
+bit-identical** (`diff_vs_golden=0.000000`). New headless `--dxr-denoise` measures error vs a high-spp ground
+truth and is now an **M9 gate assertion**: 4-spp error **12.7 → 4.60, ratio 0.36 (~64% noise cut)**, debug-clean
+— so it provably denoises, not just blurs. Negligible cost (interactive PT still 170 FPS). Before/after PNGs
+sent to the operator; fresh exe delivered. ctest 100/100, gate M9 green. Future levers (lower spp for FPS, full
+SVGF temporal, albedo demodulation) deferred — this v1 fixes the complaint.
+
 ---
 
 ## Session 32 — M30 polish ×3: live descent + deep-descent soak + draft telegraph  ✅ — `gate M30` green; model-free Phase IV EXHAUSTED
