@@ -175,9 +175,14 @@ the shipped tree points back.
   the VRAM cliff).
 
 ## 10. Open decisions for the operator
-1. **Model:** 9B-Q5+vision only (headline, ~8.3 GB, 12 GB-VRAM floor) · 4B text-only (~3.8 GB, runs on 8 GB, **no
-   vision**) · **both tiers auto-selected** (~10.8 GB, best reach)? *(Vision Director needs a VL model — see the
-   TODO_director_vision note.)*
+1. **Model: DECIDED — both tiers, auto-select by VRAM** (operator, 2026-06-16). Bundle a 4B tier (≤8 GB cards)
+   and the 9B-Q5 tier (≥12 GB), pick at launch from detected VRAM (and budget ~1–2 GB for the renderer on the
+   same GPU). **Implication:** to keep the **vision** Director on the 8 GB tier, the 4B must be a **Qwen-VL** GGUF
+   *with* an mmproj — the dev box only has a 9B mmproj, so the packaging step must fetch a **Qwen3-VL-4B**
+   (Apache-2.0) + its mmproj (the dev fetch is fine; *users* still download nothing). If we accept text-only on
+   the small tier, skip the 4B mmproj. **Sub-decision needed:** vision-on-4B (fetch Qwen3-VL-4B+mmproj) vs
+   text-only-4B. Bundle ≈ 10.8 GB (9B-Q5 6.13 + mmproj 0.86 + 4B-Q4 ~2.5 + 4B-mmproj ~0.7 + runtime ~1.3 + whisper
+   0.14).
 2. **whisper model:** `base.en` (140 MB, recommended) vs `small.en` (466 MB, more accurate) vs the current
    large-v3-turbo (1.5 GB, overkill)?
 3. **keel.lock:** confirm a probe-only/relative lock works, or have the operator regenerate a clean release
