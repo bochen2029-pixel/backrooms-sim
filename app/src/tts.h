@@ -166,45 +166,96 @@ inline const std::vector<Ph>* lexicon_lookup(const std::string& w) {
         {"SEVEN",       {Ph::S, Ph::EH, Ph::V, Ph::AH, Ph::N}},
         {"EIGHT",       {Ph::EY, Ph::T}},
         {"NINE",        {Ph::N, Ph::AY, Ph::N}},
+        // common function words the letter-rules get WRONG (irregular spelling-to-sound)
+        {"A",   {Ph::AH}},                  {"I",    {Ph::AY}},
+        {"AN",  {Ph::AE, Ph::N}},           {"AND",  {Ph::AE, Ph::N, Ph::D}},
+        {"OF",  {Ph::AH, Ph::V}},           {"TO",   {Ph::T, Ph::UW}},
+        {"IN",  {Ph::IH, Ph::N}},           {"IT",   {Ph::IH, Ph::T}},
+        {"AT",  {Ph::AE, Ph::T}},           {"ON",   {Ph::AA, Ph::N}},
+        {"OR",  {Ph::AO, Ph::R}},           {"AS",   {Ph::AE, Ph::Z}},
+        {"ARE", {Ph::AA, Ph::R}},           {"FOR",  {Ph::F, Ph::AO, Ph::R}},
+        {"YOU", {Ph::Y, Ph::UW}},           {"YOUR", {Ph::Y, Ph::AO, Ph::R}},
+        {"ALL", {Ph::AO, Ph::L}},           {"OUT",  {Ph::AW, Ph::T}},
+        {"NOW", {Ph::N, Ph::AW}},           {"NO",   {Ph::N, Ph::OW}},
+        {"GO",  {Ph::G, Ph::OW}},           {"SO",   {Ph::S, Ph::OW}},
+        {"WE",  {Ph::W, Ph::IY}},           {"BE",   {Ph::B, Ph::IY}},
+        {"HE",  {Ph::HH, Ph::IY}},          {"MY",   {Ph::M, Ph::AY}},
+        {"BY",  {Ph::B, Ph::AY}},           {"HERE", {Ph::HH, Ph::IY, Ph::R}},
+        {"THERE", {Ph::DH, Ph::EH, Ph::R}}, {"INTO", {Ph::IH, Ph::N, Ph::T, Ph::UW}},
+        // signature Backrooms-PA words (tricky spelling -> pinned for clarity)
+        {"LIGHT",  {Ph::L, Ph::AY, Ph::T}},               {"LIGHTS", {Ph::L, Ph::AY, Ph::T, Ph::S}},
+        {"HUM",    {Ph::HH, Ph::AH, Ph::M}},              {"HUMMING", {Ph::HH, Ph::AH, Ph::M, Ph::IH, Ph::NG}},
+        {"FLICKER", {Ph::F, Ph::L, Ph::IH, Ph::K, Ph::ER}}, {"BUZZ", {Ph::B, Ph::AH, Ph::Z}},
+        {"FLUORESCENT", {Ph::F, Ph::L, Ph::AO, Ph::R, Ph::EH, Ph::S, Ph::AH, Ph::N, Ph::T}},
+        {"ENDLESS", {Ph::EH, Ph::N, Ph::D, Ph::L, Ph::AH, Ph::S}}, {"EMPTY", {Ph::EH, Ph::M, Ph::P, Ph::T, Ph::IY}},
+        {"YELLOW", {Ph::Y, Ph::EH, Ph::L, Ph::OW}},       {"ROWS", {Ph::R, Ph::OW, Ph::Z}},
+        {"ROOMS",  {Ph::R, Ph::UW, Ph::M, Ph::Z}},        {"GROWS", {Ph::G, Ph::R, Ph::OW, Ph::Z}},
+        {"SILENCE", {Ph::S, Ph::AY, Ph::L, Ph::AH, Ph::N, Ph::S}}, {"DISTANT", {Ph::D, Ph::IH, Ph::S, Ph::T, Ph::AH, Ph::N, Ph::T}},
+        {"WALLS",  {Ph::W, Ph::AO, Ph::L, Ph::Z}},        {"HALLS", {Ph::HH, Ph::AO, Ph::L, Ph::Z}},
+        {"CARPET", {Ph::K, Ph::AA, Ph::R, Ph::P, Ph::AH, Ph::T}}, {"WALL", {Ph::W, Ph::AO, Ph::L}},
     };
     auto it = kLex.find(w);
     return it == kLex.end() ? nullptr : &it->second;
 }
 
-// Crude single-letter fallback for words not in the lexicon (approximate, but keeps the
-// synth speaking rather than silent on unexpected Director text).
+// Rule-based grapheme-to-phoneme for words not in the lexicon. Left-to-right, consuming common digraphs and
+// clusters first (sh/ch/th/ph/ck/qu, ee/oo/ou/ow/ai/oa/..., ar/er/or), applying soft c/g, r-controlled vowels,
+// silent final-e, and collapsing doubled consonants. Far more word-like than one-phoneme-per-letter (which
+// spelled words out and was nearly unintelligible). Approximate -- not a dictionary -- but legible by ear.
 inline void letters_to_phonemes(const std::string& w, std::vector<Ph>& out) {
-    for (size_t i = 0; i < w.size(); ++i) {
-        const char c = w[i];
+    const size_t n = w.size();
+    auto at = [&](size_t i) -> char { return i < n ? w[i] : '\0'; };
+    auto vowel = [](char c) { return c=='A'||c=='E'||c=='I'||c=='O'||c=='U'||c=='Y'; };
+    for (size_t i = 0; i < n; ) {
+        const char c = w[i], c1 = at(i + 1), c2 = at(i + 2);
+        // consonant digraphs
+        if (c=='S' && c1=='H') { out.push_back(Ph::SH); i += 2; continue; }
+        if (c=='C' && c1=='H') { out.push_back(Ph::CH); i += 2; continue; }
+        if (c=='T' && c1=='H') { out.push_back(Ph::TH); i += 2; continue; }
+        if (c=='P' && c1=='H') { out.push_back(Ph::F);  i += 2; continue; }
+        if (c=='W' && c1=='H') { out.push_back(Ph::W);  i += 2; continue; }
+        if (c=='C' && c1=='K') { out.push_back(Ph::K);  i += 2; continue; }
+        if (c=='Q' && c1=='U') { out.push_back(Ph::K); out.push_back(Ph::W); i += 2; continue; }
+        if (c=='N' && c1=='G' && !vowel(c2)) { out.push_back(Ph::NG); i += 2; continue; }
+        if (c=='G' && c1=='H') { i += 2; continue; }                 // usually silent (light, though)
+        // vowel digraphs
+        if (c=='E' && (c1=='E'||c1=='A')) { out.push_back(Ph::IY); i += 2; continue; }
+        if (c=='O' && c1=='O') { out.push_back(Ph::UW); i += 2; continue; }
+        if (c=='O' && c1=='U') { out.push_back(Ph::AW); i += 2; continue; }
+        if (c=='O' && (c1=='W'||c1=='A')) { out.push_back(Ph::OW); i += 2; continue; }
+        if (c=='A' && (c1=='I'||c1=='Y')) { out.push_back(Ph::EY); i += 2; continue; }
+        if (c=='A' && (c1=='U'||c1=='W')) { out.push_back(Ph::AO); i += 2; continue; }
+        if (c=='E' && c1=='W') { out.push_back(Ph::UW); i += 2; continue; }
+        if (c=='O' && (c1=='I'||c1=='Y')) { out.push_back(Ph::OY); i += 2; continue; }
+        if (c=='I' && c1=='E') { out.push_back(Ph::IY); i += 2; continue; }
+        // r-controlled vowels
+        if (c=='A' && c1=='R') { out.push_back(Ph::AA); out.push_back(Ph::R); i += 2; continue; }
+        if ((c=='E'||c=='I'||c=='U') && c1=='R') { out.push_back(Ph::ER); i += 2; continue; }
+        if (c=='O' && c1=='R') { out.push_back(Ph::AO); out.push_back(Ph::R); i += 2; continue; }
+        // single letters
         switch (c) {
             case 'A': out.push_back(Ph::AE); break;
-            case 'B': out.push_back(Ph::B); break;
-            case 'C': out.push_back(Ph::K); break;
-            case 'D': out.push_back(Ph::D); break;
-            case 'E': out.push_back(Ph::EH); break;
-            case 'F': out.push_back(Ph::F); break;
-            case 'G': out.push_back(Ph::G); break;
-            case 'H': out.push_back(Ph::HH); break;
+            case 'E': if (!(i == n - 1 && i >= 2 && !vowel(w[i-1]))) out.push_back(Ph::EH); break;  // silent final-e
             case 'I': out.push_back(Ph::IH); break;
-            case 'J': out.push_back(Ph::JH); break;
-            case 'K': out.push_back(Ph::K); break;
-            case 'L': out.push_back(Ph::L); break;
-            case 'M': out.push_back(Ph::M); break;
-            case 'N': out.push_back(Ph::N); break;
-            case 'O': out.push_back(Ph::OW); break;
-            case 'P': out.push_back(Ph::P); break;
-            case 'Q': out.push_back(Ph::K); break;
-            case 'R': out.push_back(Ph::R); break;
-            case 'S': out.push_back(Ph::S); break;
-            case 'T': out.push_back(Ph::T); break;
+            case 'O': out.push_back(Ph::AA); break;
             case 'U': out.push_back(Ph::AH); break;
-            case 'V': out.push_back(Ph::V); break;
-            case 'W': out.push_back(Ph::W); break;
+            case 'Y': out.push_back(i == 0 ? Ph::Y : Ph::IY); break;
+            case 'C': out.push_back((c1=='E'||c1=='I'||c1=='Y') ? Ph::S : Ph::K); break;  // soft c
+            case 'G': out.push_back((c1=='E'||c1=='I'||c1=='Y') ? Ph::JH : Ph::G); break; // soft g
             case 'X': out.push_back(Ph::K); out.push_back(Ph::S); break;
-            case 'Y': out.push_back(Ph::IY); break;
+            case 'B': out.push_back(Ph::B); break;  case 'D': out.push_back(Ph::D); break;
+            case 'F': out.push_back(Ph::F); break;  case 'H': out.push_back(Ph::HH); break;
+            case 'J': out.push_back(Ph::JH); break; case 'K': out.push_back(Ph::K); break;
+            case 'L': out.push_back(Ph::L); break;  case 'M': out.push_back(Ph::M); break;
+            case 'N': out.push_back(Ph::N); break;  case 'P': out.push_back(Ph::P); break;
+            case 'Q': out.push_back(Ph::K); break;  case 'R': out.push_back(Ph::R); break;
+            case 'S': out.push_back(Ph::S); break;  case 'T': out.push_back(Ph::T); break;
+            case 'V': out.push_back(Ph::V); break;  case 'W': out.push_back(Ph::W); break;
             case 'Z': out.push_back(Ph::Z); break;
             default: break;
         }
+        if (!vowel(c) && c1 == c) ++i;   // collapse a doubled consonant (LL, TT, SS -> one sound)
+        ++i;
     }
 }
 
@@ -234,6 +285,7 @@ inline std::vector<Ph> text_to_phonemes(const std::string& text) {
 // whisper hears SPEECH, not a sung monotone (a flat buzz reads as music).
 inline std::vector<int16_t> synthesize_phonemes(const std::vector<Ph>& ph, uint32_t sr) {
     const float base_f0 = 105.0f;           // glottal pitch (Hz) — deep
+    const float kRate = 1.22f;              // stretch every phoneme — a slower PA delivery reads far clearer
     Reson r1, r2, r3;
     Noise noise(0xA11CE5u);
     std::vector<float> buf;
@@ -245,14 +297,14 @@ inline std::vector<int16_t> synthesize_phonemes(const std::vector<Ph>& ph, uint3
 
     // Total voiced/spoken length, for the declination contour (pitch falls across the line).
     uint32_t total_n = 0;
-    for (Ph p : ph) total_n += static_cast<uint32_t>(spec_of(p).dur * sr);
+    for (Ph p : ph) total_n += static_cast<uint32_t>(spec_of(p).dur * kRate * sr);
     if (total_n == 0) total_n = 1;
     uint32_t total_i = 0;
 
     for (size_t pi = 0; pi < ph.size(); ++pi) {
         const Ph p = ph[pi];
         const Spec& s = spec_of(p);
-        const uint32_t n = static_cast<uint32_t>(s.dur * sr);
+        const uint32_t n = static_cast<uint32_t>(s.dur * kRate * sr);
         float end_f1 = s.f1, end_f2 = s.f2, end_f3 = s.f3;
         diphthong_end(p, end_f1, end_f2, end_f3);
         const uint32_t closure = s.stop ? static_cast<uint32_t>(0.045f * sr) : 0u;  // stop silence

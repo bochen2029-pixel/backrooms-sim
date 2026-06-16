@@ -187,6 +187,17 @@ look → `max_dyaw` tripped the old `<0.05` gate (flaky on an interactive machin
 `clamped_frac ≥ 0.5`. Robust to real input, still catches a sustained self-spin. gate M30 green, ctest 100/100,
 fresh exe delivered. Determinism untouched (Director output never re-enters the sim).
 
+**Follow-up 13 — make the PA voice legible (ADR-071).** Operator: "I can hear it but can't decipher what it's
+saying." The M24 formant synth had a ~30-word PA phrasebook; the Director's free LLM prose missed it and hit the
+crude one-phoneme-per-letter fallback → garble. Operator chose to **improve the procedural synth** (keep the
+robot, not Windows TTS). In `app/tts.h`: replaced `letters_to_phonemes` with a **rule-based G2P** (digraphs
+sh/ch/th/ee/oo/…, soft c/g, r-controlled vowels, silent-e, doubled-consonant collapse), added ~45 irregular
+function words + signature Backrooms words to the lexicon, and slowed delivery 1.22×. Measured via the M24
+whisper round-trip (`--tts-check`): "HUMMING FLUORESCENT LIGHTS FLICKER IN THE ENDLESS ROWS" 3/7 → 5/7
+("inflorescent lifts"→"fluorescent lights"); "EVACUATE SECTOR FIVE…BREACH IS SPREADING" → whisper hears
+"Evacuate sector 5 the containment breach is creating" (5/7). ctest 100/100 (TTS tests intact), pure +
+deterministic + asset-free, fresh exe delivered, sample WAV sent.
+
 ---
 
 ## Session 32 — M30 polish ×3: live descent + deep-descent soak + draft telegraph  ✅ — `gate M30` green; model-free Phase IV EXHAUSTED
