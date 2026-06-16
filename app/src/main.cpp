@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <timeapi.h>
 #include <xinput.h>
+#include <mmsystem.h>   // PlaySound -> the Director's procedural PA voice (winmm)
 
 #include <algorithm>
 #include <atomic>
@@ -504,6 +505,29 @@ void apply_organic_bob(contracts::CameraPose& cam, const br::core::WorldState& s
 // same) so the interactive --play / --game loops can resolve the KEEL host:port for the
 // M21b live brain without duplicating the scheme/path-stripping logic.
 namespace { void parse_host_port(const std::string& url, std::string& host, int& port); }
+
+// Speak a line through the procedural PA VOICE (M24 formant TTS) on the default device -- async + non-blocking,
+// so the player HEARS the Director's narration as intercom words. Presentation only (no sim state -> INV-1
+// untouched). A fresh line replaces any still-playing one (PA lines are spaced seconds apart). winmm's
+// PlaySound keeps it dead simple -- no real-time mixer surgery; it layers over the game audio like a loudspeaker.
+static void speak_pa(const std::string& text, uint32_t sr) {
+    const std::vector<int16_t> pcm = br::app::synthesize_speech(text, sr);
+    if (pcm.empty()) return;
+    const uint32_t dataBytes = static_cast<uint32_t>(pcm.size() * sizeof(int16_t));
+    std::vector<uint8_t> wav; wav.reserve(44 + dataBytes);
+    auto put32 = [&](uint32_t v){ wav.push_back(uint8_t(v)); wav.push_back(uint8_t(v >> 8)); wav.push_back(uint8_t(v >> 16)); wav.push_back(uint8_t(v >> 24)); };
+    auto put16 = [&](uint16_t v){ wav.push_back(uint8_t(v)); wav.push_back(uint8_t(v >> 8)); };
+    auto tag = [&](const char* t){ wav.insert(wav.end(), t, t + 4); };
+    tag("RIFF"); put32(36 + dataBytes); tag("WAVE");
+    tag("fmt "); put32(16); put16(1); put16(1); put32(sr); put32(sr * 2u); put16(2); put16(16);   // PCM16 mono
+    tag("data"); put32(dataBytes);
+    const uint8_t* pb = reinterpret_cast<const uint8_t*>(pcm.data());
+    wav.insert(wav.end(), pb, pb + dataBytes);
+    static std::vector<uint8_t> g_pa;   // must outlive async playback -> kept until the next line replaces it
+    PlaySoundW(nullptr, nullptr, SND_PURGE);   // stop/release any still-playing line first
+    g_pa = std::move(wav);
+    PlaySoundW(reinterpret_cast<LPCWSTR>(g_pa.data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+}
 
 // Best-effort: launch the operator's KEEL sidecar (the creature's LLM at :7071) so the game lights up
 // the brain on its own, instead of needing a manual start. Silent + non-blocking + fire-once: if the
@@ -1118,7 +1142,7 @@ int run_game(const Options& o) {
     app::MenuModel model;
     model.seed = cfg.seed;
     model.settings.master_pct = cfg.master; model.settings.sfx_pct = cfg.sfx;
-    model.settings.mouse_pct = cfg.mouse; model.settings.director = cfg.director;
+    model.settings.mouse_pct = cfg.mouse; model.settings.director = (cfg.director || o.director) ? 1 : 0;  // --director forces on
     model.settings.rt = o.rt ? 1 : cfg.renderer;  // M19: --rt forces on; else from config
     model.settings.res_w = cfg.width; model.settings.res_h = cfg.height;  // the in-menu resolution picker
 
@@ -1202,10 +1226,19 @@ int run_game(const Options& o) {
     uint64_t brain_intents = 0;
     LlmProbe llmProbe;   // Settings "Test Connection" -> async LLM ping (status shown in the Settings overlay)
 
+    // Director (M11) narration: when Director is ON, ask the LLM (off the frame thread) for a Directive every
+    // ~18 s and SPEAK its caption through the procedural PA voice -- narration you HEAR while you walk. Created
+    // lazily on first Play frame with Director on; graceful no-op if the sidecar is down.
+    std::unique_ptr<br::director::DirectorHost> director;
+    const auto director_interval = milliseconds(18000);
+    auto last_director = t_start - director_interval;   // fire the first line promptly
+    std::string last_pa_line;
+    uint64_t director_spoke = 0;
+
     // Headless spin guard (--auto-play): drop straight into Play and watch the mouse-look delta with a
     // STILL mouse. Raw input emits nothing when the mouse is idle, so the delta must stay ~0 rad/frame; the
     // old cursor-recenter scheme pinned it at the ±0.5 clamp. Lets the build verify "no runaway spin" headless.
-    float maxDyaw = 0.0f; uint64_t lookFrames = 0;
+    float maxDyaw = 0.0f; uint64_t lookFrames = 0, clampedFrames = 0;
     const long warps0 = g_cursorWarps;   // baseline: count SetCursorPos warps DURING this Play session (must stay tiny)
     if (o.auto_play) {
         start_session(model.seed);
@@ -1305,7 +1338,7 @@ int run_game(const Options& o) {
             if (firstPlayLook) { look_yaw = 0.0f; look_pitch = 0.0f; firstPlayLook = false; }
             look_yaw = clampf(look_yaw, -0.5f, 0.5f);
             look_pitch = clampf(look_pitch, -0.5f, 0.5f);
-            if (o.auto_play) { const float a = std::fabs(look_yaw); if (a > maxDyaw) maxDyaw = a; ++lookFrames; }  // spin guard: measure BEFORE the focus gate
+            if (o.auto_play) { const float a = std::fabs(look_yaw); if (a > maxDyaw) maxDyaw = a; if (a >= 0.49f) ++clampedFrames; ++lookFrames; }  // spin guard: measure BEFORE the focus gate
             contracts::InputCommand in{};
             if (focused) {   // ignore Play input while alt-tabbed -- a normal game doesn't walk/look in the background
                 if (GetAsyncKeyState('W') & 0x8000) in.move_z += 1.0f;
@@ -1338,6 +1371,33 @@ int run_game(const Options& o) {
                     last_brain = now;
                 }
                 for (const app::ShoggothIntent& it : brain->poll()) { shog.intent = it; ++brain_intents; }
+            }
+            // Director (M11): when Director is ON, ask the LLM (off-thread) for a Directive and SPEAK its caption
+            // via the procedural PA voice -- the narration you HEAR while you walk. Presentation only (INV-1 safe).
+            if (model.settings.director) {
+                if (!director) {
+                    try_start_sidecar();
+                    std::string dh; int dp; parse_host_port(o.director_url, dh, dp);
+                    director = std::make_unique<br::director::DirectorHost>(dh, dp);
+                }
+                if (now - last_director >= director_interval) {
+                    contracts::WandererSummary sum{};   // same shape as build_summary (which lives in a later anon ns)
+                    sum.tick = s.tick; sum.world_seed = model.seed; sum.level = contracts::level_from_y(s.wanderer.pos.y);
+                    const contracts::ChunkKey kk = contracts::chunk_key_at(sum.level, s.wanderer.pos.x, s.wanderer.pos.z);
+                    sum.chunk_cx = kk.cx; sum.chunk_cz = kk.cz;
+                    sum.biome = static_cast<int32_t>(br::gen::biome_at(model.seed, 0, kk.cx, kk.cz));
+                    sum.distance_m = s.odometer; sum.dwell_seconds = 0.0f; sum.route_loops = 0;
+                    sum.location_hash = static_cast<uint64_t>(kk.cx) * 0x9E3779B97F4A7C15ull ^ static_cast<uint64_t>(kk.cz);
+                    director->submit(sum);
+                    last_director = now;
+                }
+                for (const contracts::Directive& d : director->poll()) {
+                    if (d.caption[0] != '\0' && last_pa_line != d.caption) {
+                        last_pa_line = d.caption;
+                        if (audioOn) speak_pa(d.caption, contracts::kAudioSampleRate);
+                        ++director_spoke;
+                    }
+                }
             }
             if (audioOn) {
                 const uint64_t steps = footstep_count(s);
@@ -1419,18 +1479,28 @@ int run_game(const Options& o) {
     std::printf("audio_underruns: %llu\n", underruns);
     const unsigned long long brain_req = brain ? brain->requests() : 0ull;
     brain.reset();  // M21b: join the worker thread before exit
+    const unsigned long long dir_req = director ? director->requests() : 0ull;
+    const unsigned long long dir_prod = director ? director->produced() : 0ull;
+    director.reset();  // join the Director worker thread before exit
+    PlaySoundW(nullptr, nullptr, SND_PURGE);  // stop any PA line still playing
     std::printf("brain_intents: %llu\n", static_cast<unsigned long long>(brain_intents));
     std::printf("brain_requests: %llu\n", brain_req);
+    std::printf("director_spoke: %llu\n", static_cast<unsigned long long>(director_spoke));
+    std::printf("director_requests: %llu\n", dir_req);
+    std::printf("director_produced: %llu\n", static_cast<unsigned long long>(dir_prod));
     std::printf("debug_error_count: %u\n", dbg);
     if (o.auto_play) {
-        // Two guards over a whole still-mouse Play session:
-        //  (1) the view must not rotate -- raw input emits nothing when idle (~0); the old cursor scheme pinned
-        //      every frame at the 0.5 clamp. (2) we must barely WARP the cursor -- a one-time park on capture is
-        //      fine, but a per-frame SetCursorPos is the "my cursor fights me" bug (it'd be ~1 warp per frame).
+        // Two guards over a Play session. (1) The view must not SELF-spin: the old bug pinned look at the +-0.5
+        // clamp EVERY frame, so the spin signature is "almost all frames clamped". We measure the CLAMPED
+        // FRACTION (robust to a real mouse twitch on an interactive desktop -- a twitch clamps a few frames, a
+        // spin clamps ~all); max_dyaw is reported for info only. (2) We must barely WARP the cursor -- a per-frame
+        // SetCursorPos is the "cursor fights me" bug (it'd be ~1 warp per frame); ~1 is expected (the capture park).
         const long warps = g_cursorWarps - warps0;
-        const bool spin_ok = (maxDyaw < 0.05f) && (lookFrames > 0);
-        const bool nofight_ok = (warps < 10);   // ~1 expected (the capture park); per-frame warping would be ~lookFrames
+        const double clamped_frac = (lookFrames > 0) ? static_cast<double>(clampedFrames) / static_cast<double>(lookFrames) : 0.0;
+        const bool spin_ok = (lookFrames > 0) && (clamped_frac < 0.5);   // a real spin is ~1.0; idle/twitchy is ~0
+        const bool nofight_ok = (warps < 10);
         std::printf("lookcheck_max_dyaw: %.5f\n", static_cast<double>(maxDyaw));
+        std::printf("lookcheck_clamped_frac: %.3f\n", clamped_frac);
         std::printf("lookcheck_frames: %llu\n", static_cast<unsigned long long>(lookFrames));
         std::printf("lookcheck_cursor_warps: %ld\n", warps);
         std::printf("lookcheck: %s\n", (spin_ok && nofight_ok) ? "PASS" : "FAIL");

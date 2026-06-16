@@ -174,6 +174,19 @@ renders all 8 rows. ctest 100/100, build clean, fresh exe delivered. **Still ope
 NARRATE during Play (run_game runs no DirectorHost + composites no HUD in Play) — needs an operator call on
 subtitle (enable post) vs PA-voice (route M24 TTS to the mixer); presented as the next step.
 
+**Follow-up 12 — Director narrates in Play via the PA voice (ADR-070).** Operator picked **PA voice** for the
+open fork. Wired a `DirectorHost` into `run_game`: Director ON → every ~18 s submit a WandererSummary off-thread,
+poll the validated Directives, and SPEAK each caption through the M24 procedural TTS (`synthesize_speech` →
+in-memory WAV → `PlaySound(SND_MEMORY|SND_ASYNC)`). Audio-only (operator declined the subtitle path's VHS-post
+visual change). **Verified live** (model loaded): `--game --auto-play --director` 45 s → `requests 3, produced 3,
+spoke 2` — real LLM lines spoken ("HUMMING FLUORESCENT LIGHTS FLICKER..."); ~2/3 of directives carry a caption
+(intercom/note always; flicker/sound/biome_bias optionally) → a line every ~18-36 s. **Also hardened the
+`--auto-play` spin guard:** on the live desktop, once the window captures focus a *real* mouse twitch fed raw
+look → `max_dyaw` tripped the old `<0.05` gate (flaky on an interactive machine). Switched to the spin SIGNATURE
+— the **clamped fraction** (frames pinned at the ±0.5 clamp): a real spin ≈ 1.0, a twitch ≈ 0; gate fails at
+`clamped_frac ≥ 0.5`. Robust to real input, still catches a sustained self-spin. gate M30 green, ctest 100/100,
+fresh exe delivered. Determinism untouched (Director output never re-enters the sim).
+
 ---
 
 ## Session 32 — M30 polish ×3: live descent + deep-descent soak + draft telegraph  ✅ — `gate M30` green; model-free Phase IV EXHAUSTED

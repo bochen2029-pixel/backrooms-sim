@@ -2948,13 +2948,16 @@ function Invoke-GateM30 {
     Assert-Gate 'game mouse-look: no self-spin AND no cursor-fight (raw input; still mouse -> ~0 yaw, ~0 warps)' {
         $r = Invoke-AppCapture @('--game', '--auto-play', '--seconds', '2', '--no-audio', '--no-shoggoth-brain')
         if ($r.Exit -ne 0) { throw "auto-play exited $($r.Exit) (non-zero => lookcheck FAIL: the view spins or the cursor is warped per-frame): $($r.Out)" }
-        $dy = Get-MetricFloat $r.Out 'lookcheck_max_dyaw'
-        if ($dy -ge 0.05) { throw "lookcheck_max_dyaw $dy >= 0.05 -- a still mouse rotates the view (the spin bug): $($r.Out)" }
+        # The spin SIGNATURE is "almost every frame pinned at the look clamp"; measure the clamped fraction
+        # (robust to a stray real-mouse twitch on an interactive desktop -- a twitch clamps a few frames, a spin
+        # clamps ~all). max_dyaw is informational only (a single real flick can exceed 0.05 without it being a spin).
+        $cf = Get-MetricFloat $r.Out 'lookcheck_clamped_frac'
+        if ($cf -ge 0.5) { throw "lookcheck_clamped_frac $cf >= 0.5 -- most frames pinned at the look clamp (the self-spin bug): $($r.Out)" }
         $lf = Get-Metric $r.Out 'lookcheck_frames'
         if ($lf -lt 30) { throw "only $lf Play frames measured -- --auto-play did not actually enter Play: $($r.Out)" }
         $cw = Get-Metric $r.Out 'lookcheck_cursor_warps'
         if ($cw -ge 10) { throw "lookcheck_cursor_warps $cw >= 10 over $lf frames -- the loop warps the cursor per-frame (the 'cursor fights me' bug): $($r.Out)" }
-        Write-Note "game mouse-look: $lf Play frames, STILL mouse -> max yaw drift $dy rad/frame (~0, no spin) and $cw cursor warps (~0, no per-frame SetCursorPos fight) -- raw WM_INPUT look"
+        Write-Note "game mouse-look: $lf Play frames -> clamped-frac $cf (~0, no self-spin) and $cw cursor warps (~0, no per-frame SetCursorPos fight) -- raw WM_INPUT look"
     }
 
     # The abyss renders: look DOWN a shaft with a band of floors resident -> the depths show through
