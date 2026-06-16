@@ -316,6 +316,11 @@ static void accumulate_raw_mouse(const MSG& msg, long& dx, long& dy) {
     if (msg.message == WM_INPUT) read_raw_mouse_delta(msg.lParam, dx, dy);
 }
 
+// Regression telemetry: every time we WARP the OS cursor (SetCursorPos), bump this. With raw-input look, a
+// warp should be RARE (a one-time park when capture begins), NEVER per-frame -- a per-frame warp is exactly
+// the "my cursor fights me" bug. The --auto-play guard asserts this stays tiny over a whole Play session.
+static long g_cursorWarps = 0;
+
 // Screensaver window. As a screensaver, ANY key / click / wheel / app-deactivation ends it (the .scr
 // contract) -- EXCEPT SPACE, which drops into a playable WASD walk (g_scrPlay). Once playing, keys +
 // clicks are game input (the loop reads them via GetAsyncKeyState), so they no longer exit; ESC exits.
@@ -607,7 +612,7 @@ int run_play(const Options& o) {
     const float kSens = 0.0022f;  // mouse radians/pixel
     ShowCursor(FALSE);
     POINT ctr{ static_cast<LONG>(o.width / 2), static_cast<LONG>(o.height / 2) };
-    auto recenter = [&]() { POINT p = ctr; ClientToScreen(hwnd, &p); SetCursorPos(p.x, p.y); };
+    auto recenter = [&]() { POINT p = ctr; ClientToScreen(hwnd, &p); SetCursorPos(p.x, p.y); ++g_cursorWarps; };
     recenter();
     long rawDX = 0, rawDY = 0;   // relative mouse delta this frame (WM_INPUT) -- look without cursor-position spin
 
@@ -667,7 +672,7 @@ int run_play(const Options& o) {
         const float look_yaw = static_cast<float>(rawDX) * kSens;
         const float look_pitch = -static_cast<float>(rawDY) * kSens;
         rawDX = 0; rawDY = 0;
-        recenter();
+        // (no per-frame SetCursorPos: raw input doesn't read cursor position, so warping it only fights the user)
 
         const auto now = steady_clock::now();
         const double frame_ms = duration<double, std::milli>(now - prev).count();
@@ -1082,7 +1087,7 @@ int run_game(const Options& o) {
     // First-person look comes from raw WM_INPUT deltas (rawDX/rawDY) accumulated in the message pump. The
     // cursor is hidden + clipped to the window while playing; recenter() just parks it, but the LOOK no
     // longer depends on its position -- so a parked/warped/edge-clamped cursor can't spin the view.
-    auto recenter = [&]() { POINT p{ static_cast<LONG>(curW / 2), static_cast<LONG>(curH / 2) }; ClientToScreen(hwnd, &p); SetCursorPos(p.x, p.y); };
+    auto recenter = [&]() { POINT p{ static_cast<LONG>(curW / 2), static_cast<LONG>(curH / 2) }; ClientToScreen(hwnd, &p); SetCursorPos(p.x, p.y); ++g_cursorWarps; };
     auto clip_to_window = [&](bool on) {
         if (!on) { ClipCursor(nullptr); return; }
         RECT rc; if (!GetClientRect(hwnd, &rc)) return;
@@ -1130,6 +1135,7 @@ int run_game(const Options& o) {
     // STILL mouse. Raw input emits nothing when the mouse is idle, so the delta must stay ~0 rad/frame; the
     // old cursor-recenter scheme pinned it at the ±0.5 clamp. Lets the build verify "no runaway spin" headless.
     float maxDyaw = 0.0f; uint64_t lookFrames = 0;
+    const long warps0 = g_cursorWarps;   // baseline: count SetCursorPos warps DURING this Play session (must stay tiny)
     if (o.auto_play) {
         start_session(model.seed);
         shog = app::Shoggoth{};
@@ -1148,8 +1154,14 @@ int run_game(const Options& o) {
         if (timed && steady_clock::now() >= t_start + seconds(static_cast<long long>(o.seconds))) break;
 
         const bool inPlay = (model.screen == app::Screen::Play);
-        if (inPlay && !cursorHidden) { ShowCursor(FALSE); recenter(); clip_to_window(true); rawDX = rawDY = 0; cursorHidden = true; firstPlayLook = true; }
-        if (!inPlay && cursorHidden) { ShowCursor(TRUE); clip_to_window(false); cursorHidden = false; }
+        const bool focused = (GetForegroundWindow() == hwnd);   // capture + Play input ONLY while we are foreground
+        const bool wantCapture = inPlay && focused;
+        // Capture is strictly EDGE-PAIRED -- ShowCursor keeps a SIGNED counter, so it must never be called
+        // unbalanced (else the cursor strands visible/hidden). Hide+clip on gaining capture, show+release on
+        // losing it (alt-tab releases instantly -> the cursor is free on the desktop, never trapped).
+        if (wantCapture && !cursorHidden) { ShowCursor(FALSE); recenter(); clip_to_window(true); rawDX = rawDY = 0; cursorHidden = true; firstPlayLook = true; }
+        if (!wantCapture && cursorHidden) { ShowCursor(TRUE); clip_to_window(false); cursorHidden = false; }
+        if (cursorHidden) clip_to_window(true);   // re-assert the confine each frame (Windows drops it on focus/mode changes); ClipCursor never MOVES the cursor, so it cannot fight
 
         // Edge-detected menu navigation (arrows; WASD doubles as nav outside Play).
         const bool kUp = (GetAsyncKeyState(VK_UP) & 0x8000) || (!inPlay && (GetAsyncKeyState('W') & 0x8000));
@@ -1168,11 +1180,12 @@ int run_game(const Options& o) {
         else if (eLf) act = app::UiAction::Left;
         else if (eRt) act = app::UiAction::Right;
 
-        // F11 toggles borderless fullscreen (resizes the swapchain back buffers).
-        const bool f11 = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
-        if (f11 && !prevF11) { apply_fullscreen(!isFull); recenter(); if (cursorHidden) clip_to_window(true); }
+        // F11 toggles borderless fullscreen (resizes the swapchain back buffers). Foreground-gated so it can't
+        // fire while you are alt-tabbed away; the per-frame clip re-assert handles the confine after the resize.
+        const bool f11 = focused && (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+        if (f11 && !prevF11) { apply_fullscreen(!isFull); if (cursorHidden) clip_to_window(true); }
         prevF11 = f11;
-        const bool f2 = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;  // M19: toggle ray tracing
+        const bool f2 = focused && (GetAsyncKeyState(VK_F2) & 0x8000) != 0;  // M19: toggle ray tracing
         if (f2 && !prevF2) model.settings.rt ^= 1;
         prevF2 = f2;
 
@@ -1207,30 +1220,31 @@ int run_game(const Options& o) {
         if (model.screen == app::Screen::Play && sm) {
             const float aspect = static_cast<float>(curW) / static_cast<float>(curH);
             const float kSens = 0.0010f + 0.0030f * (static_cast<float>(model.settings.mouse_pct) / 100.0f);
-            // Look from the raw mouse delta accumulated this frame; re-park the hidden cursor so it stays
-            // centred. The look value does NOT depend on where the cursor is, so it cannot self-spin.
+            // Look from the raw mouse delta accumulated this frame. The look value does NOT depend on where the
+            // cursor is (no SetCursorPos here) -- so it can neither self-spin NOR fight the user's cursor.
             float look_yaw = static_cast<float>(rawDX) * kSens;
             float look_pitch = -static_cast<float>(rawDY) * kSens;
             rawDX = 0; rawDY = 0;
-            recenter();
             // Defence in depth: drop the first Play frame's delta, then clamp, so no single spike whips the view.
             if (firstPlayLook) { look_yaw = 0.0f; look_pitch = 0.0f; firstPlayLook = false; }
             look_yaw = clampf(look_yaw, -0.5f, 0.5f);
             look_pitch = clampf(look_pitch, -0.5f, 0.5f);
-            if (o.auto_play) { const float a = std::fabs(look_yaw); if (a > maxDyaw) maxDyaw = a; ++lookFrames; }
+            if (o.auto_play) { const float a = std::fabs(look_yaw); if (a > maxDyaw) maxDyaw = a; ++lookFrames; }  // spin guard: measure BEFORE the focus gate
             contracts::InputCommand in{};
-            if (GetAsyncKeyState('W') & 0x8000) in.move_z += 1.0f;
-            if (GetAsyncKeyState('S') & 0x8000) in.move_z -= 1.0f;
-            if (GetAsyncKeyState('D') & 0x8000) in.move_x += 1.0f;
-            if (GetAsyncKeyState('A') & 0x8000) in.move_x -= 1.0f;
-            if (GetAsyncKeyState(VK_SPACE) & 0x8000) in.buttons |= contracts::kButtonJump;
-            if (GetAsyncKeyState(VK_SHIFT) & 0x8000) in.buttons |= contracts::kButtonRun;
-            if (pad.connected) {  // M16: gamepad adds to keyboard/mouse this tick
-                const contracts::InputCommand gp = app::gamepad_to_input(pad, kSens * 18.0f);
-                in.move_x += gp.move_x; in.move_z += gp.move_z;
-                look_yaw += gp.look_yaw; look_pitch += gp.look_pitch;
-                in.buttons |= gp.buttons;
-            }
+            if (focused) {   // ignore Play input while alt-tabbed -- a normal game doesn't walk/look in the background
+                if (GetAsyncKeyState('W') & 0x8000) in.move_z += 1.0f;
+                if (GetAsyncKeyState('S') & 0x8000) in.move_z -= 1.0f;
+                if (GetAsyncKeyState('D') & 0x8000) in.move_x += 1.0f;
+                if (GetAsyncKeyState('A') & 0x8000) in.move_x -= 1.0f;
+                if (GetAsyncKeyState(VK_SPACE) & 0x8000) in.buttons |= contracts::kButtonJump;
+                if (GetAsyncKeyState(VK_SHIFT) & 0x8000) in.buttons |= contracts::kButtonRun;
+                if (pad.connected) {  // M16: gamepad adds to keyboard/mouse this tick
+                    const contracts::InputCommand gp = app::gamepad_to_input(pad, kSens * 18.0f);
+                    in.move_x += gp.move_x; in.move_z += gp.move_z;
+                    look_yaw += gp.look_yaw; look_pitch += gp.look_pitch;
+                    in.buttons |= gp.buttons;
+                }
+            } else { look_yaw = 0.0f; look_pitch = 0.0f; }   // not foreground -> no look either
             bool firstTick = true;
             while (accum >= tickDt) {
                 const contracts::ChunkKey here = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
@@ -1332,13 +1346,18 @@ int run_game(const Options& o) {
     std::printf("brain_requests: %llu\n", brain_req);
     std::printf("debug_error_count: %u\n", dbg);
     if (o.auto_play) {
-        // A still mouse must not rotate the view. Raw input emits nothing when idle -> ~0; the old cursor
-        // scheme pinned every frame at the 0.5 clamp. Threshold is generous (a real spin sits at the clamp).
+        // Two guards over a whole still-mouse Play session:
+        //  (1) the view must not rotate -- raw input emits nothing when idle (~0); the old cursor scheme pinned
+        //      every frame at the 0.5 clamp. (2) we must barely WARP the cursor -- a one-time park on capture is
+        //      fine, but a per-frame SetCursorPos is the "my cursor fights me" bug (it'd be ~1 warp per frame).
+        const long warps = g_cursorWarps - warps0;
         const bool spin_ok = (maxDyaw < 0.05f) && (lookFrames > 0);
+        const bool nofight_ok = (warps < 10);   // ~1 expected (the capture park); per-frame warping would be ~lookFrames
         std::printf("lookcheck_max_dyaw: %.5f\n", static_cast<double>(maxDyaw));
         std::printf("lookcheck_frames: %llu\n", static_cast<unsigned long long>(lookFrames));
-        std::printf("lookcheck: %s\n", spin_ok ? "PASS" : "FAIL");
-        if (!spin_ok) return 4;
+        std::printf("lookcheck_cursor_warps: %ld\n", warps);
+        std::printf("lookcheck: %s\n", (spin_ok && nofight_ok) ? "PASS" : "FAIL");
+        if (!spin_ok || !nofight_ok) return 4;
     }
     return dbg == 0 ? 0 : 3;
 }
@@ -4434,7 +4453,8 @@ int run_screensaver(const Options& o) {
         if (g_scrPlay && !playMode) {
             playMode = true;
             lookAnchor.x = static_cast<LONG>(W / 2); lookAnchor.y = static_cast<LONG>(H / 2);
-            SetCursorPos(lookAnchor.x, lookAnchor.y); firstLook = true;
+            SetCursorPos(lookAnchor.x, lookAnchor.y); ++g_cursorWarps; firstLook = true;   // park the hidden cursor ONCE
+            RECT clip{ 0, 0, static_cast<LONG>(W), static_cast<LONG>(H) }; ClipCursor(&clip);  // confine it (no per-frame warp)
             g_scrRawDX = g_scrRawDY = 0;   // start the look from a clean zero delta
         }
         if (playMode) {
@@ -4466,7 +4486,7 @@ int run_screensaver(const Options& o) {
                               plyPitch = -static_cast<float>(g_scrRawDY) * kSens; }  // (no cursor-position spin)
             firstLook = false;
             g_scrRawDX = g_scrRawDY = 0;                  // consume this frame's delta
-            SetCursorPos(lookAnchor.x, lookAnchor.y);      // keep the hidden cursor parked at centre
+            // (no per-frame SetCursorPos -- the cursor is ClipCursor-confined below, not warped, so it can't fight)
         }
 
         bool firstTick = true;
@@ -4516,6 +4536,7 @@ int run_screensaver(const Options& o) {
         ++frames;
     }
 
+    ClipCursor(nullptr);   // release any SPACE-play confine
     if (ownWindow) { ShowCursor(TRUE); if (IsWindow(hwnd)) DestroyWindow(hwnd); }
     return 0;
 }

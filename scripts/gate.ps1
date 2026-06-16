@@ -2924,19 +2924,22 @@ function Invoke-GateM30 {
         Write-Note 'screensaver Stroller: X-ray BFS pathfinding -- seeds 1/42/500 each traverse ~1000 m along guaranteed routes (never blindly hits a dead-end), net-progress stall_frac 0.16-0.35 (was 0.6 when it ping-ponged), free-angle (offcardinal ~20 deg), faceplant 0.11-0.20'
     }
 
-    # GAME mouse-look must NOT self-spin. The windowed first-person look reads RELATIVE WM_INPUT deltas (raw
-    # input), so a still mouse must produce ~0 rad/frame of yaw. The old GetCursorPos/recenter scheme could
-    # pin every frame at the clamp on a scaled display (DPI virtualisation) or when the cursor was warped to
-    # 0,0 -> a ~100x/s spin (unplayable, the operator's report). --game --auto-play drops straight into Play
-    # with NO input and prints lookcheck + a max per-frame yaw; FAIL returns exit 4.
-    Assert-Gate 'game mouse-look does not self-spin (raw input; still mouse -> ~0 yaw/frame)' {
+    # GAME mouse-look must NOT self-spin AND must NOT fight the cursor. The windowed first-person look reads
+    # RELATIVE WM_INPUT deltas (raw input): a still mouse must produce ~0 rad/frame of yaw, AND the loop must
+    # not warp the OS cursor every frame. The old GetCursorPos/recenter scheme spun (~100x/s, DPI/0,0 warp);
+    # the first raw-input cut left a vestigial per-frame SetCursorPos that dragged the cursor to centre every
+    # frame -> "my cursor fights me" (no normal game does this). --game --auto-play drops straight into Play
+    # with NO input and prints the max per-frame yaw + the count of cursor warps during Play; FAIL returns exit 4.
+    Assert-Gate 'game mouse-look: no self-spin AND no cursor-fight (raw input; still mouse -> ~0 yaw, ~0 warps)' {
         $r = Invoke-AppCapture @('--game', '--auto-play', '--seconds', '2', '--no-audio', '--no-shoggoth-brain')
-        if ($r.Exit -ne 0) { throw "auto-play exited $($r.Exit) (non-zero => lookcheck FAIL: the view self-spins): $($r.Out)" }
+        if ($r.Exit -ne 0) { throw "auto-play exited $($r.Exit) (non-zero => lookcheck FAIL: the view spins or the cursor is warped per-frame): $($r.Out)" }
         $dy = Get-MetricFloat $r.Out 'lookcheck_max_dyaw'
         if ($dy -ge 0.05) { throw "lookcheck_max_dyaw $dy >= 0.05 -- a still mouse rotates the view (the spin bug): $($r.Out)" }
         $lf = Get-Metric $r.Out 'lookcheck_frames'
         if ($lf -lt 30) { throw "only $lf Play frames measured -- --auto-play did not actually enter Play: $($r.Out)" }
-        Write-Note "game mouse-look: --auto-play ran $lf Play frames with a STILL mouse, max yaw drift $dy rad/frame (~0) -- no DPI/cursor-warp self-spin (raw WM_INPUT look)"
+        $cw = Get-Metric $r.Out 'lookcheck_cursor_warps'
+        if ($cw -ge 10) { throw "lookcheck_cursor_warps $cw >= 10 over $lf frames -- the loop warps the cursor per-frame (the 'cursor fights me' bug): $($r.Out)" }
+        Write-Note "game mouse-look: $lf Play frames, STILL mouse -> max yaw drift $dy rad/frame (~0, no spin) and $cw cursor warps (~0, no per-frame SetCursorPos fight) -- raw WM_INPUT look"
     }
 
     # The abyss renders: look DOWN a shaft with a band of floors resident -> the depths show through

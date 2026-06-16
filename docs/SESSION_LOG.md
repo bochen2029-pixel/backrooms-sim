@@ -125,6 +125,21 @@ run_play, screensaver SPACE-play). The lookcheck is now an **M30 gate assertion*
 debug-clean. Fresh exe re-delivered to build-release\bin + Desktop. **The headless-first rule (Iron Rule 3)
 earned its keep — it disproved a plausible-but-wrong fix before it reached the operator.**
 
+**Follow-up 9 — "my mouse cursor was fighting me" (ADR-067).** Operator, after Follow-up 8: the cursor fights
+them in-game, "no other game does this." I fanned out two review agents (a codebase cursor-API sweep + an
+adversarial Win32 reviewer) — both nailed it instantly: the raw-input switch (FU8) left the OLD per-frame
+`recenter()` (`SetCursorPos(centre)`) in the Play loops. With raw input that call is **vestigial** but it warps
+the cursor to centre ~100×/s; worse, in `run_game` it fired whenever `screen==Play` **regardless of focus**, so
+alt-tabbing away left the loop yanking the cursor back every frame. **Fix:** delete the per-frame warp from all
+three loops; **focus-gate capture** (`wantCapture = inPlay && GetForegroundWindow()==hwnd` — hide+clip on gain,
+show+release on loss, so alt-tab frees the cursor instantly; edge-paired ShowCursor; re-assert ClipCursor each
+captured frame but never SetCursorPos); **focus-gate Play input** (no walking / F11 / F2 while alt-tabbed). The
+agents also caught the ShowCursor-counter and background-input hazards I'd have missed. Added a `g_cursorWarps`
+counter + an M30 gate assertion: still mouse over ~160 Play frames → **0 cursor warps** (the bug would've been
+~160) and 0 yaw drift. ctest 100/100, gate M30 green, debug-clean, fresh exe delivered. The cursor-fight is dead
+by **direct measurement**, not a theory — and this time the root cause (`SetCursorPos` is the only cursor-mover)
+was unambiguous. Open: the operator's own feel-check (sensitivity) + the interactive alt-tab release.
+
 ---
 
 ## Session 32 — M30 polish ×3: live descent + deep-descent soak + draft telegraph  ✅ — `gate M30` green; model-free Phase IV EXHAUSTED
