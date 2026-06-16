@@ -1234,6 +1234,8 @@ int run_game(const Options& o) {
     auto last_director = t_start - director_interval;   // fire the first line promptly
     std::string last_pa_line;
     uint64_t director_spoke = 0;
+    std::string capText;                 // audio-off fallback: the on-screen subtitle text...
+    auto capUntil = t_start;             // ...shown until this time (a few seconds per line)
 
     // Headless spin guard (--auto-play): drop straight into Play and watch the mouse-look delta with a
     // STILL mouse. Raw input emits nothing when the mouse is idle, so the delta must stay ~0 rad/frame; the
@@ -1394,7 +1396,8 @@ int run_game(const Options& o) {
                 for (const contracts::Directive& d : director->poll()) {
                     if (d.caption[0] != '\0' && last_pa_line != d.caption) {
                         last_pa_line = d.caption;
-                        if (audioOn) speak_pa(d.caption, contracts::kAudioSampleRate);
+                        if (audioOn) speak_pa(d.caption, contracts::kAudioSampleRate);   // PA voice (primary)
+                        else { capText = d.caption; capUntil = now + seconds(6); }       // audio off -> text-caption fallback
                         ++director_spoke;
                     }
                 }
@@ -1440,6 +1443,16 @@ int run_game(const Options& o) {
                 }
             }
             if (!model.settings.rt) {
+                // Audio-off TEXT FALLBACK: if the PA voice can't play (no audio device) but Director is on,
+                // composite the latest Director line as a bottom subtitle via the VHS-post HUD path (the only
+                // in-Play overlay path). Gated on !audioOn so the normal (audio-working) game keeps its no-post look.
+                if (!audioOn && model.settings.director) {
+                    if (now >= capUntil) capText.clear();
+                    renderer.set_post(true, static_cast<uint32_t>(texSeed), duration<float>(now - t_start).count(), true);
+                    std::vector<uint8_t> capOvl;
+                    app::build_caption_overlay(capOvl, curW, curH, capText);
+                    renderer.upload_hud_overlay(capOvl.data(), curW, curH);
+                }
                 app::build_shoggoth_mesh(shogBody, shog.pos, shog.writhe, 1.4f);  // M20b in-world body
                 std::vector<contracts::ResidentChunk> withShog = sm->resident();
                 withShog.push_back(contracts::ResidentChunk{contracts::ChunkKey{9999, static_cast<int64_t>(frames), 0}, shogBody.data(), static_cast<uint32_t>(shogBody.size())});

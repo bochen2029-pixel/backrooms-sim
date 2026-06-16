@@ -29,6 +29,10 @@ void build_hud_overlay(std::vector<uint8_t>& rgba, uint32_t width, uint32_t heig
 // "HH:MM:SS" for a 120 Hz tick count (also written to telemetry for the gate).
 std::string hud_timestamp(uint64_t sim_ticks);
 
+// Render a single Director/PA line as a bottom-centred subtitle into `rgba` (transparent elsewhere) -- the
+// TEXT-CAPTION FALLBACK shown when audio is unavailable, so narration is still readable. Empty text -> clear.
+void build_caption_overlay(std::vector<uint8_t>& rgba, uint32_t width, uint32_t height, const std::string& text);
+
 // Render the current menu screen into `rgba` (M15): a near-opaque dark backdrop,
 // the title, the item list with the selected row highlighted, and (Settings) the
 // live setting values. Deterministic for a fixed model -> menu-render goldens.

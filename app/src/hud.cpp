@@ -231,4 +231,18 @@ void build_menu_overlay(std::vector<uint8_t>& rgba, uint32_t width, uint32_t hei
     }
 }
 
+void build_caption_overlay(std::vector<uint8_t>& rgba, uint32_t width, uint32_t height, const std::string& text) {
+    rgba.assign(static_cast<size_t>(width) * height * 4u, 0u);  // transparent
+    if (text.empty()) return;
+    // Uppercase-fold to the bitmap font's charset (lowercase -> upper; unsupported glyphs render as space).
+    std::string t = text;
+    for (char& c : t) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+    const int scale = (width >= 1600) ? 3 : 2;
+    const int cx = static_cast<int>(width) / 2;
+    const int y = static_cast<int>(height) - 11 * scale * 3;  // a few lines up from the bottom edge
+    const int tw = text_px(t.c_str(), scale);
+    fill_rect(rgba, width, height, cx - tw / 2 - 6 * scale, y - 3 * scale, tw + 12 * scale, 7 * scale + 6 * scale, 6, 8, 7, 175);  // dim backing bar
+    draw_centered(rgba, width, height, cx, y, scale, t.c_str(), 200, 255, 210, 240);  // CRT phosphor green
+}
+
 }  // namespace br::app
