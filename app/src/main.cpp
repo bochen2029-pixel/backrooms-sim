@@ -97,6 +97,7 @@ struct Options {
     bool shoggoth_dxr_shot = false;     // M25 render the shoggoth body in the DXR (ray-traced) path
     bool shoggoth_record = false, shoggoth_replay = false;  // M21 brain record/replay
     bool no_shoggoth_brain = false;     // M21b: kill switch for the live async brain in --play/--game
+    bool auto_play = false;             // headless: --game enters Play immediately + reports mouse-look drift (spin guard)
     bool shoggoth_vision_record = false;  // M22: the Shoggoth sees -- POV snapshot -> vision intent
     bool shoggoth_hearing_record = false;  // M23: the Shoggoth hears -- soundscape -> whisper -> intent
     std::string whisper_exe, whisper_model;  // M23: whisper.cpp CLI + model (defaults below)
@@ -221,6 +222,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--shoggoth-record") == 0) o.shoggoth_record = true;
         else if (std::strcmp(a, "--shoggoth-replay") == 0) o.shoggoth_replay = true;
         else if (std::strcmp(a, "--no-shoggoth-brain") == 0) o.no_shoggoth_brain = true;
+        else if (std::strcmp(a, "--auto-play") == 0) o.auto_play = true;
         else if (std::strcmp(a, "--shoggoth-vision-record") == 0) o.shoggoth_vision_record = true;
         else if (std::strcmp(a, "--shoggoth-hearing-record") == 0) o.shoggoth_hearing_record = true;
         else if (std::strcmp(a, "--whisper-exe") == 0) { if (!str(o.whisper_exe)) return false; }
@@ -282,12 +284,45 @@ HWND create_window(uint32_t width, uint32_t height) {
     return hwnd;
 }
 
+// Raw mouse input (WM_INPUT) for first-person look. Unlike GetCursorPos/SetCursorPos recentering, raw input
+// reports RELATIVE motion straight from the HID stack -- immune to DPI scaling, the desktop's pointer
+// ballistics, cursor edge-clamping, focus changes, and cursor warping (a non-interactive desktop parks the
+// cursor at 0,0 every frame -> the old scheme read a constant huge delta -> a runaway spin). A still mouse
+// emits no WM_INPUT, so an idle frame yields a zero delta and the view can never self-rotate.
+static bool register_raw_mouse(HWND hwnd) {
+    RAWINPUTDEVICE rid{};
+    rid.usUsagePage = 0x01;   // generic desktop controls
+    rid.usUsage     = 0x02;   // mouse
+    rid.dwFlags     = 0;      // deliver only while this window has focus (no RIDEV_INPUTSINK)
+    rid.hwndTarget  = hwnd;
+    return RegisterRawInputDevices(&rid, 1, sizeof(rid)) == TRUE;
+}
+
+// Pull the relative mouse delta out of a WM_INPUT lParam and add it to (dx,dy). Absolute-coordinate devices
+// (RDP, tablets, touch) are skipped rather than misread as a giant delta. Usable from a window proc directly.
+static void read_raw_mouse_delta(LPARAM lParam, long& dx, long& dy) {
+    BYTE buf[128];
+    UINT sz = sizeof(buf);
+    if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, buf, &sz, sizeof(RAWINPUTHEADER)) == static_cast<UINT>(-1))
+        return;
+    const RAWINPUT* ri = reinterpret_cast<const RAWINPUT*>(buf);
+    if (ri->header.dwType == RIM_TYPEMOUSE && !(ri->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)) {
+        dx += ri->data.mouse.lLastX;
+        dy += ri->data.mouse.lLastY;
+    }
+}
+// Same, but driven from an MSG in an inline message pump. No-op for non-WM_INPUT messages.
+static void accumulate_raw_mouse(const MSG& msg, long& dx, long& dy) {
+    if (msg.message == WM_INPUT) read_raw_mouse_delta(msg.lParam, dx, dy);
+}
+
 // Screensaver window. As a screensaver, ANY key / click / wheel / app-deactivation ends it (the .scr
 // contract) -- EXCEPT SPACE, which drops into a playable WASD walk (g_scrPlay). Once playing, keys +
 // clicks are game input (the loop reads them via GetAsyncKeyState), so they no longer exit; ESC exits.
 // Mouse-move is caught in the loop (it exits while idle, but steers the look while playing).
 static volatile bool g_scrQuit = false;
 static volatile bool g_scrPlay = false;  // SPACE -> become a playable WASD/mouse walk
+static long g_scrRawDX = 0, g_scrRawDY = 0;  // relative mouse delta for SPACE-play look (filled in scr_proc)
 LRESULT CALLBACK scr_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_KEYDOWN: case WM_SYSKEYDOWN:
@@ -297,6 +332,9 @@ LRESULT CALLBACK scr_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN: case WM_MOUSEWHEEL:
             if (!g_scrPlay) g_scrQuit = true;                   // playing: clicks/wheel are ignored, not an exit
             return 0;
+        case WM_INPUT:
+            if (g_scrPlay) read_raw_mouse_delta(lp, g_scrRawDX, g_scrRawDY);  // accumulate look ONLY while playing
+            return DefWindowProcW(hwnd, msg, wp, lp);           // WM_INPUT needs DefWindowProc cleanup
         case WM_ACTIVATEAPP: if (wp == FALSE) g_scrQuit = true; return 0;  // losing focus always exits
         case WM_CLOSE:   DestroyWindow(hwnd); return 0;
         case WM_DESTROY: PostQuitMessage(0);  return 0;
@@ -538,6 +576,7 @@ int run_play(const Options& o) {
     HWND hwnd = create_window(o.width, o.height);
     if (!hwnd) { std::fprintf(stderr, "window creation failed\n"); return 1; }
     SetForegroundWindow(hwnd); SetFocus(hwnd);
+    register_raw_mouse(hwnd);   // relative-delta look (no cursor-position spin)
     Renderer renderer;
     if (!renderer.init_windowed(hwnd, o.width, o.height)) { std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1; }
     renderer.set_texture_seed(o.seed);
@@ -568,8 +607,9 @@ int run_play(const Options& o) {
     const float kSens = 0.0022f;  // mouse radians/pixel
     ShowCursor(FALSE);
     POINT ctr{ static_cast<LONG>(o.width / 2), static_cast<LONG>(o.height / 2) };
-    auto recenter = [&]() -> POINT { POINT p = ctr; ClientToScreen(hwnd, &p); SetCursorPos(p.x, p.y); return p; };
-    POINT anchor = recenter();
+    auto recenter = [&]() { POINT p = ctr; ClientToScreen(hwnd, &p); SetCursorPos(p.x, p.y); };
+    recenter();
+    long rawDX = 0, rawDY = 0;   // relative mouse delta this frame (WM_INPUT) -- look without cursor-position spin
 
     br::telemetry::FrameCsv csv;
     const bool csvOpen = !o.csv.empty() && csv.open(o.csv);
@@ -609,6 +649,7 @@ int run_play(const Options& o) {
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) running = false;
+            accumulate_raw_mouse(msg, rawDX, rawDY);
             TranslateMessage(&msg); DispatchMessageW(&msg);
         }
         if (!running) break;
@@ -623,10 +664,10 @@ int run_play(const Options& o) {
         if (GetAsyncKeyState(VK_SPACE) & 0x8000) in.buttons |= contracts::kButtonJump;
         if (GetAsyncKeyState(VK_SHIFT) & 0x8000) in.buttons |= contracts::kButtonRun;
 
-        POINT cur; GetCursorPos(&cur);
-        const float look_yaw = static_cast<float>(cur.x - anchor.x) * kSens;
-        const float look_pitch = -static_cast<float>(cur.y - anchor.y) * kSens;
-        anchor = recenter();
+        const float look_yaw = static_cast<float>(rawDX) * kSens;
+        const float look_pitch = -static_cast<float>(rawDY) * kSens;
+        rawDX = 0; rawDY = 0;
+        recenter();
 
         const auto now = steady_clock::now();
         const double frame_ms = duration<double, std::milli>(now - prev).count();
@@ -993,6 +1034,7 @@ int run_game(const Options& o) {
     HWND hwnd = create_window(curW, curH);
     if (!hwnd) { std::fprintf(stderr, "window creation failed\n"); return 1; }
     SetForegroundWindow(hwnd); SetFocus(hwnd);
+    register_raw_mouse(hwnd);   // first-person look reads relative WM_INPUT deltas (no cursor-position spin)
     Renderer renderer;
     if (!renderer.init_windowed(hwnd, curW, curH)) {
         std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1;
@@ -1037,8 +1079,18 @@ int run_game(const Options& o) {
     bool audioOn = o.no_audio ? false : eng.start_device(false);
 
     const float tickDt = 1.0f / 120.0f;
-    auto recenter = [&]() -> POINT { POINT p{ static_cast<LONG>(curW / 2), static_cast<LONG>(curH / 2) }; ClientToScreen(hwnd, &p); SetCursorPos(p.x, p.y); return p; };
-    POINT anchor{ static_cast<LONG>(curW / 2), static_cast<LONG>(curH / 2) };
+    // First-person look comes from raw WM_INPUT deltas (rawDX/rawDY) accumulated in the message pump. The
+    // cursor is hidden + clipped to the window while playing; recenter() just parks it, but the LOOK no
+    // longer depends on its position -- so a parked/warped/edge-clamped cursor can't spin the view.
+    auto recenter = [&]() { POINT p{ static_cast<LONG>(curW / 2), static_cast<LONG>(curH / 2) }; ClientToScreen(hwnd, &p); SetCursorPos(p.x, p.y); };
+    auto clip_to_window = [&](bool on) {
+        if (!on) { ClipCursor(nullptr); return; }
+        RECT rc; if (!GetClientRect(hwnd, &rc)) return;
+        POINT tl{ rc.left, rc.top }, brp{ rc.right, rc.bottom };
+        ClientToScreen(hwnd, &tl); ClientToScreen(hwnd, &brp);
+        RECT scr{ tl.x, tl.y, brp.x, brp.y }; ClipCursor(&scr);
+    };
+    long rawDX = 0, rawDY = 0;   // relative mouse delta accumulated this frame (from WM_INPUT)
     bool cursorHidden = false, firstPlayLook = true;
     bool prevF11 = false, prevPadStart = false, prevF2 = false;
 
@@ -1074,18 +1126,30 @@ int run_game(const Options& o) {
     auto last_brain = t_start - brain_interval;
     uint64_t brain_intents = 0;
 
+    // Headless spin guard (--auto-play): drop straight into Play and watch the mouse-look delta with a
+    // STILL mouse. Raw input emits nothing when the mouse is idle, so the delta must stay ~0 rad/frame; the
+    // old cursor-recenter scheme pinned it at the ±0.5 clamp. Lets the build verify "no runaway spin" headless.
+    float maxDyaw = 0.0f; uint64_t lookFrames = 0;
+    if (o.auto_play) {
+        start_session(model.seed);
+        shog = app::Shoggoth{};
+        shog.pos = s.wanderer.pos; shog.pos.x += 22.0f; shog.pos.z += 6.0f;
+        model.screen = app::Screen::Play;
+    }
+
     while (running) {
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) running = false;
+            accumulate_raw_mouse(msg, rawDX, rawDY);   // relative look delta (immune to cursor position)
             TranslateMessage(&msg); DispatchMessageW(&msg);
         }
         if (!running) break;
         if (timed && steady_clock::now() >= t_start + seconds(static_cast<long long>(o.seconds))) break;
 
         const bool inPlay = (model.screen == app::Screen::Play);
-        if (inPlay && !cursorHidden) { ShowCursor(FALSE); anchor = recenter(); cursorHidden = true; firstPlayLook = true; }
-        if (!inPlay && cursorHidden) { ShowCursor(TRUE); cursorHidden = false; }
+        if (inPlay && !cursorHidden) { ShowCursor(FALSE); recenter(); clip_to_window(true); rawDX = rawDY = 0; cursorHidden = true; firstPlayLook = true; }
+        if (!inPlay && cursorHidden) { ShowCursor(TRUE); clip_to_window(false); cursorHidden = false; }
 
         // Edge-detected menu navigation (arrows; WASD doubles as nav outside Play).
         const bool kUp = (GetAsyncKeyState(VK_UP) & 0x8000) || (!inPlay && (GetAsyncKeyState('W') & 0x8000));
@@ -1106,7 +1170,7 @@ int run_game(const Options& o) {
 
         // F11 toggles borderless fullscreen (resizes the swapchain back buffers).
         const bool f11 = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
-        if (f11 && !prevF11) { apply_fullscreen(!isFull); anchor = recenter(); }
+        if (f11 && !prevF11) { apply_fullscreen(!isFull); recenter(); if (cursorHidden) clip_to_window(true); }
         prevF11 = f11;
         const bool f2 = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;  // M19: toggle ray tracing
         if (f2 && !prevF2) model.settings.rt ^= 1;
@@ -1143,15 +1207,17 @@ int run_game(const Options& o) {
         if (model.screen == app::Screen::Play && sm) {
             const float aspect = static_cast<float>(curW) / static_cast<float>(curH);
             const float kSens = 0.0010f + 0.0030f * (static_cast<float>(model.settings.mouse_pct) / 100.0f);
-            POINT cur; GetCursorPos(&cur);
-            float look_yaw = static_cast<float>(cur.x - anchor.x) * kSens;
-            float look_pitch = -static_cast<float>(cur.y - anchor.y) * kSens;
-            recenter(); GetCursorPos(&anchor);  // recenter, then read where the cursor ACTUALLY landed -> robust
-            // Defence in depth: drop the first frame's delta (the entry recenter jump) and clamp the rest,
-            // so a stray cursor delta (alt-tab, a recenter that didn't take) can never runaway-spin the view.
+            // Look from the raw mouse delta accumulated this frame; re-park the hidden cursor so it stays
+            // centred. The look value does NOT depend on where the cursor is, so it cannot self-spin.
+            float look_yaw = static_cast<float>(rawDX) * kSens;
+            float look_pitch = -static_cast<float>(rawDY) * kSens;
+            rawDX = 0; rawDY = 0;
+            recenter();
+            // Defence in depth: drop the first Play frame's delta, then clamp, so no single spike whips the view.
             if (firstPlayLook) { look_yaw = 0.0f; look_pitch = 0.0f; firstPlayLook = false; }
             look_yaw = clampf(look_yaw, -0.5f, 0.5f);
             look_pitch = clampf(look_pitch, -0.5f, 0.5f);
+            if (o.auto_play) { const float a = std::fabs(look_yaw); if (a > maxDyaw) maxDyaw = a; ++lookFrames; }
             contracts::InputCommand in{};
             if (GetAsyncKeyState('W') & 0x8000) in.move_z += 1.0f;
             if (GetAsyncKeyState('S') & 0x8000) in.move_z -= 1.0f;
@@ -1243,6 +1309,7 @@ int run_game(const Options& o) {
         ++frames;
     }
     if (cursorHidden) ShowCursor(TRUE);
+    ClipCursor(nullptr);   // release the mouse confine on the way out
 
     // M16: persist the current settings + window state for next launch.
     cfg.master = model.settings.master_pct; cfg.sfx = model.settings.sfx_pct;
@@ -1264,6 +1331,15 @@ int run_game(const Options& o) {
     std::printf("brain_intents: %llu\n", static_cast<unsigned long long>(brain_intents));
     std::printf("brain_requests: %llu\n", brain_req);
     std::printf("debug_error_count: %u\n", dbg);
+    if (o.auto_play) {
+        // A still mouse must not rotate the view. Raw input emits nothing when idle -> ~0; the old cursor
+        // scheme pinned every frame at the 0.5 clamp. Threshold is generous (a real spin sits at the clamp).
+        const bool spin_ok = (maxDyaw < 0.05f) && (lookFrames > 0);
+        std::printf("lookcheck_max_dyaw: %.5f\n", static_cast<double>(maxDyaw));
+        std::printf("lookcheck_frames: %llu\n", static_cast<unsigned long long>(lookFrames));
+        std::printf("lookcheck: %s\n", spin_ok ? "PASS" : "FAIL");
+        if (!spin_ok) return 4;
+    }
     return dbg == 0 ? 0 : 3;
 }
 
@@ -4304,6 +4380,7 @@ int run_screensaver(const Options& o) {
         if (!hwnd) { std::fprintf(stderr, "screensaver: window creation failed\n"); return 1; }
         ShowCursor(FALSE);
         ownWindow = true;
+        register_raw_mouse(hwnd);   // SPACE-play look uses relative WM_INPUT deltas (no cursor-position spin)
     }
 
     Renderer renderer;
@@ -4358,6 +4435,7 @@ int run_screensaver(const Options& o) {
             playMode = true;
             lookAnchor.x = static_cast<LONG>(W / 2); lookAnchor.y = static_cast<LONG>(H / 2);
             SetCursorPos(lookAnchor.x, lookAnchor.y); firstLook = true;
+            g_scrRawDX = g_scrRawDY = 0;   // start the look from a clean zero delta
         }
         if (playMode) {
             if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) { g_scrQuit = true; break; }
@@ -4384,11 +4462,11 @@ int run_screensaver(const Options& o) {
             if (GetAsyncKeyState('A') & 0x8000) plyIn.move_x -= 1.0f;
             if (GetAsyncKeyState(VK_SPACE) & 0x8000) plyIn.buttons |= contracts::kButtonJump;
             if (GetAsyncKeyState(VK_SHIFT) & 0x8000) plyIn.buttons |= contracts::kButtonRun;
-            POINT cur; GetCursorPos(&cur);
-            if (!firstLook) { plyYaw = static_cast<float>(cur.x - lookAnchor.x) * kSens;
-                              plyPitch = -static_cast<float>(cur.y - lookAnchor.y) * kSens; }
+            if (!firstLook) { plyYaw = static_cast<float>(g_scrRawDX) * kSens;       // relative WM_INPUT delta
+                              plyPitch = -static_cast<float>(g_scrRawDY) * kSens; }  // (no cursor-position spin)
             firstLook = false;
-            SetCursorPos(lookAnchor.x, lookAnchor.y);
+            g_scrRawDX = g_scrRawDY = 0;                  // consume this frame's delta
+            SetCursorPos(lookAnchor.x, lookAnchor.y);      // keep the hidden cursor parked at centre
         }
 
         bool firstTick = true;

@@ -110,6 +110,21 @@ skip the first Play frame, clamp ±0.5 rad). Builds + launches clean (432 frames
 **Needs the operator's visual confirm** (interactive, can't headless-test a scaled-display mouse). Delivered to
 build-release\bin + Desktop.
 
+**Follow-up 8 — the spin was STILL there; raw-input is the real fix (ADR-066).** Instead of asking the operator
+to re-test ADR-065's *unverified* theory, I built a **headless spin guard** — `--game --auto-play`: drop straight
+into Play with NO mouse input and measure per-frame look yaw (must be ~0 for a still mouse). On the real display
+it **FAILED**: `lookcheck_max_dyaw = 0.50000`, pinned at the clamp every frame — ADR-065 did NOT fix it. Coord
+instrumentation found the true cause: `recenter()` sets the cursor to centre and `GetCursorPos` reads it back
+fine, but **next frame `GetCursorPos` returns (0,0)** — the cursor is warped to the top-left every frame → a
+constant huge delta → clamped spin. The whole absolute-cursor scheme (GetCursorPos/SetCursorPos/recenter/anchor)
+is fragile (warping, DPI, edge-clamp, focus). **Fix:** replace it with **raw input (`WM_INPUT`)** — relative
+mouse deltas straight from the HID stack, as real FPS games do. Look no longer depends on cursor position, so it
+can't self-spin; a still mouse emits no `WM_INPUT` → 0 delta. Applied to all three windowed look sites (run_game,
+run_play, screensaver SPACE-play). The lookcheck is now an **M30 gate assertion** (still mouse → max yaw drift
+`0.00000`; was 0.5). DPI-awareness from ADR-065 is kept (sharper native render). ctest 100/100, gate M30 green,
+debug-clean. Fresh exe re-delivered to build-release\bin + Desktop. **The headless-first rule (Iron Rule 3)
+earned its keep — it disproved a plausible-but-wrong fix before it reached the operator.**
+
 ---
 
 ## Session 32 — M30 polish ×3: live descent + deep-descent soak + draft telegraph  ✅ — `gate M30` green; model-free Phase IV EXHAUSTED
