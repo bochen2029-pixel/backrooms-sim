@@ -21,9 +21,10 @@ enum class Screen { Splash, MainMenu, Pause, Settings, Play, Quit };
 enum class UiAction { None, Up, Down, Left, Right, Activate, Back };
 
 // What the shell must do as a side effect of a step (beyond the screen change).
-// TestConnection asks the shell to ping the KEEL/LLM sidecar (a real request) and
-// report live status back into MenuModel.llm_state/llm_text for the Settings screen.
-enum class UiCommand { None, StartGame, ResumeGame, QuitApp, TestConnection };
+// TestConnection pings the KEEL/LLM sidecar (a real request) -> MenuModel.llm_state/llm_text.
+// TestMic records the mic, transcribes it, asks the Director, and reports BOTH a caption
+// (MenuModel.mic_*) and a SPOKEN reply -- a full voice-loop diagnostic from the Settings screen.
+enum class UiCommand { None, StartGame, ResumeGame, QuitApp, TestConnection, TestMic };
 
 // In-memory settings (M15). M16 extends this set + persists it to a config file;
 // for M15 they live for the process and drive the live session's volumes/sensitivity.
@@ -41,9 +42,10 @@ struct Settings {
 // Item counts per screen — shared so the renderer and the logic never disagree.
 constexpr int kMainItems = 4;      // New Game, Continue, Settings, Quit
 constexpr int kPauseItems = 3;     // Resume, Settings, Quit to Menu
-constexpr int kSettingsItems = 9;  // Master, SFX, Mouse, Director, Ray Tracing, Resolution, Test Connection, Subtitles, Back
+constexpr int kSettingsItems = 10;  // Master, SFX, Mouse, Director, Ray Tracing, Resolution, Test Connection, Test Microphone, Subtitles, Back
 constexpr int kSettingsTestConn = 6;  // index of the "Test Connection" row (Activate -> UiCommand::TestConnection)
-constexpr int kSettingsSubtitles = 7;  // index of the "Subtitles" toggle row
+constexpr int kSettingsTestMic = 7;   // index of the "Test Microphone" row (Activate -> UiCommand::TestMic)
+constexpr int kSettingsSubtitles = 8;  // index of the "Subtitles" toggle row
 
 struct MenuModel {
     Screen screen = Screen::Splash;
@@ -58,6 +60,11 @@ struct MenuModel {
     // TestConnection ping). 0 untested · 1 testing · 2 connected · 3 offline. llm_text = a short line.
     int llm_state = 0;
     std::string llm_text;
+    // Live MIC / voice-loop diagnostic (TestMic): 0 idle · 1 listening · 2 thinking · 3 replied · 4 error.
+    // mic_heard = what whisper heard you say; mic_reply = the Director's reply (shown as a caption + spoken).
+    int mic_state = 0;
+    std::string mic_heard;
+    std::string mic_reply;
 };
 
 namespace detail {
@@ -142,6 +149,7 @@ inline UiCommand menu_step(MenuModel& m, UiAction a) {
             else if (a == UiAction::Back) m.screen = m.settings_from;
             else if (a == UiAction::Activate) {
                 if (m.settings_sel == kSettingsTestConn) return UiCommand::TestConnection;  // ping the LLM
+                if (m.settings_sel == kSettingsTestMic) return UiCommand::TestMic;          // mic -> Director -> caption + voice
                 if (m.settings_sel == kSettingsItems - 1) m.screen = m.settings_from;       // "Back" item
             }
             return UiCommand::None;

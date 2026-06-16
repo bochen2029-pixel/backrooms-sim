@@ -42,6 +42,16 @@ volume; a Settings MICROPHONE toggle (currently tied to the Director toggle).
 "you" on near-silence — `plausible_utterance` filters bracketed tags + the known junk + requires real words.
 In-game WAVs go to `%TEMP%` (not `runs\`) so a Desktop double-click (cwd = Desktop) still works.
 
+**Follow-up (ADR-075) — operator feedback on the voice feature.** (1) At 4K fullscreen the Settings "TEST
+CONNECTION" status was jammed at the very bottom, ~800 px below the menu, barely visible — moved the hint + LLM
+status + the new mic status to sit **directly under the menu list** (`listBottom`), larger scale. (2) Added a
+**TEST MICROPHONE** row to Settings (a full voice self-test, independent of the Director toggle): a `MicProbe`
+(mirror of `LlmProbe`) records the mic (VAD) → whisper → Director → shows `YOU:`/`DIRECTOR:` on screen AND speaks
+the reply. `kSettingsItems` 9→10 (Subtitles→8, Back→9; menu test pins only Director@3/Resolution@5/Back@last, so
+it holds). Verified `--menu-shot --screen settings --sel 7 --width 3840 --height 2160` (10 items, hint under the
+menu); ctest 100/100. The operator's real-voice Settings test is the final confirm. Note: "doesn't seem to work"
+was likely because DIRECTOR was OFF in their cfg (in-game voice is gated on it) — the in-Settings mic test sidesteps that.
+
 ## Session 34 — Director SEES the player: VLM-grounded narration (RT)  ✅ — ADR-073, gates M30 + M9 green
 
 **Operator pivot.** Resumed on the portable-packaging thread (P0) but the operator chose to PIVOT to the parked

@@ -205,26 +205,50 @@ void build_menu_overlay(std::vector<uint8_t>& rgba, uint32_t width, uint32_t hei
             std::snprintf(rows[4], 32, "RAY TRACING  %s", m.settings.rt ? "ON" : "OFF");
             std::snprintf(rows[5], 32, "RESOLUTION  %dx%d", m.settings.res_w, m.settings.res_h);
             std::snprintf(rows[6], 32, "TEST CONNECTION");
-            std::snprintf(rows[7], 32, "SUBTITLES  %s", m.settings.subtitles ? "ON" : "OFF");
-            std::snprintf(rows[8], 32, "BACK");
-            const char* labels[kSettingsItems] = {rows[0], rows[1], rows[2], rows[3], rows[4], rows[5], rows[6], rows[7], rows[8]};
+            std::snprintf(rows[7], 32, "TEST MICROPHONE");
+            std::snprintf(rows[8], 32, "SUBTITLES  %s", m.settings.subtitles ? "ON" : "OFF");
+            std::snprintf(rows[9], 32, "BACK");
+            const char* labels[kSettingsItems] = {rows[0], rows[1], rows[2], rows[3], rows[4], rows[5], rows[6], rows[7], rows[8], rows[9]};
             items(labels, nullptr, kSettingsItems, m.settings_sel, height * 2 / 5);
-            // A hint line + the live LLM status, under the list.
-            const int hy = static_cast<int>(height) - base * 20;
-            if (m.settings_sel == 5)
-                draw_centered(rgba, width, height, cx, hy, base, "* APPLIES ON RESTART", nr, ng, nb, 220);
-            else if (m.settings_sel == 3)
-                draw_centered(rgba, width, height, cx, hy, base, "NEEDS THE LOCAL LLM - RUN TEST CONNECTION", nr, ng, nb, 220);
-            else if (m.settings_sel == kSettingsTestConn)
-                draw_centered(rgba, width, height, cx, hy, base, "ENTER - PING THE DIRECTOR LLM (KEEL)", nr, ng, nb, 220);
-            else if (m.settings_sel == kSettingsSubtitles)
-                draw_centered(rgba, width, height, cx, hy, base, "SHOW THE DIRECTOR LINES ON SCREEN AS YOU PLAY", nr, ng, nb, 220);
-            // LLM connection status (set by the TestConnection ping). Always shown so it stays visible.
+            // Hint + the live LLM + MIC diagnostics, placed directly UNDER the list (NOT pinned to the screen
+            // bottom -- at 4K the old bottom line was ~800 px below the menu, nearly invisible). Bigger scale too.
+            const int listBottom = height * 2 / 5 + kSettingsItems * (base * 16);
+            const int isc = base + 1;                 // info text scale (a touch larger than the old `base`)
+            int iy = listBottom + base * 10;
+            const char* hint = nullptr;
+            if (m.settings_sel == 5) hint = "* APPLIES ON RESTART";
+            else if (m.settings_sel == 3) hint = "NEEDS THE LOCAL LLM - RUN TEST CONNECTION";
+            else if (m.settings_sel == kSettingsTestConn) hint = "ENTER - PING THE DIRECTOR LLM (KEEL)";
+            else if (m.settings_sel == kSettingsTestMic) hint = "ENTER - SPEAK; THE DIRECTOR REPLIES (CAPTION + VOICE)";
+            else if (m.settings_sel == kSettingsSubtitles) hint = "SHOW THE DIRECTOR LINES ON SCREEN AS YOU PLAY";
+            if (hint) { draw_centered(rgba, width, height, cx, iy, isc, hint, nr, ng, nb, 230); }
+            iy += isc * 12;
+            // LLM connection status (TestConnection).
             if (!m.llm_text.empty()) {
                 uint8_t lr = nr, lg = ng, lb = nb;
                 if (m.llm_state == 3) { lr = 230; lg = 120; lb = 90; }       // offline -> amber
                 else if (m.llm_state == 1) { lr = dr; lg = dg; lb = db; }    // testing -> dim
-                draw_centered(rgba, width, height, cx, hy + base * 10, base, m.llm_text.c_str(), lr, lg, lb, 235);
+                draw_centered(rgba, width, height, cx, iy, isc, m.llm_text.c_str(), lr, lg, lb, 240);
+                iy += isc * 12;
+            }
+            // MIC / voice-loop diagnostic (TestMic): listening -> thinking -> YOU + DIRECTOR (or an error).
+            if (m.mic_state == 1) {
+                draw_centered(rgba, width, height, cx, iy, isc, "* LISTENING - SPEAK NOW", 120, 230, 255, 245);
+            } else if (m.mic_state == 2) {
+                draw_centered(rgba, width, height, cx, iy, isc, "* THINKING...", dr, dg, db, 235);
+            } else if (m.mic_state == 3 || m.mic_state == 4) {
+                if (!m.mic_heard.empty()) {
+                    char yl[96]; std::snprintf(yl, sizeof(yl), "YOU: %s", m.mic_heard.c_str());
+                    draw_centered(rgba, width, height, cx, iy, isc, yl, nr, ng, nb, 235);
+                    iy += isc * 12;
+                }
+                if (!m.mic_reply.empty()) {
+                    uint8_t rr = sr, rg = sg, rb = sb;
+                    if (m.mic_state == 4) { rr = 230; rg = 120; rb = 90; }   // error -> amber
+                    char dl[112];
+                    std::snprintf(dl, sizeof(dl), "%s%s", m.mic_state == 4 ? "" : "DIRECTOR: ", m.mic_reply.c_str());
+                    draw_centered(rgba, width, height, cx, iy, isc, dl, rr, rg, rb, 245);
+                }
             }
             break;
         }

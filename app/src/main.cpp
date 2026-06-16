@@ -632,6 +632,78 @@ struct LlmProbe {
     }
 };
 
+// ADR-074: the Settings "TEST MICROPHONE" diagnostic -- a full voice-loop self-test, off the UI thread.
+// Records the mic (VAD, ~9 s window), transcribes (whisper), asks the Director (text chat), and reports
+// BOTH the heard text + the reply (shown as a caption); the reply is also SPOKEN (the frame thread takes
+// it via take_fresh_reply -> speak_pa). Lets the operator confirm mic + whisper + LLM + TTS end-to-end
+// without starting a game and regardless of the Director toggle. Mirrors LlmProbe's async lifecycle.
+struct MicProbe {
+    std::atomic<int> state{0};   // 0 idle, 1 listening, 2 thinking, 3 replied, 4 error
+    std::mutex mtx;
+    std::string heard, reply;    // guarded; folded to the bitmap-font charset (for the overlay)
+    std::string reply_raw;       // guarded; unfolded (for the PA voice)
+    std::atomic<bool> reply_fresh{false};
+    std::thread th;
+    ~MicProbe() { if (th.joinable()) th.join(); }
+
+    static void fold(std::string& line) {   // to the font charset (A-Z 0-9 space . , : - ? !); cap length
+        for (char& ch : line) {
+            if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 32);
+            else if (!((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == ' ' ||
+                       ch == '.' || ch == ',' || ch == ':' || ch == '-' || ch == '?' || ch == '!')) ch = ' ';
+        }
+        if (line.size() > 64) line.resize(64);
+    }
+    void seterr(std::string h, std::string msg) {
+        fold(h); fold(msg);
+        { std::lock_guard<std::mutex> lk(mtx); heard = std::move(h); reply = std::move(msg); reply_raw.clear(); }
+        state.store(4);
+    }
+
+    void start(std::string host, int port, std::string wexe, std::string wmodel) {
+        const int s = state.load();
+        if (s == 1 || s == 2) return;                  // a test is already running
+        if (th.joinable()) th.join();
+        state.store(1);
+        { std::lock_guard<std::mutex> lk(mtx); heard.clear(); reply.clear(); reply_raw.clear(); }
+        reply_fresh.store(false);
+        th = std::thread([this, host, port, wexe, wmodel]() {
+            try_start_sidecar();
+            app::MicCapture mic;
+            if (!mic.start()) { seterr("", "NO MICROPHONE DEVICE FOUND"); return; }
+            std::vector<int16_t> utter;
+            const uint64_t end = GetTickCount64() + 9000ull;   // up to ~9 s to speak
+            bool got = false;
+            while (GetTickCount64() < end) { if (mic.poll(utter)) { got = true; break; } Sleep(15); }
+            mic.stop();
+            if (!got) { seterr("", "NO SPEECH HEARD - SPEAK, THEN PAUSE"); return; }
+            state.store(2);   // thinking
+            char tb[MAX_PATH]; const DWORD tn = GetTempPathA(MAX_PATH, tb);
+            const std::string wav = ((tn > 0 && tn < MAX_PATH) ? std::string(tb) : std::string("runs\\")) + "br_mic_settings.wav";
+            std::string err;
+            if (!audio::write_wav(wav, utter, app::MicCapture::kRate, static_cast<uint16_t>(1), err)) { seterr("", "AUDIO WRITE FAILED"); return; }
+            const std::string h = whisper_transcribe(wav, wexe, wmodel);
+            if (!app::plausible_utterance(h)) { seterr(h, "COULD NOT MAKE THAT OUT - TRY AGAIN"); return; }
+            const std::string prompt = app::render_director_chat_prompt(h, std::string(), false);
+            const br::director::KeelResponse resp = br::director::keel_complete(host, port, prompt, 30000);
+            if (!resp.ok) { seterr(h, "LLM OFFLINE - " + (resp.error.empty() ? std::string("NO REPLY") : resp.error)); return; }
+            const std::string rep = app::clean_vision_line(resp.content);
+            std::string hh = h, rf = rep; fold(hh); fold(rf);
+            { std::lock_guard<std::mutex> lk(mtx); heard = std::move(hh); reply = std::move(rf); reply_raw = rep; }
+            reply_fresh.store(true);
+            state.store(3);   // replied
+        });
+    }
+    void sync(app::MenuModel& m) {
+        m.mic_state = state.load();
+        std::lock_guard<std::mutex> lk(mtx); m.mic_heard = heard; m.mic_reply = reply;
+    }
+    std::string take_fresh_reply() {   // the unfolded reply to SPEAK, once (latched); "" otherwise
+        if (!reply_fresh.exchange(false)) return std::string();
+        std::lock_guard<std::mutex> lk(mtx); return reply_raw;
+    }
+};
+
 // M30 (live descent): build the live-walk collision world for the wanderer's CURRENT floor --
 // the chunks' wall/stair/pillar collision over the 3x3 neighbourhood PLUS a PER-CELL solid floor
 // at this level's baseY, but with HOLES at the open cells (down-stair holes + shaft voids, via
@@ -1295,6 +1367,7 @@ int run_game(const Options& o) {
     auto last_brain = t_start - brain_interval;
     uint64_t brain_intents = 0;
     LlmProbe llmProbe;   // Settings "Test Connection" -> async LLM ping (status shown in the Settings overlay)
+    MicProbe micProbe;   // Settings "Test Microphone" -> async mic->whisper->Director->caption + spoken reply
 
     // Director (M11) narration: when Director is ON, ask the LLM (off the frame thread) for a Directive every
     // ~18 s and SPEAK its caption through the procedural PA voice -- narration you HEAR while you walk. Created
@@ -1408,9 +1481,15 @@ int run_game(const Options& o) {
                 std::string h; int p; parse_host_port(o.director_url, h, p);
                 llmProbe.start(h, p);
             }
+            else if (cmd == app::UiCommand::TestMic) {          // Settings: full voice-loop test (mic -> caption + voice)
+                std::string h; int p; parse_host_port(o.director_url, h, p);
+                micProbe.start(h, p, wexe, wmodel);
+            }
             // ResumeGame keeps the existing session as-is.
         }
         llmProbe.sync(model);   // reflect the latest LLM probe status into the Settings overlay
+        micProbe.sync(model);   // reflect the mic-test status into the Settings overlay
+        { const std::string spoke = micProbe.take_fresh_reply(); if (!spoke.empty()) speak_pa(spoke, contracts::kAudioSampleRate); }  // speak the reply (diagnostic)
         if (audioOn) {
             eng.set_master_volume(static_cast<float>(model.settings.master_pct) / 100.0f);
             eng.set_sfx_volume(static_cast<float>(model.settings.sfx_pct) / 100.0f);
