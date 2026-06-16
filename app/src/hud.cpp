@@ -204,13 +204,25 @@ void build_menu_overlay(std::vector<uint8_t>& rgba, uint32_t width, uint32_t hei
             std::snprintf(rows[3], 32, "DIRECTOR  %s", m.settings.director ? "ON" : "OFF");
             std::snprintf(rows[4], 32, "RAY TRACING  %s", m.settings.rt ? "ON" : "OFF");
             std::snprintf(rows[5], 32, "RESOLUTION  %dx%d", m.settings.res_w, m.settings.res_h);
-            std::snprintf(rows[6], 32, "BACK");
-            const char* labels[kSettingsItems] = {rows[0], rows[1], rows[2], rows[3], rows[4], rows[5], rows[6]};
+            std::snprintf(rows[6], 32, "TEST CONNECTION");
+            std::snprintf(rows[7], 32, "BACK");
+            const char* labels[kSettingsItems] = {rows[0], rows[1], rows[2], rows[3], rows[4], rows[5], rows[6], rows[7]};
             items(labels, nullptr, kSettingsItems, m.settings_sel, height * 2 / 5);
-            // Resolution applies on the next launch -> say so clearly when that row is selected.
+            // A hint line + the live LLM status, under the list.
+            const int hy = static_cast<int>(height) - base * 20;
             if (m.settings_sel == 5)
-                draw_centered(rgba, width, height, cx, static_cast<int>(height) - base * 16, base,
-                              "* APPLIES ON RESTART", nr, ng, nb, 220);
+                draw_centered(rgba, width, height, cx, hy, base, "* APPLIES ON RESTART", nr, ng, nb, 220);
+            else if (m.settings_sel == 3)
+                draw_centered(rgba, width, height, cx, hy, base, "NEEDS THE LOCAL LLM - RUN TEST CONNECTION", nr, ng, nb, 220);
+            else if (m.settings_sel == kSettingsTestConn)
+                draw_centered(rgba, width, height, cx, hy, base, "ENTER - PING THE DIRECTOR LLM (KEEL)", nr, ng, nb, 220);
+            // LLM connection status (set by the TestConnection ping). Always shown so it stays visible.
+            if (!m.llm_text.empty()) {
+                uint8_t lr = nr, lg = ng, lb = nb;
+                if (m.llm_state == 3) { lr = 230; lg = 120; lb = 90; }       // offline -> amber
+                else if (m.llm_state == 1) { lr = dr; lg = dg; lb = db; }    // testing -> dim
+                draw_centered(rgba, width, height, cx, hy + base * 10, base, m.llm_text.c_str(), lr, lg, lb, 235);
+            }
             break;
         }
         case Screen::Play:

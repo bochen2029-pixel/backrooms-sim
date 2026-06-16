@@ -14,11 +14,14 @@
 #include <xinput.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <cstdlib>
 #include <cstring>
 #include <span>
@@ -80,6 +83,7 @@ struct Options {
     std::string scr_preview;                         // /p <hwnd>: parent HWND to render the preview into
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
     bool dxr_denoise = false;   // headless: does the spatial denoiser bring a noisy few-spp frame closer to ground truth?
+    bool llm_test = false;      // CLI: exercise the in-game "Test Connection" probe + print the status line
     bool soak = false, crash_test = false, director_probe = false;
     bool director_record = false, director_replay = false;
     bool director = false, no_director = false;   // --director enables; --no-director forces off (INV-6 kill switch)
@@ -187,6 +191,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--dxr-ghost") == 0) o.dxr_ghost = true;
         else if (std::strcmp(a, "--dxr-walk") == 0) o.dxr_walk = true;
         else if (std::strcmp(a, "--dxr-denoise") == 0) o.dxr_denoise = true;
+        else if (std::strcmp(a, "--llm-test") == 0) o.llm_test = true;
         else if (std::strcmp(a, "--soak") == 0) o.soak = true;
         else if (std::strcmp(a, "--crash-test") == 0) o.crash_test = true;
         else if (std::strcmp(a, "--crash-dir") == 0) { if (!str(o.crash_dir)) return false; }
@@ -509,16 +514,78 @@ static void try_start_sidecar() {
     static bool tried = false;
     if (tried) return;
     tried = true;
-    const wchar_t* kLauncher = L"C:\\keel-sidecar-7071\\start.cmd";
-    if (GetFileAttributesW(kLauncher) == INVALID_FILE_ATTRIBUTES) return;  // not installed here -> skip (stays portable)
-    wchar_t cmdline[] = L"cmd.exe /c \"C:\\keel-sidecar-7071\\start.cmd\"";  // mutable buffer (CreateProcess may write)
+    // Prefer the FULL-STACK launcher (starts BOTH :8080 llama-server AND :7071 keel-serve) -- the old
+    // start.cmd only started the :7071 sidecar, which is useless without the :8080 model behind it. Both
+    // launchers are idempotent (skip a port already up). If neither is installed here, skip (stays portable).
+    const wchar_t* candidates[] = { L"C:\\keel-sidecar-7071\\start-all.cmd", L"C:\\keel-sidecar-7071\\start.cmd" };
+    const wchar_t* launcher = nullptr;
+    for (const wchar_t* c : candidates) { if (GetFileAttributesW(c) != INVALID_FILE_ATTRIBUTES) { launcher = c; break; } }
+    if (!launcher) return;
+    std::wstring cl = std::wstring(L"cmd.exe /c \"") + launcher + L"\"";
+    std::vector<wchar_t> cmdline(cl.begin(), cl.end()); cmdline.push_back(L'\0');  // mutable buffer for CreateProcess
     STARTUPINFOW si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
     PROCESS_INFORMATION pi{};
-    if (CreateProcessW(nullptr, cmdline, nullptr, nullptr, FALSE,
+    if (CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, FALSE,
                        CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr, nullptr, &si, &pi)) {
         CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
     }
 }
+
+// Async LLM connection probe for the in-game Settings "Test Connection". Runs the REAL keel_complete OFF the
+// UI thread (so the menu never freezes), best-effort-starts the sidecar, and reports a short UPPERCASE status
+// line the 5x7 bitmap font can draw -- "CONNECTED  LOCAL  640MS  -  <the directive it generated>" or an error.
+struct LlmProbe {
+    std::atomic<int> state{0};   // 0 untested, 1 testing, 2 connected, 3 offline
+    std::mutex mtx;
+    std::string text;            // guarded status line (already uppercased + charset-folded)
+    std::thread th;
+    ~LlmProbe() { if (th.joinable()) th.join(); }
+
+    void start(std::string host, int port) {
+        if (state.load() == 1) return;                 // a test is already running
+        if (th.joinable()) th.join();
+        state.store(1);
+        { std::lock_guard<std::mutex> lk(mtx); text = "TESTING..."; }
+        th = std::thread([this, host, port]() {
+            try_start_sidecar();                       // best-effort: bring the stack up if it is not already
+            contracts::WandererSummary sum{};
+            sum.tick = 130000u; sum.world_seed = 1u; sum.level = 0;
+            sum.biome = 1; sum.chunk_cx = 7; sum.chunk_cz = -2;
+            sum.distance_m = 1240.0f; sum.dwell_seconds = 95.0f; sum.route_loops = 3;
+            sum.location_hash = 7u;
+            const std::string prompt = br::director::render_prompt(sum);
+            const auto t0 = std::chrono::steady_clock::now();
+            const br::director::KeelResponse resp = br::director::keel_complete(host, port, prompt, 6000);
+            const long ms = static_cast<long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count());
+            std::string line; int st;
+            if (resp.ok) {
+                st = 2;
+                char head[80];
+                std::snprintf(head, sizeof(head), "CONNECTED  %s  %ldMS",
+                              resp.tier.empty() ? "LOCAL" : resp.tier.c_str(), ms);
+                line = head;
+                const br::director::DirectiveResult dr = br::director::validate_directive(resp.content);
+                if (dr.ok && dr.directive.caption[0] != '\0') { line += "  -  "; line += dr.directive.caption; }
+            } else {
+                st = 3;
+                line = "OFFLINE - " + (resp.error.empty() ? std::string("NO REPLY") : resp.error);
+            }
+            for (char& ch : line) {   // fold to the bitmap font's charset (A-Z 0-9 space . , : -); others -> space
+                if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 32);
+                else if (!((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+                           ch == ' ' || ch == '.' || ch == ',' || ch == ':' || ch == '-')) ch = ' ';
+            }
+            if (line.size() > 58) line.resize(58);
+            { std::lock_guard<std::mutex> lk(mtx); text = line; }
+            state.store(st);
+        });
+    }
+    void sync(app::MenuModel& m) {                     // copy the latest status into the model for rendering
+        m.llm_state = state.load();
+        std::lock_guard<std::mutex> lk(mtx); m.llm_text = text;
+    }
+};
 
 // M30 (live descent): build the live-walk collision world for the wanderer's CURRENT floor --
 // the chunks' wall/stair/pillar collision over the 3x3 neighbourhood PLUS a PER-CELL solid floor
@@ -1133,6 +1200,7 @@ int run_game(const Options& o) {
     const auto brain_interval = milliseconds(3000);
     auto last_brain = t_start - brain_interval;
     uint64_t brain_intents = 0;
+    LlmProbe llmProbe;   // Settings "Test Connection" -> async LLM ping (status shown in the Settings overlay)
 
     // Headless spin guard (--auto-play): drop straight into Play and watch the mouse-look delta with a
     // STILL mouse. Raw input emits nothing when the mouse is idle, so the delta must stay ~0 rad/frame; the
@@ -1207,8 +1275,13 @@ int run_game(const Options& o) {
                 shog.pos = s.wanderer.pos; shog.pos.x += 22.0f; shog.pos.z += 6.0f;  // M20b spawn
             }
             else if (cmd == app::UiCommand::QuitApp) running = false;
+            else if (cmd == app::UiCommand::TestConnection) {   // Settings: ping the LLM (async, off the UI thread)
+                std::string h; int p; parse_host_port(o.director_url, h, p);
+                llmProbe.start(h, p);
+            }
             // ResumeGame keeps the existing session as-is.
         }
+        llmProbe.sync(model);   // reflect the latest LLM probe status into the Settings overlay
         if (audioOn) {
             eng.set_master_volume(static_cast<float>(model.settings.master_pct) / 100.0f);
             eng.set_sfx_volume(static_cast<float>(model.settings.sfx_pct) / 100.0f);
@@ -2077,15 +2150,26 @@ int run_walkbot(const Options& o) {
 }
 
 // ----- M11 Director probe: WandererSummary -> KEEL sidecar -> validated Directive -
+// CLI mirror of the in-game Settings "Test Connection": run the exact LlmProbe (best-effort autostart + a real
+// keel_complete ping) and print the status line the menu would show. Exit 0 = connected, 1 = offline. Doubles
+// as the operator's command-line "is the LLM up?" check: backrooms --llm-test [--director-url http://...:7071].
+int run_llm_test(const Options& o) {
+    std::string host; int port;
+    parse_host_port(o.director_url, host, port);
+    std::printf("llm_url: %s:%d\n", host.c_str(), port);
+    std::fflush(stdout);
+    LlmProbe probe;
+    probe.start(host, port);
+    while (probe.state.load() == 1) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    app::MenuModel m; probe.sync(m);
+    std::printf("llm_state: %d\n", m.llm_state);          // 2 = connected, 3 = offline
+    std::printf("llm_status: %s\n", m.llm_text.c_str());  // the exact UPPERCASE line the Settings screen shows
+    return (m.llm_state == 2) ? 0 : 1;
+}
+
 int run_director_probe(const Options& o) {
-    std::string host = "127.0.0.1";
-    int port = 7071;
-    if (!o.director_url.empty()) {
-        const std::string& u = o.director_url;
-        const size_t colon = u.rfind(':');
-        if (colon != std::string::npos) { host = u.substr(0, colon); port = std::atoi(u.c_str() + colon + 1); }
-        else { host = u; }
-    }
+    std::string host; int port;
+    parse_host_port(o.director_url, host, port);   // strips http:// + the path (the old inline parse kept the scheme -> gle 12005)
 
     // A representative wanderer summary (the real sim-derived summary lands in 11c).
     contracts::WandererSummary sum{};
@@ -4639,6 +4723,7 @@ int main(int argc, char** argv) {
     if (o.dxr_ghost)  return run_dxr_ghost(o);
     if (o.dxr_walk)   return run_dxr_walk(o);
     if (o.dxr_denoise) return run_dxr_denoise(o);
+    if (o.llm_test)   return run_llm_test(o);
     if (o.dxr)        return run_dxr(o);
     if (o.director_probe) return run_director_probe(o);
     if (o.director_eval)  return run_director_eval(o);

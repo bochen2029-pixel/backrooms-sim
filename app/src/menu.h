@@ -9,6 +9,7 @@
 // owns rendering this model and acting on the returned UiCommand.
 //
 #include <cstdint>
+#include <string>
 
 namespace br::app {
 
@@ -20,7 +21,9 @@ enum class Screen { Splash, MainMenu, Pause, Settings, Play, Quit };
 enum class UiAction { None, Up, Down, Left, Right, Activate, Back };
 
 // What the shell must do as a side effect of a step (beyond the screen change).
-enum class UiCommand { None, StartGame, ResumeGame, QuitApp };
+// TestConnection asks the shell to ping the KEEL/LLM sidecar (a real request) and
+// report live status back into MenuModel.llm_state/llm_text for the Settings screen.
+enum class UiCommand { None, StartGame, ResumeGame, QuitApp, TestConnection };
 
 // In-memory settings (M15). M16 extends this set + persists it to a config file;
 // for M15 they live for the process and drive the live session's volumes/sensitivity.
@@ -37,7 +40,8 @@ struct Settings {
 // Item counts per screen — shared so the renderer and the logic never disagree.
 constexpr int kMainItems = 4;      // New Game, Continue, Settings, Quit
 constexpr int kPauseItems = 3;     // Resume, Settings, Quit to Menu
-constexpr int kSettingsItems = 7;  // Master, SFX, Mouse, Director, Ray Tracing, Resolution, Back
+constexpr int kSettingsItems = 8;  // Master, SFX, Mouse, Director, Ray Tracing, Resolution, Test Connection, Back
+constexpr int kSettingsTestConn = 6;  // index of the "Test Connection" row (Activate -> UiCommand::TestConnection)
 
 struct MenuModel {
     Screen screen = Screen::Splash;
@@ -48,6 +52,10 @@ struct MenuModel {
     uint64_t seed = 1;                        // New Game seed (Left/Right cycles)
     Settings settings;
     bool has_session = false;  // a session exists -> Continue/Resume enabled
+    // Live LLM/Director connection status for the Settings screen (written by the shell after a
+    // TestConnection ping). 0 untested · 1 testing · 2 connected · 3 offline. llm_text = a short line.
+    int llm_state = 0;
+    std::string llm_text;
 };
 
 namespace detail {
@@ -130,7 +138,8 @@ inline UiCommand menu_step(MenuModel& m, UiAction a) {
             else if (a == UiAction::Right) detail::adjust_setting(m.settings, m.settings_sel, +1);
             else if (a == UiAction::Back) m.screen = m.settings_from;
             else if (a == UiAction::Activate) {
-                if (m.settings_sel == kSettingsItems - 1) m.screen = m.settings_from;  // "Back" item
+                if (m.settings_sel == kSettingsTestConn) return UiCommand::TestConnection;  // ping the LLM
+                if (m.settings_sel == kSettingsItems - 1) m.screen = m.settings_from;       // "Back" item
             }
             return UiCommand::None;
 

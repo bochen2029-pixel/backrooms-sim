@@ -42,7 +42,7 @@ KeelResponse keel_post(const std::string& host, int port, const std::string& bod
 
     const std::wstring whost = widen(host);
     connect.h = WinHttpConnect(session.h, whost.c_str(), static_cast<INTERNET_PORT>(port), 0);
-    if (!connect.h) { r.error = "WinHttpConnect failed"; return r; }
+    if (!connect.h) { r.error = "WinHttpConnect failed (gle=" + std::to_string(GetLastError()) + ", host=" + host + ", port=" + std::to_string(port) + ")"; return r; }
 
     request.h = WinHttpOpenRequest(connect.h, L"POST", L"/v1/chat/completions", nullptr,
                                    WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0);  // plain HTTP (local)

@@ -157,6 +157,23 @@ truth and is now an **M9 gate assertion**: 4-spp error **12.7 → 4.60, ratio 0.
 sent to the operator; fresh exe delivered. ctest 100/100, gate M9 green. Future levers (lower spp for FPS, full
 SVGF temporal, albedo demodulation) deferred — this v1 fixes the complaint.
 
+**Follow-up 11 — Director/LLM autostart + in-game Test Connection (ADR-069).** Operator: turned Director ON,
+the AI does nothing, no narration — is :7071 down? Thought the game autostarts it. Diagnosed (scanned the
+machine + code): (1) my old autostart only started the **:7071 sidecar**, which `start.cmd` says *reuses the
+already-running llama-server on :8080* — and **nothing started :8080** (the Qwen3.5-9B model). Both ports were
+down. (2) `run_director_probe` had its own parser that kept `http://` → `WinHttpConnect` gle 12005 (a false
+"unreachable"; the real game parses correctly). (3) The **Director is never wired into `run_game`** — only
+`run_soak` runs a DirectorHost — so the in-game toggle does nothing even with the LLM up. **Built:** (a) a
+full-stack `start-all.cmd` (starts :8080 llama-server + :7071 keel-serve, idempotent) that `try_start_sidecar`
+now prefers; (b) an in-game Settings **"Test Connection"** (8th row + `UiCommand::TestConnection` + an async
+`LlmProbe` thread so the menu never freezes) that does a REAL `keel_complete` ping and shows
+`CONNECTED  LOCAL  640MS  -  <the narration it generated>` / `OFFLINE - <err>`; (c) fixed the probe parser;
+(d) a CLI `--llm-test`. **Verified live** (started the model): `--director-probe` returns a valid directive
+(tier:local, $0); `--llm-test` → `CONNECTED LOCAL ~600MS - HUMMING FLUORESCENT LIGHTS FLICKER...`; Settings
+renders all 8 rows. ctest 100/100, build clean, fresh exe delivered. **Still open:** wiring the Director to
+NARRATE during Play (run_game runs no DirectorHost + composites no HUD in Play) — needs an operator call on
+subtitle (enable post) vs PA-voice (route M24 TTS to the mixer); presented as the next step.
+
 ---
 
 ## Session 32 — M30 polish ×3: live descent + deep-descent soak + draft telegraph  ✅ — `gate M30` green; model-free Phase IV EXHAUSTED
