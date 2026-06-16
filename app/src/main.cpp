@@ -1039,7 +1039,7 @@ int run_game(const Options& o) {
     const float tickDt = 1.0f / 120.0f;
     auto recenter = [&]() -> POINT { POINT p{ static_cast<LONG>(curW / 2), static_cast<LONG>(curH / 2) }; ClientToScreen(hwnd, &p); SetCursorPos(p.x, p.y); return p; };
     POINT anchor{ static_cast<LONG>(curW / 2), static_cast<LONG>(curH / 2) };
-    bool cursorHidden = false;
+    bool cursorHidden = false, firstPlayLook = true;
     bool prevF11 = false, prevPadStart = false, prevF2 = false;
 
     // M19: lazy DXR renderer for the ray-tracing toggle. Rendered at a reduced internal
@@ -1084,7 +1084,7 @@ int run_game(const Options& o) {
         if (timed && steady_clock::now() >= t_start + seconds(static_cast<long long>(o.seconds))) break;
 
         const bool inPlay = (model.screen == app::Screen::Play);
-        if (inPlay && !cursorHidden) { ShowCursor(FALSE); anchor = recenter(); cursorHidden = true; }
+        if (inPlay && !cursorHidden) { ShowCursor(FALSE); anchor = recenter(); cursorHidden = true; firstPlayLook = true; }
         if (!inPlay && cursorHidden) { ShowCursor(TRUE); cursorHidden = false; }
 
         // Edge-detected menu navigation (arrows; WASD doubles as nav outside Play).
@@ -1146,7 +1146,12 @@ int run_game(const Options& o) {
             POINT cur; GetCursorPos(&cur);
             float look_yaw = static_cast<float>(cur.x - anchor.x) * kSens;
             float look_pitch = -static_cast<float>(cur.y - anchor.y) * kSens;
-            anchor = recenter();
+            recenter(); GetCursorPos(&anchor);  // recenter, then read where the cursor ACTUALLY landed -> robust
+            // Defence in depth: drop the first frame's delta (the entry recenter jump) and clamp the rest,
+            // so a stray cursor delta (alt-tab, a recenter that didn't take) can never runaway-spin the view.
+            if (firstPlayLook) { look_yaw = 0.0f; look_pitch = 0.0f; firstPlayLook = false; }
+            look_yaw = clampf(look_yaw, -0.5f, 0.5f);
+            look_pitch = clampf(look_pitch, -0.5f, 0.5f);
             contracts::InputCommand in{};
             if (GetAsyncKeyState('W') & 0x8000) in.move_z += 1.0f;
             if (GetAsyncKeyState('S') & 0x8000) in.move_z -= 1.0f;
@@ -4438,6 +4443,11 @@ int run_screensaver(const Options& o) {
 }
 
 int main(int argc, char** argv) {
+    // Be DPI-aware so physical pixels (EnumDisplaySettings, the swapchain) and the cursor coords
+    // (GetCursorPos/SetCursorPos) agree. Without this, on a SCALED display (125%/150%/...) the windowed
+    // game sizes itself in physical pixels but the cursor is virtualised to logical pixels, so the
+    // mouse-look recenter never matches the read-back -> a constant per-frame delta -> the view SPINS.
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     TimerPeriodGuard timer_period;
     Options o;
     if (!parse(argc, argv, o)) return usage();

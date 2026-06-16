@@ -99,6 +99,17 @@ exe + delivered Desktop `Backrooms.exe` + refreshed `Backrooms_v2.scr`. ctest 10
 POST_BUILD copy (ADR-062 era) failed the build when the .scr was running (locked) -- already fixed non-fatal
 in Follow-up 5.
 
+**Follow-up 7 — the spinning-camera "unplayable" bug (ADR-065).** Operator: New Game -> the view "spins in
+circles ~100×/sec, can't see or walk." Root cause: the process was NOT DPI-aware, so on a SCALED display the
+game sizes its window in PHYSICAL pixels (EnumDisplaySettings) but the cursor is virtualised to LOGICAL pixels
+-> the mouse-look recenter target and the GetCursorPos read-back are in different coord spaces -> a constant
+per-frame delta -> continuous spin. (Surfaced only now because the no-arg fix finally let a user REACH Play.)
+Fix: `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` at main start (physical-pixel-consistent everywhere
++ sharper native render) + defence-in-depth on run_game's look (recenter-then-re-read the actual cursor pos,
+skip the first Play frame, clamp ±0.5 rad). Builds + launches clean (432 frames, debug-clean); ctest 100/100.
+**Needs the operator's visual confirm** (interactive, can't headless-test a scaled-display mouse). Delivered to
+build-release\bin + Desktop.
+
 ---
 
 ## Session 32 — M30 polish ×3: live descent + deep-descent soak + draft telegraph  ✅ — `gate M30` green; model-free Phase IV EXHAUSTED
