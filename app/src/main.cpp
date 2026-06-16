@@ -61,6 +61,8 @@
 #include "shoggoth_brain_host.h"
 #include "shoggoth_vision.h"
 #include "director_vision.h"
+#include "mic_capture.h"
+#include "director_chat.h"
 #include "shoggoth_hearing.h"
 #include "tts.h"
 #include "base64.h"
@@ -111,6 +113,8 @@ struct Options {
     bool tts_say = false;                  // M24: procedural TTS -> WAV (the Backrooms PA voice)
     bool tts_check = false;                 // M24: TTS -> whisper round-trip (intelligibility check)
     bool caption_shot = false;              // render the Director subtitle over a gray bg -> PNG (visibility proof)
+    bool mic_test = false;                  // ADR-074: capture mic + VAD + whisper, print transcripts (verify voice input)
+    bool chat_test = false;                 // ADR-074: TTS->whisper->Director reply (verify the conversation glue, no mic)
     bool shoggoth_pa_record = false;       // M24: PA voice spoken into the soundscape -> heard as words
     std::string say_text;                  // M24: text for --tts-say / the PA line
     uint32_t eval_count = 100;          // --director-eval: scenario count
@@ -240,6 +244,8 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--tts-say") == 0) o.tts_say = true;
         else if (std::strcmp(a, "--tts-check") == 0) o.tts_check = true;
         else if (std::strcmp(a, "--caption-shot") == 0) o.caption_shot = true;
+        else if (std::strcmp(a, "--mic-test") == 0) o.mic_test = true;
+        else if (std::strcmp(a, "--chat-test") == 0) o.chat_test = true;
         else if (std::strcmp(a, "--shoggoth-pa-record") == 0) o.shoggoth_pa_record = true;
         else if (std::strcmp(a, "--say") == 0) { if (!str(o.say_text)) return false; }
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
@@ -509,6 +515,14 @@ void apply_organic_bob(contracts::CameraPose& cam, const br::core::WorldState& s
 // M21b live brain without duplicating the scheme/path-stripping logic.
 namespace { void parse_host_port(const std::string& url, std::string& host, int& port); }
 
+// ADR-074: the half-duplex echo window. speak_pa() stamps "the PA voice is busy until T (ms)" here;
+// MicCapture is gated off until then (synced each frame) so the facility never transcribes ITSELF.
+static std::atomic<uint64_t> g_paSuspendUntilMs{0};
+
+// whisper_transcribe (defined far below, with the Shoggoth-hearing path) shells out to whisper-cli;
+// forward-declared so the --game voice loop can hand it to the DirectorChatHost as the transcriber.
+std::string whisper_transcribe(const std::string& wav, const std::string& exe, const std::string& model);
+
 // Speak a line through the procedural PA VOICE (M24 formant TTS) on the default device -- async + non-blocking,
 // so the player HEARS the Director's narration as intercom words. Presentation only (no sim state -> INV-1
 // untouched). A fresh line replaces any still-playing one (PA lines are spaced seconds apart). winmm's
@@ -530,6 +544,10 @@ static void speak_pa(const std::string& text, uint32_t sr) {
     PlaySoundW(nullptr, nullptr, SND_PURGE);   // stop/release any still-playing line first
     g_pa = std::move(wav);
     PlaySoundW(reinterpret_cast<LPCWSTR>(g_pa.data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+    // Half-duplex echo gate: while this line plays (+ a ~0.6 s tail) the mic is suspended so the
+    // Director is never re-heard through the speakers (ADR-074). Cheap; read by the voice loop.
+    const uint64_t ms = static_cast<uint64_t>(pcm.size()) * 1000ull / (sr ? sr : 1u);
+    g_paSuspendUntilMs.store(GetTickCount64() + ms + 600ull);
 }
 
 // Best-effort: launch the operator's KEEL sidecar (the creature's LLM at :7071) so the game lights up
@@ -1293,6 +1311,20 @@ int run_game(const Options& o) {
     std::unique_ptr<app::DirectorVisionHost> visionDir;
     const auto vision_interval = milliseconds(28000);                  // sparse ~28 s cadence (hides VLM latency)
     auto last_vision = t_start - vision_interval + milliseconds(8000);   // first POV ~8 s in
+    // ADR-074: two-way voice. A live mic + VAD (mic_capture.h) feeds an off-thread whisper+VLM
+    // conversation host (director_chat.h); the reply is spoken back through the PA voice. Created
+    // lazily with Director on; graceful no-op if there's no mic / the VLM is down. Echo-gated via
+    // g_paSuspendUntilMs so the Director never transcribes its own voice.
+    std::unique_ptr<app::MicCapture> mic;
+    std::unique_ptr<app::DirectorChatHost> chat;
+    bool voiceTried = false;             // open the device once (don't retry a missing mic every frame)
+    bool wantChatPov = false;            // an utterance awaits the next RT POV grab
+    std::string pendingChatWav, pendingChatCtx;
+    uint32_t micUtterN = 0;              // rotating WAV name per utterance (bounded, no cross-turn race)
+    const std::string wexe = o.whisper_exe.empty() ? std::string("C:\\whisper.cpp\\whisper-cli.exe") : o.whisper_exe;
+    const std::string wmodel = o.whisper_model.empty() ? std::string("C:\\models\\ggml-large-v3-turbo.bin") : o.whisper_model;
+    char tmpbuf[MAX_PATH]; const DWORD tmpn = GetTempPathA(MAX_PATH, tmpbuf);
+    const std::string tmpDir = (tmpn > 0 && tmpn < MAX_PATH) ? std::string(tmpbuf) : std::string("runs\\");
     uint64_t director_spoke = 0;
     std::string capText;                 // the current on-screen subtitle text (Settings -> Subtitles)...
     auto capUntil = t_start;             // ...shown until this time (a few seconds per line)
@@ -1488,6 +1520,47 @@ int run_game(const Options& o) {
                     }
                 }
             }
+            // ADR-074: TWO-WAY VOICE -- the wanderer talks (mic + VAD), the Director answers IN REGISTER.
+            // Lazy-create the mic + the off-thread conversation host with Director on; poll the mic for a
+            // completed utterance (RT: grab the POV at readback so it answers about what you SEE; raster:
+            // text-only turn); poll the host for a reply -> speak it + subtitle. All slow work is off-thread.
+            if (model.settings.director) {
+                if (!voiceTried) {
+                    voiceTried = true;
+                    try_start_sidecar();
+                    std::string dh; int dp; parse_host_port(o.director_url, dh, dp);
+                    mic = std::make_unique<app::MicCapture>();
+                    if (!mic->start()) mic.reset();   // no capture device -> no voice (graceful)
+                    chat = std::make_unique<app::DirectorChatHost>(dh, dp,
+                        [wexe, wmodel](const std::string& w) { return whisper_transcribe(w, wexe, wmodel); });
+                }
+                if (mic) {
+                    mic->suspend_until(g_paSuspendUntilMs.load());   // half-duplex: don't re-hear the Director
+                    std::vector<int16_t> utter;
+                    if (mic->poll(utter)) {
+                        char wp[MAX_PATH];
+                        std::snprintf(wp, sizeof(wp), "%sbr_mic_%u.wav", tmpDir.c_str(), (micUtterN++ & 15u));
+                        std::string err;
+                        if (audio::write_wav(std::string(wp), utter, app::MicCapture::kRate, static_cast<uint16_t>(1), err)) {
+                            const std::string ctx = vision_entity_context(shog, s.wanderer.pos);
+                            if (model.settings.rt) { pendingChatWav = wp; pendingChatCtx = ctx; wantChatPov = true; }
+                            else if (chat) chat->submit(std::string(wp), std::string(), ctx);   // raster: text-only turn
+                        }
+                    }
+                }
+                if (chat) {
+                    for (const app::DirectorExchange& ex : chat->poll()) {
+                        if (ex.reply.empty()) continue;
+                        last_pa_line = ex.reply;
+                        if (audioOn) speak_pa(ex.reply, contracts::kAudioSampleRate);
+                        if (model.settings.subtitles) {
+                            capText = ex.reply; capUntil = now + seconds(8);
+                            if (!model.settings.rt) { app::build_caption_overlay(capOvl, curW, curH, capText); renderer.upload_caption_overlay(capOvl.data(), curW, curH); }
+                        }
+                        ++director_spoke;
+                    }
+                }
+            }
             if (audioOn) {
                 const uint64_t steps = footstep_count(s);
                 eng.post(audio_listener(s), 1.2f, static_cast<uint32_t>(steps - prevSteps));
@@ -1536,6 +1609,11 @@ int run_game(const Options& o) {
                             last_vision = now;
                             std::string b64 = encode_pov_b64(rt, dxrW, dxrH);
                             if (!b64.empty()) visionDir->submit(std::move(b64), vision_entity_context(shog, s.wanderer.pos));
+                        }
+                        // ADR-074: a waiting voice turn grabs THIS clean POV so the Director answers about what you SEE.
+                        if (model.settings.director && chat && wantChatPov) {
+                            wantChatPov = false;
+                            chat->submit(std::move(pendingChatWav), encode_pov_b64(rt, dxrW, dxrH), std::move(pendingChatCtx));
                         }
                         if (showCap) {  // CPU-composite the subtitle INTO the RT frame (same alpha blend as --caption-shot)
                             app::build_caption_overlay(capOvl, dxrW, dxrH, capText);
@@ -1598,6 +1676,10 @@ int run_game(const Options& o) {
     const unsigned long long vis_req = visionDir ? visionDir->requests() : 0ull;
     const unsigned long long vis_prod = visionDir ? visionDir->produced() : 0ull;
     visionDir.reset();  // join the vision narrator worker thread before exit
+    const unsigned long long chat_req = chat ? chat->requests() : 0ull;
+    const unsigned long long chat_prod = chat ? chat->produced() : 0ull;
+    mic.reset();   // stop mic capture
+    chat.reset();  // join the conversation worker thread before exit
     PlaySoundW(nullptr, nullptr, SND_PURGE);  // stop any PA line still playing
     std::printf("brain_intents: %llu\n", static_cast<unsigned long long>(brain_intents));
     std::printf("brain_requests: %llu\n", brain_req);
@@ -1606,6 +1688,8 @@ int run_game(const Options& o) {
     std::printf("director_produced: %llu\n", static_cast<unsigned long long>(dir_prod));
     std::printf("vision_requests: %llu\n", vis_req);
     std::printf("vision_produced: %llu\n", vis_prod);
+    std::printf("chat_requests: %llu\n", chat_req);
+    std::printf("chat_produced: %llu\n", chat_prod);
     if (!last_pa_line.empty()) std::printf("director_last_line: %s\n", last_pa_line.c_str());
     std::printf("debug_error_count: %u\n", dbg);
     if (o.auto_play) {
@@ -3048,6 +3132,75 @@ std::string whisper_transcribe(const std::string& wav, const std::string& exe, c
     std::string raw, line;
     while (std::getline(f, line)) { raw += line; raw += '\n'; }
     return app::clean_transcript(raw);
+}
+
+// ADR-074: verify live voice INPUT in isolation -- capture the mic for N seconds with the VAD,
+// write each detected utterance to a WAV, run whisper, and print what it heard. No game, no VLM
+// (the conversational reply is de-risked separately). Confirms waveIn + VAD + whisper end-to-end
+// without launching the window. Graceful exit if there is no capture device.
+int run_mic_test(const Options& o) {
+    app::MicCapture mic;
+    if (!mic.start()) { std::fprintf(stderr, "mic: no capture device (waveInOpen failed)\n"); std::printf("mic_device: 0\n"); return 1; }
+    std::printf("mic_device: 1\n");
+    const std::string wexe = o.whisper_exe.empty() ? std::string("C:\\whisper.cpp\\whisper-cli.exe") : o.whisper_exe;
+    const std::string wmodel = o.whisper_model.empty() ? std::string("C:\\models\\ggml-large-v3-turbo.bin") : o.whisper_model;
+    const uint32_t secs = (o.seconds > 0) ? o.seconds : 12u;
+    std::printf("listening %u s -- speak into the mic...\n", secs);
+    std::fflush(stdout);
+    const uint64_t end = GetTickCount64() + static_cast<uint64_t>(secs) * 1000ull;
+    uint32_t utterances = 0;
+    std::vector<int16_t> pcm;
+    while (GetTickCount64() < end) {
+        if (mic.poll(pcm)) {
+            ++utterances;
+            const double dur = static_cast<double>(pcm.size()) / static_cast<double>(app::MicCapture::kRate);
+            std::string err;
+            const std::string wav = std::string("runs\\mic_utter.wav");
+            if (audio::write_wav(wav, pcm, app::MicCapture::kRate, static_cast<uint16_t>(1), err)) {
+                const std::string text = whisper_transcribe(wav, wexe, wmodel);
+                std::printf("utterance %u (%.1f s): \"%s\"\n", utterances, dur, text.c_str());
+            } else {
+                std::printf("utterance %u (%.1f s): wav write failed: %s\n", utterances, dur, err.c_str());
+            }
+            std::fflush(stdout);
+        }
+        Sleep(15);
+    }
+    mic.stop();
+    std::printf("mic_utterances: %u\n", utterances);
+    return 0;
+}
+
+// ADR-074: verify the conversation GLUE end-to-end without a mic -- synthesize a spoken line with the
+// PA TTS (a stand-in utterance), transcribe it with whisper, then ask the Director in character
+// (optionally seeing a POV image via --out). Proves transcribe -> plausible_utterance -> chat prompt
+// -> Qwen-VL -> reply. --say sets the utterance; --out is an optional POV PNG the Director "sees".
+int run_chat_test(const Options& o) {
+    std::string host; int port; parse_host_port(o.director_url, host, port);
+    const std::string wexe = o.whisper_exe.empty() ? std::string("C:\\whisper.cpp\\whisper-cli.exe") : o.whisper_exe;
+    const std::string wmodel = o.whisper_model.empty() ? std::string("C:\\models\\ggml-large-v3-turbo.bin") : o.whisper_model;
+    const std::string said = o.say_text.empty() ? std::string("what is this place and how do I get out") : o.say_text;
+    const std::vector<int16_t> pcm = app::synthesize_speech(said, app::MicCapture::kRate);  // stand-in for the mic
+    std::string err;
+    const std::string wav = std::string("runs\\chat_test_in.wav");
+    if (!audio::write_wav(wav, pcm, app::MicCapture::kRate, static_cast<uint16_t>(1), err)) { std::fprintf(stderr, "wav: %s\n", err.c_str()); return 1; }
+    const std::string heard = whisper_transcribe(wav, wexe, wmodel);
+    std::printf("spoken: \"%s\"\n", said.c_str());
+    std::printf("heard:  \"%s\"\n", heard.c_str());
+    std::printf("plausible: %d\n", app::plausible_utterance(heard) ? 1 : 0);
+    if (!app::plausible_utterance(heard)) { std::printf("(rejected as non-speech -> no reply)\n"); return 0; }
+    std::string b64;
+    if (!o.out.empty()) {
+        std::ifstream f(o.out, std::ios::binary);
+        if (f) { std::vector<uint8_t> png((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()); b64 = app::base64_encode(png.data(), png.size()); }
+    }
+    const std::string prompt = app::render_director_chat_prompt(heard, std::string(), !b64.empty());
+    const br::director::KeelResponse resp = b64.empty()
+        ? br::director::keel_complete(host, port, prompt, 30000)
+        : br::director::keel_complete_vision(host, port, prompt, b64, 30000);
+    if (!resp.ok) { std::fprintf(stderr, "keel: %s\n", resp.error.c_str()); return 1; }
+    std::printf("director: \"%s\"\n", app::clean_vision_line(resp.content).c_str());
+    return 0;
 }
 
 // M23: the Shoggoth HEARS. Identical chase to --shoggoth-record (so --shoggoth-replay
@@ -4971,6 +5124,8 @@ int main(int argc, char** argv) {
     if (o.tts_say) return run_tts_say(o);
     if (o.tts_check) return run_tts_check(o);
     if (o.caption_shot) return run_caption_shot(o);
+    if (o.mic_test) return run_mic_test(o);
+    if (o.chat_test) return run_chat_test(o);
     if (o.shoggoth_replay) return run_shoggoth_replay(o);
     if (o.screensaver || o.scr_config) return run_screensaver(o);
     if (o.game)       return run_game(o);

@@ -4,6 +4,44 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 35 — TWO-WAY VOICE: the wanderer speaks, the Director answers in register  ✅ — ADR-074, gates M30 + M9 green
+
+**Operator ask (mid-session, on top of ADR-073).** "Now the user can talk back (via mic) to the game ... and the
+director can speak back ... the only way to make it truly dynamic and while keeping it in register." Chose
+**always-listening (VAD)** over push-to-talk (I recommended PTT for echo/false-trigger robustness; operator went
+hands-free).
+
+**De-risk first.** Sent a POV + a spoken line to Qwen-VL with a conversational "surveillance AI" prompt → it
+answered in register, grounded, never broke character ("is that thing following me?" → "...it's simply learning
+the rhythm of your fear."). Payoff proven before any mic code.
+
+**Built (ADR-074).** `app/src/mic_capture.h` — continuous 16 kHz mono `waveIn` (polled, no callback thread) +
+energy VAD (noise-floor calibration + hysteresis, ~0.7 s hangover) segmenting an utterance; returns PCM (caller
+writes the WAV). `app/src/director_chat.h` — `plausible_utterance` junk filter, `render_director_chat_prompt`,
+and `DirectorChatHost` (mirror of DirectorVisionHost; whisper injected as a functor; off-thread). `run_game`:
+poll mic → write WAV (TEMP, rotating) → submit (RT: with the clean POV readback; raster: text-only) → poll →
+`speak_pa` + subtitle. **Half-duplex echo control:** `speak_pa()` stamps `g_paSuspendUntilMs`; the mic is
+suspended while the PA voice plays (+0.6 s tail) so the Director never transcribes itself (NOT true AEC). New
+levers `--mic-test` + `--chat-test`; telemetry `chat_requests/produced`.
+
+**Verified.** `--mic-test`: `mic_device 1`, VAD runs, no false-trigger on silence. `--chat-test --say "..." --out
+<POV>` → Director: *"Your voice echoes off the yellow partitions ... yet I see only the dark pillar blocking your
+path forward"* (grounded + in register; the robotic TTS stand-in transcribes poorly but a real voice +
+large-v3-turbo is accurate; the VLM stays coherent on a noisy transcript via the POV). `--game --auto-play
+--director --rt`: mic opens in-game, VAD 45 s no false-fire, ambient narration intact (`vision_produced 2`),
+`debug_error_count 0`, lookcheck PASS. **Gate M30 + M9 green, ctest 100/100.** Exe delivered; committed + pushed.
+
+**Pending / open.** A real-voice in-game pass is the operator's to run (I can't speak into the mic). No on-screen
+"listening/thinking" indicator yet (the reply is the feedback). Always-on VAD can mis-segment in a noisy room
+(PTT was the robust alt). whisper/mic still use hardcoded `C:\` defaults (the parked packaging-P0 thread, still
+the other live thread). Possible polish: suppress ambient narration briefly after a conversation; per-line PA
+volume; a Settings MICROPHONE toggle (currently tied to the Director toggle).
+
+**Gotchas.** Always-on mic + the PA voice = a feedback loop unless gated — solved with the half-duplex
+`g_paSuspendUntilMs` window, NOT acoustic echo cancellation (out of scope). whisper hallucinates "Thank you" /
+"you" on near-silence — `plausible_utterance` filters bracketed tags + the known junk + requires real words.
+In-game WAVs go to `%TEMP%` (not `runs\`) so a Desktop double-click (cwd = Desktop) still works.
+
 ## Session 34 — Director SEES the player: VLM-grounded narration (RT)  ✅ — ADR-073, gates M30 + M9 green
 
 **Operator pivot.** Resumed on the portable-packaging thread (P0) but the operator chose to PIVOT to the parked
