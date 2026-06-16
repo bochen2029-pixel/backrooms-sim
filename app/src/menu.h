@@ -32,6 +32,7 @@ struct Settings {
     int sfx_pct = 90;     // 0..100 SFX volume
     int mouse_pct = 50;   // 0..100 mouse sensitivity (scaled by the shell)
     int director = 0;     // 0/1 Director on/off
+    int subtitles = 1;    // 0/1 Director subtitles on/off (on by default -- the PA voice is hard to make out)
     int rt = 0;           // 0/1 ray tracing on/off (M19; default off = no regression)
     int res_w = 1920;     // chosen render resolution (applied on relaunch; default 1080p)
     int res_h = 1080;
@@ -40,8 +41,9 @@ struct Settings {
 // Item counts per screen — shared so the renderer and the logic never disagree.
 constexpr int kMainItems = 4;      // New Game, Continue, Settings, Quit
 constexpr int kPauseItems = 3;     // Resume, Settings, Quit to Menu
-constexpr int kSettingsItems = 8;  // Master, SFX, Mouse, Director, Ray Tracing, Resolution, Test Connection, Back
+constexpr int kSettingsItems = 9;  // Master, SFX, Mouse, Director, Ray Tracing, Resolution, Test Connection, Subtitles, Back
 constexpr int kSettingsTestConn = 6;  // index of the "Test Connection" row (Activate -> UiCommand::TestConnection)
+constexpr int kSettingsSubtitles = 7;  // index of the "Subtitles" toggle row
 
 struct MenuModel {
     Screen screen = Screen::Splash;
@@ -90,7 +92,8 @@ inline void adjust_setting(Settings& s, int sel, int dir) {
         case 3: s.director = dir > 0 ? 1 : 0; break;
         case 4: s.rt = dir > 0 ? 1 : 0; break;
         case 5: res_step(s.res_w, s.res_h, dir); break;  // resolution (applied on relaunch)
-        default: break;  // "Back" item has no value
+        case kSettingsSubtitles: s.subtitles = dir > 0 ? 1 : 0; break;  // Director subtitles on/off
+        default: break;  // "Test Connection" + "Back" rows have no Left/Right value
     }
 }
 }  // namespace detail

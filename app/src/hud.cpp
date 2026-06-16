@@ -205,8 +205,9 @@ void build_menu_overlay(std::vector<uint8_t>& rgba, uint32_t width, uint32_t hei
             std::snprintf(rows[4], 32, "RAY TRACING  %s", m.settings.rt ? "ON" : "OFF");
             std::snprintf(rows[5], 32, "RESOLUTION  %dx%d", m.settings.res_w, m.settings.res_h);
             std::snprintf(rows[6], 32, "TEST CONNECTION");
-            std::snprintf(rows[7], 32, "BACK");
-            const char* labels[kSettingsItems] = {rows[0], rows[1], rows[2], rows[3], rows[4], rows[5], rows[6], rows[7]};
+            std::snprintf(rows[7], 32, "SUBTITLES  %s", m.settings.subtitles ? "ON" : "OFF");
+            std::snprintf(rows[8], 32, "BACK");
+            const char* labels[kSettingsItems] = {rows[0], rows[1], rows[2], rows[3], rows[4], rows[5], rows[6], rows[7], rows[8]};
             items(labels, nullptr, kSettingsItems, m.settings_sel, height * 2 / 5);
             // A hint line + the live LLM status, under the list.
             const int hy = static_cast<int>(height) - base * 20;
@@ -216,6 +217,8 @@ void build_menu_overlay(std::vector<uint8_t>& rgba, uint32_t width, uint32_t hei
                 draw_centered(rgba, width, height, cx, hy, base, "NEEDS THE LOCAL LLM - RUN TEST CONNECTION", nr, ng, nb, 220);
             else if (m.settings_sel == kSettingsTestConn)
                 draw_centered(rgba, width, height, cx, hy, base, "ENTER - PING THE DIRECTOR LLM (KEEL)", nr, ng, nb, 220);
+            else if (m.settings_sel == kSettingsSubtitles)
+                draw_centered(rgba, width, height, cx, hy, base, "SHOW THE DIRECTOR LINES ON SCREEN AS YOU PLAY", nr, ng, nb, 220);
             // LLM connection status (set by the TestConnection ping). Always shown so it stays visible.
             if (!m.llm_text.empty()) {
                 uint8_t lr = nr, lg = ng, lb = nb;

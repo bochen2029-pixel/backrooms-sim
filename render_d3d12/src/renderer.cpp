@@ -170,6 +170,7 @@ struct Renderer::Impl {
     ComPtr<ID3D12DescriptorHeap> ovlSrvHeap;          // shader-visible (1 SRV = overlay)
     ComPtr<ID3D12RootSignature> ovlRoot;
     ComPtr<ID3D12PipelineState> ovlPso;
+    ComPtr<ID3D12PipelineState> ovlBlendPso;   // alpha-blended variant: paint a transparent overlay OVER the world
     UINT ovlW = 0, ovlH = 0;
     bool ovlReady = false;
 
@@ -487,7 +488,7 @@ bool Renderer::resize(uint32_t width, uint32_t height) {
     // The overlay pipeline's texture is sized to the old resolution — drop it so it
     // rebuilds lazily at the new size on the next present (post path is unused windowed).
     d.ovlReady = false;
-    d.ovlTex.Reset(); d.ovlUpload.Reset(); d.ovlSrvHeap.Reset(); d.ovlRoot.Reset(); d.ovlPso.Reset();
+    d.ovlTex.Reset(); d.ovlUpload.Reset(); d.ovlSrvHeap.Reset(); d.ovlRoot.Reset(); d.ovlPso.Reset(); d.ovlBlendPso.Reset();
     return true;
 }
 
@@ -1592,12 +1593,19 @@ void Renderer::set_texture_seed(uint64_t seed) {
     if (impl_) impl_->pendingTexSeed = seed;
 }
 
-void Renderer::set_post(bool enabled, uint32_t seed, float time, bool hud) {
+void Renderer::set_post(bool enabled, uint32_t seed, float time, bool hud, bool clean) {
     if (!impl_) return;
     impl_->postEnabled = enabled;
     impl_->postParams.seed = seed;
     impl_->postParams.time = time;
     impl_->postParams.hud = hud ? 1u : 0u;
+    if (clean) {  // HUD-only: zero the VHS effects -> a crisp overlay over the untouched scene (subtitles)
+        impl_->postParams.grain = 0.0f; impl_->postParams.aberration = 0.0f; impl_->postParams.distortion = 0.0f;
+        impl_->postParams.scanline = 0.0f; impl_->postParams.vignette = 0.0f;
+    } else {      // the full VHS look (M8 defaults)
+        impl_->postParams.grain = 0.08f; impl_->postParams.aberration = 0.0025f; impl_->postParams.distortion = 0.06f;
+        impl_->postParams.scanline = 0.18f; impl_->postParams.vignette = 0.35f;
+    }
 }
 
 bool Renderer::upload_hud_overlay(const uint8_t* rgba, uint32_t width, uint32_t height) {
@@ -1627,6 +1635,9 @@ VOut VSMain(uint id : SV_VertexID) {
 float4 PSMain(VOut i) : SV_TARGET {
     float4 c = gOvl.Sample(gSamp, i.uv);
     return float4(c.rgb, 1.0);
+}
+float4 PSBlend(VOut i) : SV_TARGET {   // keep the sampled alpha -> alpha-over the world (transparent = world shows)
+    return gOvl.Sample(gSamp, i.uv);
 }
 )";
 
@@ -1749,6 +1760,19 @@ bool ensure_overlay_pipeline(Renderer::Impl& d, uint32_t srcW, uint32_t srcH, st
     pso.NumRenderTargets = 1; pso.RTVFormats[0] = kFormat;
     pso.DSVFormat = DXGI_FORMAT_UNKNOWN; pso.SampleDesc.Count = 1;
     if (FAILED(d.device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&d.ovlPso)))) { err = "overlay pso"; return false; }
+
+    // Alpha-blended variant: same fullscreen triangle, but PSBlend keeps the texture's alpha and the blend
+    // state does src-alpha-over -> a transparent overlay (a caption) painted directly OVER the world, no clear.
+    ComPtr<ID3DBlob> psb;
+    if (!compile_shader(kOverlayHlsl, "PSBlend", "ps_5_0", psb, err)) return false;
+    pso.PS = { psb->GetBufferPointer(), psb->GetBufferSize() };
+    pso.BlendState.RenderTarget[0].BlendEnable = TRUE;
+    pso.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    pso.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    pso.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    pso.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    if (FAILED(d.device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&d.ovlBlendPso)))) { err = "overlay blend pso"; return false; }
+
     d.ovlReady = true;
     return true;
 }
@@ -1802,9 +1826,17 @@ bool Renderer::present_overlay_windowed(const uint8_t* rgba, uint32_t width, uin
     return true;
 }
 
+bool Renderer::upload_caption_overlay(const uint8_t* rgba, uint32_t width, uint32_t height) {
+    if (!impl_) return false;
+    Impl& d = *impl_;
+    if (!ensure_overlay_pipeline(d, width, height, last_error_)) return false;
+    return upload_overlay(d, rgba, last_error_);
+}
+
 bool Renderer::render_chunks_windowed(const contracts::CameraPose& camera,
                                       const std::vector<contracts::ResidentChunk>& resident,
-                                      uint32_t upload_budget, uint64_t tick, uint32_t* out_drawn) {
+                                      uint32_t upload_budget, uint64_t tick, uint32_t* out_drawn,
+                                      bool draw_overlay) {
     Impl& d = *impl_;
     if (!d.windowed || !d.swapchain) { last_error_ = "render_chunks_windowed needs a window"; return false; }
     if (!ensure_lit_pipeline(d, d.pendingTexSeed, last_error_)) return false;
@@ -1908,6 +1940,19 @@ bool Renderer::render_chunks_windowed(const contracts::CameraPose& camera,
         ++drawn;
     }
     if (out_drawn) *out_drawn = drawn;
+
+    // Director subtitle: alpha-blend the caption texture (uploaded via upload_caption_overlay) OVER the world,
+    // same RTV, same command list. ovlBlendPso keeps the sampled alpha so transparent pixels show the scene;
+    // depth is off so it draws on top. No clear, no post pass -- just words painted on screen.
+    if (draw_overlay && d.ovlBlendPso && d.ovlSrvHeap) {
+        ID3D12DescriptorHeap* ovlHeaps[] = { d.ovlSrvHeap.Get() };
+        d.list->SetDescriptorHeaps(1, ovlHeaps);
+        d.list->SetGraphicsRootSignature(d.ovlRoot.Get());
+        d.list->SetPipelineState(d.ovlBlendPso.Get());
+        d.list->SetGraphicsRootDescriptorTable(0, d.ovlSrvHeap->GetGPUDescriptorHandleForHeapStart());
+        d.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        d.list->DrawInstanced(3, 1, 0, 0);
+    }
 
     const D3D12_RESOURCE_BARRIER toPresent = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
     d.list->ResourceBarrier(1, &toPresent);

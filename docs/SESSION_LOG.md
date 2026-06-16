@@ -198,6 +198,17 @@ whisper round-trip (`--tts-check`): "HUMMING FLUORESCENT LIGHTS FLICKER IN THE E
 "Evacuate sector 5 the containment breach is creating" (5/7). ctest 100/100 (TTS tests intact), pure +
 deterministic + asset-free, fresh exe delivered, sample WAV sent.
 
+**Follow-up 14 — Director SUBTITLES that actually show (ADR-072).** Operator still couldn't decipher the voice +
+reported the screen "glitching as heck" (seizure risk) with NO caption visible + no toggle. Root cause: ADR-070's
+caption tried to reuse the VHS-post HUD composite, but `render_chunks_windowed` never runs the post pass — so
+`postEnabled` created a state conflict (1024 debug errors + glitch) and the caption never drew; it was also
+gated on `!audioOn` with no setting. **Reverted that; did it the right way:** a real **alpha-blended overlay**
+(`ovlBlendPso`, SRC_ALPHA/INV_SRC_ALPHA + `PSBlend`) that paints the caption RGBA straight over the world inside
+`render_chunks_windowed` (same list, before Present, no clear, no post); `upload_caption_overlay()` uploads once
+on change; a Settings **SUBTITLES toggle** (default ON) shows lines whenever the Director speaks, independent of
+audio. New `--caption-shot` proves the subtitle (legible green-on-dark bar, PNG sent). In-game: `debug_error_count
+0` (was 1024 — glitch gone), captions draw. gate M30 green, ctest 100/100.
+
 ---
 
 ## Session 32 — M30 polish ×3: live descent + deep-descent soak + draft telegraph  ✅ — `gate M30` green; model-free Phase IV EXHAUSTED

@@ -109,6 +109,7 @@ struct Options {
     std::string whisper_exe, whisper_model;  // M23: whisper.cpp CLI + model (defaults below)
     bool tts_say = false;                  // M24: procedural TTS -> WAV (the Backrooms PA voice)
     bool tts_check = false;                 // M24: TTS -> whisper round-trip (intelligibility check)
+    bool caption_shot = false;              // render the Director subtitle over a gray bg -> PNG (visibility proof)
     bool shoggoth_pa_record = false;       // M24: PA voice spoken into the soundscape -> heard as words
     std::string say_text;                  // M24: text for --tts-say / the PA line
     uint32_t eval_count = 100;          // --director-eval: scenario count
@@ -237,6 +238,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--whisper-model") == 0) { if (!str(o.whisper_model)) return false; }
         else if (std::strcmp(a, "--tts-say") == 0) o.tts_say = true;
         else if (std::strcmp(a, "--tts-check") == 0) o.tts_check = true;
+        else if (std::strcmp(a, "--caption-shot") == 0) o.caption_shot = true;
         else if (std::strcmp(a, "--shoggoth-pa-record") == 0) o.shoggoth_pa_record = true;
         else if (std::strcmp(a, "--say") == 0) { if (!str(o.say_text)) return false; }
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
@@ -1234,8 +1236,9 @@ int run_game(const Options& o) {
     auto last_director = t_start - director_interval;   // fire the first line promptly
     std::string last_pa_line;
     uint64_t director_spoke = 0;
-    std::string capText;                 // audio-off fallback: the on-screen subtitle text...
+    std::string capText;                 // the current on-screen subtitle text (Settings -> Subtitles)...
     auto capUntil = t_start;             // ...shown until this time (a few seconds per line)
+    std::vector<uint8_t> capOvl;         // its rasterised RGBA, uploaded to the renderer when the line changes
 
     // Headless spin guard (--auto-play): drop straight into Play and watch the mouse-look delta with a
     // STILL mouse. Raw input emits nothing when the mouse is idle, so the delta must stay ~0 rad/frame; the
@@ -1396,8 +1399,12 @@ int run_game(const Options& o) {
                 for (const contracts::Directive& d : director->poll()) {
                     if (d.caption[0] != '\0' && last_pa_line != d.caption) {
                         last_pa_line = d.caption;
-                        if (audioOn) speak_pa(d.caption, contracts::kAudioSampleRate);   // PA voice (primary)
-                        else { capText = d.caption; capUntil = now + seconds(6); }       // audio off -> text-caption fallback
+                        if (audioOn) speak_pa(d.caption, contracts::kAudioSampleRate);   // PA voice
+                        if (model.settings.subtitles) {                                  // + on-screen subtitle
+                            capText = d.caption; capUntil = now + seconds(6);
+                            app::build_caption_overlay(capOvl, curW, curH, capText);
+                            renderer.upload_caption_overlay(capOvl.data(), curW, curH);  // upload once; drawing it is then free
+                        }
                         ++director_spoke;
                     }
                 }
@@ -1443,21 +1450,16 @@ int run_game(const Options& o) {
                 }
             }
             if (!model.settings.rt) {
-                // Audio-off TEXT FALLBACK: if the PA voice can't play (no audio device) but Director is on,
-                // composite the latest Director line as a bottom subtitle via the VHS-post HUD path (the only
-                // in-Play overlay path). Gated on !audioOn so the normal (audio-working) game keeps its no-post look.
-                if (!audioOn && model.settings.director) {
-                    if (now >= capUntil) capText.clear();
-                    renderer.set_post(true, static_cast<uint32_t>(texSeed), duration<float>(now - t_start).count(), true);
-                    std::vector<uint8_t> capOvl;
-                    app::build_caption_overlay(capOvl, curW, curH, capText);
-                    renderer.upload_hud_overlay(capOvl.data(), curW, curH);
-                }
                 app::build_shoggoth_mesh(shogBody, shog.pos, shog.writhe, 1.4f);  // M20b in-world body
                 std::vector<contracts::ResidentChunk> withShog = sm->resident();
                 withShog.push_back(contracts::ResidentChunk{contracts::ChunkKey{9999, static_cast<int64_t>(frames), 0}, shogBody.data(), static_cast<uint32_t>(shogBody.size())});
+                // Director SUBTITLES: paint the latest line as a plain alpha-blended overlay over the world
+                // (drawn inside render_chunks_windowed, same frame, no HUD/post pass). The text was uploaded
+                // when it arrived; here we just ask for the draw while the line is fresh (~6 s).
+                const bool showCap = model.settings.director && model.settings.subtitles
+                                     && !capText.empty() && now < capUntil;
                 uint32_t drawn = 0;
-                if (!renderer.render_chunks_windowed(cam, withShog, 8u, s.tick, &drawn)) {
+                if (!renderer.render_chunks_windowed(cam, withShog, 8u, s.tick, &drawn, showCap)) {
                     std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); ShowCursor(TRUE); return 1;
                 }
             }
@@ -3235,6 +3237,29 @@ int run_tts_say(const Options& o) {
 // M24: the TTS->STT intelligibility check (the gate's keystone): synthesize a PA line,
 // run whisper over it (via the app's robust CreateProcess path), and report what was
 // heard + how many of the spoken words came back. Proves the procedural voice is readable.
+// Headless visibility proof for the Director subtitle: rasterise the caption (build_caption_overlay) and
+// alpha-composite it over a mid-gray "world" in CPU -> PNG, exactly as the in-game alpha-blend would look.
+int run_caption_shot(const Options& o) {
+    const uint32_t W = o.width ? o.width : 960u, H = o.height ? o.height : 540u;
+    const std::string text = o.say_text.empty() ? std::string("EVACUATE SECTOR FIVE - CONTAINMENT BREACH DETECTED") : o.say_text;
+    std::vector<uint8_t> cap;
+    app::build_caption_overlay(cap, W, H, text);
+    std::vector<uint8_t> img(static_cast<size_t>(W) * H * 4u);
+    const uint8_t bg = 92;  // mid-gray stand-in for the world behind the subtitle
+    for (size_t p = 0; p < static_cast<size_t>(W) * H; ++p) {
+        const uint8_t* s = &cap[p * 4]; uint8_t* d = &img[p * 4];
+        const float a = static_cast<float>(s[3]) / 255.0f;
+        for (int k = 0; k < 3; ++k) d[k] = static_cast<uint8_t>(static_cast<float>(s[k]) * a + static_cast<float>(bg) * (1.0f - a));
+        d[3] = 255;
+    }
+    const std::string out = o.out.empty() ? std::string("runs/caption.png") : o.out;
+    if (!stbi_write_png(out.c_str(), static_cast<int>(W), static_cast<int>(H), 4, img.data(), static_cast<int>(W) * 4)) {
+        std::fprintf(stderr, "caption-shot: PNG write failed\n"); return 1;
+    }
+    std::printf("caption: %s\nout: %s\n", text.c_str(), out.c_str());
+    return 0;
+}
+
 int run_tts_check(const Options& o) {
     const std::string text = o.say_text.empty() ? std::string("EVACUATE SECTOR FIVE") : o.say_text;
     const uint32_t sr = 16000u;
@@ -4828,6 +4853,7 @@ int main(int argc, char** argv) {
     if (o.shoggoth_pa_record) return run_shoggoth_pa_record(o);
     if (o.tts_say) return run_tts_say(o);
     if (o.tts_check) return run_tts_check(o);
+    if (o.caption_shot) return run_caption_shot(o);
     if (o.shoggoth_replay) return run_shoggoth_replay(o);
     if (o.screensaver || o.scr_config) return run_screensaver(o);
     if (o.game)       return run_game(o);

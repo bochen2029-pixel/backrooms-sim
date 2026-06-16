@@ -68,7 +68,10 @@ public:
     // seconds) drives grain/interlace; `hud` composites the overlay. When enabled,
     // headless renders read back the post-processed image. Cheap; the pipeline is
     // built lazily on the next render.
-    void set_post(bool enabled, uint32_t seed, float time, bool hud);
+    // `clean` (default false) zeroes the VHS effect intensities, so the pass becomes a straight
+    // pass-through that ONLY alpha-composites the HUD overlay -- a crisp subtitle over an untouched
+    // scene (no grain/aberration/scanlines). Used for the Director subtitle path.
+    void set_post(bool enabled, uint32_t seed, float time, bool hud, bool clean = false);
 
     // Upload an RGBA HUD overlay (width*height, must match the render size) that
     // the post pass composites on top (M8). Builds the post pipeline if needed.
@@ -86,9 +89,17 @@ public:
     // swapchain back buffer (depth-tested, lit) and Present — same geometry + forward
     // lighting as render_chunks, targeting the window instead of an offscreen RT.
     // Requires init_windowed(). Blocks on the frame fence so the GPU is idle on return.
+    // `draw_overlay` (default false): after the chunks, alpha-blend the overlay texture last given to
+    // upload_caption_overlay() OVER the world (a subtitle painted on screen) before Present. No HUD/post pass.
     bool render_chunks_windowed(const contracts::CameraPose& camera,
                                 const std::vector<contracts::ResidentChunk>& resident,
-                                uint32_t upload_budget, uint64_t tick, uint32_t* out_drawn);
+                                uint32_t upload_budget, uint64_t tick, uint32_t* out_drawn,
+                                bool draw_overlay = false);
+
+    // Upload an RGBA caption/subtitle (width*height) to be painted over the world by the next
+    // render_chunks_windowed(draw_overlay=true). Upload once when the text changes (it fences the GPU);
+    // drawing it each frame is then free. Alpha is honoured (transparent pixels show the world).
+    bool upload_caption_overlay(const uint8_t* rgba, uint32_t width, uint32_t height);
 
     // Windowed (M15, menus): blit a CPU RGBA overlay (width*height, must match the
     // window size) to the swapchain back buffer via a fullscreen triangle, and
