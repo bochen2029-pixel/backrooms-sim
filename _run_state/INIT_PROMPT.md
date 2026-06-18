@@ -32,7 +32,7 @@ execution** — see WORKING MODE below.
    git -C C:\backrooms status --short
    powershell -NoProfile -ExecutionPolicy Bypass -File C:\backrooms\scripts\audit.ps1
    ```
-   - HEAD should be **`4ce0596`** or later. Working tree clean except `?? _brainstorm/` (+ `_run_state/` notes).
+   - HEAD should be **`577eef1`** or later (tag `phaseD-live`). Working tree clean except `?? _brainstorm/` (+ `_run_state/` notes).
    - `audit.ps1` MUST print: **build ok · ctest 109/109 · shoggoth record==replay · inventory ok · isolation ok.**
      If it is NOT green, STOP — do not "debug forward." Reconcile to the last green tag (Iron Rule 2) and re-audit.
 5. **Before ANY LLM / vision / sacred-gate work**, bring up the SELF-CONTAINED sidecar:
@@ -46,7 +46,7 @@ execution** — see WORKING MODE below.
    `C:\TRANSPORTER\claude_archive_viewer_v4.html` (Ctrl-K concept search).
 
 ═══════════════════════════════════════════════════════════════════════════════
-## CURRENT STATE (where we are — all verified GREEN at HEAD `4ce0596`)
+## CURRENT STATE (where we are — all verified GREEN at HEAD `577eef1`, tag `phaseD-live`)
 ═══════════════════════════════════════════════════════════════════════════════
 - **Build/tests:** clean build (warnings-as-errors), **ctest 109/109**, D3D12 debug layer clean, determinism
   record==replay, module inventory matches ARCHITECTURE.md, core isolation (INV-5) clean.
@@ -63,12 +63,15 @@ execution** — see WORKING MODE below.
   the bundled sidecar; `package.ps1` treats runtime/models/DXC as persistent in-repo assets (refresh exe only,
   never C:\/SDK); `keel.lock` C:\ paths → bundle-relative. PROVEN: sacred record→replay `valid_intents=5` +
   record==replay, entirely from C:\backrooms.
-- **The Shoggoth is immersive and LIVE in the playable game:** it **THINKS** (live LLM brain ~every 3 s),
-  **SPEAKS** impressionistic never-naming murmurs through the PA voice when the wanderer is within 6 m (Phase E),
-  **HUNTS** (FSM + bounded-BFS nav, feature-aware idle that loiters at junctions, fixed Flank), and its **VISION
-  drives motion** via `resolve_target` (semantic `target_kind` → a real reachable goal cell: Wanderer → your exact
-  cell, Stairs → the nearest up-stair = the Escape "yearning", else → the feature-aware Explore wander). The
-  vision→motion path is **determinism-proven** in record/replay.
+- **The Shoggoth's immersive arc is COMPLETE + LIVE in the playable game:** it **THINKS** (live LLM brain ~every 3 s),
+  **SEES** (live rendered POV — Phase D LIVE, `577eef1`/`phaseD-live`/E11: a 2nd headless `Renderer` renders
+  `shoggoth_pov_camera`, `ShoggothVisionHost` turns it into an intent), **SPEAKS** impressionistic never-naming murmurs
+  through the PA voice when the wanderer is within 6 m (Phase E), **HUNTS** (FSM + bounded-BFS nav, feature-aware idle
+  that loiters at junctions, fixed Flank), and its **VISION drives its MOTION live** via `resolve_target` (semantic
+  `target_kind` → a real reachable goal cell: Wanderer → your exact cell, Stairs → the nearest up-stair = the Escape
+  "yearning", else → the feature-aware Explore wander). The vision→motion path is **determinism-proven** in record/replay,
+  and now runs **live in `run_game`** (the text brain sets *how* — speed/aggression/voice; vision sets *where* — it owns
+  the four perception fields `resolve_target` reads, so the 3 s text brain can't clobber the seen target between blinks).
 - **Determinism plumbing:** `ShoggothIntent` carries `{action, aggression, target_kind, sector, proximity, mood,
   snap, utterance}`. `ShoggothEvent` is `SHOGLOG2`, **padding-free** (locked by `static_assert(sizeof==40)`) for a
   deterministic raw-byte fold. `event_from_intent` / `apply_event_to_intent` are the single source of truth for the
@@ -78,23 +81,29 @@ execution** — see WORKING MODE below.
   single-multimodal-slot · latest-wins-per-class · concurrency cap · FIFO) with 6 deterministic property tests.
 
 ═══════════════════════════════════════════════════════════════════════════════
-## THE SINGLE NEXT ACTION → live in-game PIXEL-vision render
+## THE SINGLE NEXT ACTION → Phase C.2 (threaded KeelBroker arbitration)  [prior action — live pixel-vision render — SHIPPED `phaseD-live`]
 ═══════════════════════════════════════════════════════════════════════════════
-Make the creature reason from a **rendered POV** live in `run_game` (today it reasons from its text-sense live;
-its vision-driven motion is proven only in the record/replay path). This is the last immersive piece. It needs:
-- A **2nd headless D3D12 device** inside `run_game` (NOTE: `render_chunks` + `readback` are **headless-only** —
-  see `render_d3d12/include/render_d3d12/renderer.h`). ADR-077 (validation forced on) makes a 2nd/3rd device
-  viable — the RT path already runs dual-device.
-- A new **`ShoggothVisionHost`** (mirror `app/src/director_vision.h`). The pure pieces already exist:
-  `shoggoth_pov_camera` + `render_shoggoth_vision_prompt` (`shoggoth_vision.h`) and `parse_shoggoth_intent`
-  (`shoggoth_brain.h`, already parses the full semantic schema + utterance).
-- **The hard part = chunk-upload management.** The headless record path uploads chunks in a ~400-iteration loop
-  (fine offscreen; a frame-stall in the live game). Do it with **incremental, budget-spread uploads + a
-  frame-time check** — do NOT bolt on a hitchy render. Cadence ~22–28 s, off the player's RT/Director vision (one
-  multimodal call at a time — see `keel_scheduler.h`). Graceful no-op when KEEL is down / on the 4B tier.
-- **Verify:** record/replay determinism stays green; a windowed `--game` smoke (no crash + the host produces
-  intents) with KEEL up; `audit.ps1` green. It is additive and revertable — if a smoke shows a stall or crash,
-  revert it cleanly and report.
+**Live in-game PIXEL-vision is DONE** (`577eef1`, tag `phaseD-live`, ledger E11): the creature now SEES live in
+`run_game` via `app/src/shoggoth_vision_host.h` + a 2nd headless `Renderer` (384×216); the upload-stall was solved by
+a **budget-spread warm window** (24 frames × 16 meshes via `render_chunks`'s existing `upload_budget` — 24×16=384 ≥ the
+~338 common-case resident set @ radius 6 × 2 levels; deep-shaft >384 degrades to a graceful near-field partial, not fog).
+Verified: `audit.ps1` green + live `--game` smoke **svision 2/2/2**, **debug_error_count=0 across 3 D3D12 devices**,
+3763 frames/35 s (~107 fps, no stall), lookcheck PASS. **The immersive arc is complete** — thinks+sees+speaks+hunts live.
+
+**NEXT = Phase C.2 (per `docs/SHOGGOTH_PLAN.md`).** Vision-live makes a real **5th** concurrent LLM/VLM consumer on the
+single llama-server (creature-brain + creature-vision + director-narration + director-vision + chat). Today they share
+KEEL best-effort on offset sparse cadences (the smoke proved they coexist debug-clean, but **unarbitrated**). Wire them
+through a **threaded `KeelBroker`** (mutex+condvar) wrapping the already-built, already-tested `app/src/keel_scheduler.h`
+(Phase C-core: priority player-speech > shoggoth-vision > director-vision > director-narration > shoggoth-brain · single
+multimodal slot · latest-wins-per-class · concurrency cap · FIFO; 6 deterministic property tests). Route
+`ShoggothBrainHost` / `ShoggothVisionHost` / `DirectorVisionHost` / `DirectorChatHost` / `DirectorHost` through it.
+- **Verify via the SOAK, not flaky threaded unit tests** (the pure scheduler already has the deterministic property
+  tests; the broker is the thin threaded shell): a concurrency soak gate — frame p99 < 2× median, a queued player-speech
+  turn never waits behind a vision call beyond one slot. Needs KEEL :7071 up (`scripts\keel-up.ps1`).
+- It is **`run_game`/host-side only** → `audit.ps1` record==replay MUST stay green (re-confirm after — the gated record
+  path is untouched, same as the Phase D LIVE increment). Additive + revertable.
+- **Alternatives the operator may pick instead:** Phase F (live cheap-tier hearing), Phase G (Escape polish —
+  `resolve_target` already yearns at stairs), or call the immersive arc shipped. The C.2 work is *hardening*, not a fix.
 
 ═══════════════════════════════════════════════════════════════════════════════
 ## DON'T ASSUME (read carefully — these are the easy ways to be wrong)
@@ -105,8 +114,11 @@ its vision-driven motion is proven only in the record/replay path). This is the 
 2. **The M30 `game mouse-look` gate "red" is a tool-session cold-start artifact**, not a regression: the same
    `--game --auto-play --seconds 2` yields 1 frame here but ~473 in 9 s; `lookcheck: PASS` (no spin) in all. It
    passes on the operator's foreground GPU. Do NOT "fix" it, and do NOT widen the gate window (Iron Rule 6).
-3. **Live PIXEL-vision is NOT in-game yet** — it is THE next action. The creature's vision *drives motion*
-   (`resolve_target`, proven in record/replay) and it reasons from its text-sense live. Don't claim it "sees" live.
+3. **Live PIXEL-vision IS now in-game** (Phase D LIVE, `577eef1`, tag `phaseD-live`, E11) — a 2nd headless `Renderer`
+   renders the creature POV in `run_game` → `ShoggothVisionHost` → intent → `resolve_target`. The text brain still
+   drives between the sparse ~25 s vision frames but PRESERVES the four perception fields (`target_kind/sector/
+   proximity/snap`) so it can't clobber the seen target — the stale target persisting between "blinks" is BY DESIGN
+   (volition across blinks). The creature SEES live; say so. (The NEXT action is Phase C.2 — see above.)
 4. **Determinism is sacred.** record==replay is THE proof. `resolve_target` is gated by `target_kind != None`
    (default None → byte-unchanged → M21/M29 sacred gates intact). The schema is `SHOGLOG2`, padding-free. After
    ANY change to `shoggoth_step` / the schema / the record paths, run `audit.ps1` and confirm record==replay.
@@ -151,8 +163,15 @@ its vision-driven motion is proven only in the record/replay path). This is the 
 ═══════════════════════════════════════════════════════════════════════════════
 ## PENDING / DEFERRED (after the next action)
 ═══════════════════════════════════════════════════════════════════════════════
-- **Phase C.2** — the threaded `KeelBroker` wrapping `keel_scheduler.h` + route the live hosts through it + a
-  concurrency soak (frame p99 < 2× median; vision never starves a player-speech turn). Needs KEEL up.
+- **Phase C.2 — now THE single next action (promoted above).** Threaded `KeelBroker` wrapping `keel_scheduler.h` +
+  route the 5 live hosts through it + a concurrency soak (frame p99 < 2× median; vision never starves a player-speech
+  turn). Verify by SOAK, not flaky threaded unit tests. Needs KEEL up.
+- **Phase D LIVE watch-items (open, from E11 — verify when convenient, not gates):** (a) **VRAM under sustained 4K RT**
+  — the Phase D smoke was ~35 s at the persisted res; 3 D3D12 devices + the 9B model (~6 GB) on the 16 GB card is fine
+  at that scale, but a longer 4K-RT soak should confirm headroom before "bulletproof." (b) **Warm-window vs resident
+  count** — 24×16=384 covers the ~338 common-case resident set (radius 6 × 2 levels); a deep-shaft (>384) renders a
+  graceful near-field partial (render_chunks depth-draws the uploaded near-field — not fog). If a deep POV ever looks
+  sparse, make the warm window adaptive (warm until `drawn >= resident_count` OR the frame cap, like the record path).
 - **Phase F** — live cheap-tier hearing (a deterministic soundscape→tag, zero LLM) feeding the brain.
 - **Phase G** — Escape polish (resolve_target already does Stairs = the yearning; "stage it / yearn, don't climb"
   — full vertical locomotion is a separate milestone, deliberately NOT bundled).
@@ -170,11 +189,13 @@ its vision-driven motion is proven only in the record/replay path). This is the 
 - Canon: `docs/ARCHITECTURE.md` · Plan: `docs/MILESTONES.md` · Decisions/ADRs: `docs/DECISIONS.md` (ADR-076/077/078)
 - The Shoggoth plan: `docs/SHOGGOTH_PLAN.md` (phases A–G, the six pillars, "calibrated incompetence"/"its mediocrity
   is the dread", the ablation-falsifiability idea, verticality answered: yearn-don't-climb).
-- Per-change ledger: `docs/CHANGE_AUDIT_LOG.md` (E0–E10) · Session narrative: `docs/SESSION_LOG.md`
+- Per-change ledger: `docs/CHANGE_AUDIT_LOG.md` (E0–E11) · Session narrative: `docs/SESSION_LOG.md` (§38 newest)
 - Creature code: `app/src/shoggoth.h` (struct, FSM nav, `resolve_idle_goal`, `resolve_target`, `shoggoth_hash`),
   `shoggoth_brain.h` (summary, prompts, `parse_shoggoth_intent`, `ShoggothEvent`, `SHOGLOG2`, mapping helpers),
   `shoggoth_brain_host.h` (the live text brain), `shoggoth_vision.h` (POV camera + vision prompt),
-  `keel_scheduler.h` (arbitration core). Live wiring + sidecar launcher + voice: `app/src/main.cpp`.
+  `shoggoth_vision_host.h` (the live qwen-VL EYE — Phase D LIVE, off-thread POV→intent),
+  `keel_scheduler.h` (arbitration core; Phase C.2 wraps it in a threaded `KeelBroker`). Live wiring (the 2nd headless
+  creature-POV device, the warm window, the text-brain field-preservation) + sidecar launcher + voice: `app/src/main.cpp`.
 - Scripts: `scripts/audit.ps1` (per-step oracle) · `scripts/gate.ps1` (milestone gate) · `scripts/keel-up.ps1` /
   `keel-down.ps1` (self-contained sidecar) · `scripts/build.ps1` · `scripts/package.ps1` (bundle).
 - Bundle/runtime (self-contained, gitignored): `dist\Backrooms\` (exe + `runtime\{llama,keel,whisper}` + `models\`).

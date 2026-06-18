@@ -216,7 +216,28 @@ job is audit + fast, unambiguous rollback.
   it), **debug_error_count=0** across THREE concurrent D3D12 devices (windowed raster + DXR + the creature-POV
   headless), **frames=3763 in 35 s (~107 fps — no stall)**, `lookcheck: PASS`, clean exit. The budget-spread
   warm window solved the upload-stall concern; ADR-077 (forced validation) made the 3rd device viable.
-- **DEFERRED (unchanged):** Phase C.2 — route all live hosts (brain / director-vision / chat / **this**) through
-  the threaded `KeelBroker` wrapping `keel_scheduler.h` so the single multimodal slot is arbitrated rather than
-  best-effort-queued (today they share KEEL on offset sparse cadences). Phase F (cheap-tier hearing), G (Escape
+- **Design notes / watch-items (reviewer-flagged; recorded so a future reader doesn't "tidy" or mis-read them):**
+  - **The text-brain field-preservation is `run_game`-ONLY — verified, must stay there.** The preservation
+    (`it.target_kind = shog.intent.target_kind; …sector/proximity/snap`) is in the live brain-poll loop in
+    `run_game` (main.cpp ~L1676). The gated record/replay apply is entirely separate (`sh.intent = intent` in
+    `run_shoggoth_record` / `…_vision_record` / `…_hearing_record` / `…_pa_record` ~L3259+, and
+    `apply_event_to_intent` in `run_shoggoth_replay` ~L3672) — NOT touched. Do NOT migrate the preservation into the
+    record path: it must never alter the recorded byte stream (that's why `audit.ps1` record==replay stayed green).
+  - **The seen `target_kind` persisting between the sparse ~25 s vision frames is BY DESIGN, not a leak** — the
+    SHOGGOTH_PLAN "volition across blinks": the creature commits to what it last SAW until the next blink (the text
+    brain only updates *how* — action/aggression/voice). Behaviour-neutral when vision is off (the fields stay
+    None/default → `resolve_target` skipped → M21/M29 sacred path byte-unchanged).
+  - **Warm-window coverage:** 24 frames × 16 meshes = 384 uploads ≥ the ~338 common-case resident set (radius 6 ×
+    2 levels @ 169/level). A deep-shaft POV (resident >384) renders a graceful near-field partial (render_chunks
+    depth-draws the uploaded near-field — NOT fog); successive 25 s windows upload only the delta. If a deep POV
+    ever looks sparse, make the window adaptive (warm until `drawn >= resident_count` OR the cap, like the record path).
+  - **OPEN follow-up (not a gate):** VRAM headroom under a *sustained 4K RT* soak with the 3 concurrent D3D12 devices
+    + the 9B model (~6 GB) on the 16 GB card — the smoke was ~35 s at the persisted res; confirm before "bulletproof."
+  - **Gotcha surfaced:** `run_game`'s persisted `backrooms.cfg` can silently override CLI flags (the smoke ran
+    RT+Director+seed1 from a stale cfg despite `--seed 3`) — a future "clean-isolation" smoke must clear/inspect the cfg.
+- **DEFERRED (now the single next action):** Phase C.2 — route all 5 live hosts (brain / **creature-vision** /
+  director-narration / director-vision / chat) through the threaded `KeelBroker` wrapping `keel_scheduler.h` so the
+  single multimodal slot is **arbitrated** rather than best-effort-queued (today they share KEEL on offset sparse
+  cadences; the smoke proved they coexist debug-clean but UNarbitrated). **Verify by SOAK, not flaky threaded unit
+  tests**; re-confirm `audit.ps1` record==replay after (host-side only). Then Phase F (cheap-tier hearing), G (Escape
   polish). Public-release Agility SDK.
