@@ -3063,6 +3063,25 @@ function Invoke-GateM29 {
         Write-Note "sacred gate (descent): record==replay $recHash model-offline; the per-floor Shoggoth lost the prey (Lurk) when it changed floor -- escape is deterministic + replayable"
     }
 
+    # M29 + AUDIT-207: the PERCEPTION record paths (vision/hearing/PA) must apply the SAME cross-seam
+    # prey-offset as --shoggoth-record via the shared shoggoth_prey() helper, or a --level!=0 record on
+    # them would not replay bit-exact (they didn't, until the fix). Exercise the VISION path across a
+    # descent -> bit-identical replay + the creature escapes (Lurk). KEEL-independent (the escape is
+    # deterministic), so it holds even with the vision tier offline; it guards the shared helper that
+    # hearing/PA also call. This is the regression guard the bug slipped through (M29 only tested the
+    # plain record path before).
+    Assert-Gate 'sacred gate (M29): VISION record->replay bit-identical across a descent (AUDIT-207)' {
+        $slog = Join-Path $tmp 'sv.log'
+        $rec = Invoke-AppCapture @('--shoggoth-vision-record', '--director-url', 'http://127.0.0.1:7071', '--director-log', $slog, '--seed', '3', '--ticks', '1200', '--level', '2')
+        if ($rec.Exit -ne 0) { throw "vision record exited $($rec.Exit): $($rec.Out)" }
+        $recHash = Get-MetricStr $rec.Out 'combined_hash'
+        $rep = Invoke-AppCapture @('--shoggoth-replay', '--director-log', $slog, '--level', '2')
+        if ($rep.Exit -ne 0) { throw "vision replay exited $($rep.Exit): $($rep.Out)" }
+        if ((Get-MetricStr $rep.Out 'combined_hash') -ne $recHash) { throw "vision record != replay across the descent -- prey-offset inconsistent (AUDIT-207 regressed)" }
+        if ([int](Get-Metric $rep.Out 'final_state') -ne 0) { throw "the creature did not escape across the seam via the vision path (final_state != Lurk)" }
+        Write-Note "M29 vision path: record==replay $recHash across a descent, creature escaped (Lurk) -- prey-offset consistent with --shoggoth-record (AUDIT-207 closed)"
+    }
+
     # Regression: the M21 sacred gate (no floor change, --level 0) still holds bit-exact.
     Assert-Gate 'regression: M21 sacred gate (level-0 record->replay bit-identical, model off)' {
         $slog = Join-Path $tmp 's21.log'

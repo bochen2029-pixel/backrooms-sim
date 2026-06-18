@@ -93,3 +93,17 @@ job is audit + fast, unambiguous rollback.
   `95945b9087214b14` = the plain-record level-7 chase) AND level-0 vision **unchanged**
   (`409129a0236b3084` = M22/M23/M24 byte-identical). `audit.ps1` POST: `build ok | ctest 103/103 |
   determ 409129a0 (lvl0) | inventory ok | isolation ok`.
+
+## E5 — 2026-06-17 — Gate the M29 cross-seam determinism of the VISION record path (AUDIT-207 guard)
+- **What:** added an `Invoke-GateM29` case that records `--shoggoth-vision-record` across a descent
+  (`--level 2`) then replays, asserting record==replay + the creature escapes (Lurk). The M29 gate
+  previously tested only the *plain* record path — which is exactly why the vision/hearing/PA
+  prey-offset bug (E4) slipped through. The vision path exercises the shared `shoggoth_prey()` helper
+  that hearing/PA also call, so one case guards all three. KEEL-independent (escape + determinism).
+- **Why:** the gate is the durable guard; without it the E4 fix could silently regress.
+- **Files:** `scripts/gate.ps1`. **Rollback:** `git revert <commit>`.
+- **Verification:** the case's exact commands run green now — vision-record `--level 2` == replay
+  (`95945b9087214b14`), replay final_state=0 (escaped); `gate.ps1` parses clean (PS 5.1 AST); commit
+  hook build+ctest green. NOTE: the *rest* of `Invoke-GateM29` still needs KEEL :7071 for its other
+  cases' `valid_intents>=1` (pre-existing); this new case does not require `valid_intents`, so it
+  greens regardless of KEEL.
