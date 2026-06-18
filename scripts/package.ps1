@@ -41,7 +41,7 @@ function Need([string]$p) { if (-not (Test-Path $p)) { throw "missing source: $p
 
 # --- 1) build release ----------------------------------------------------------
 if (-not $SkipBuild) {
-    Write-Step "build release (BACKROOMS_RELEASE=ON, optimized, no debug layer)"
+    Write-Step "build release (BACKROOMS_RELEASE=ON, optimized; ADR-077: validation layer still attempted -- no-op without the SDK layers)"
     $toolchain = Join-Path $env:VCPKG_ROOT 'scripts\buildsystems\vcpkg.cmake'
     cmake -S $RepoRoot -B $rel -G Ninja "-DCMAKE_TOOLCHAIN_FILE=$toolchain" `
         "-DVCPKG_TARGET_TRIPLET=x64-windows-static" "-DVCPKG_HOST_TRIPLET=x64-windows-static" `

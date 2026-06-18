@@ -31,7 +31,7 @@ foreach ($m in $expected) {
 # as `runs`/`scripts` — not sim modules, so they carry no MODULE.md / ARCHITECTURE entry.
 $known = $expected + @('contracts', 'docs', 'scripts', 'tests', 'goldens', 'runs',
                        'build', 'build-release', 'dist', 'extern', 'files', '.git', '.claude',
-                       '_run_state', '.brstate')
+                       '_run_state', '.brstate', '_brainstorm')
 Get-ChildItem $RepoRoot -Directory | ForEach-Object {
     if ($known -notcontains $_.Name) {
         $problems += "unexpected top-level directory (not in inventory): $($_.Name)/"

@@ -212,28 +212,25 @@ namespace {
 // with a trivial allocation so we reject a dead one here and fall through (next adapter, then WARP) --
 // graceful degradation instead of a hard crash for a user whose driver hiccups. Cheap; runs once at init.
 bool device_usable(ID3D12Device* dev) {
-    if (!dev) return false;
-    // Mirror the real texture array (a DEFAULT-heap VRAM texture): on a dead/TDR'd device the small
-    // buffer alloc still succeeds but the texture alloc fails, so probe with the actual resource shape.
-    D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
-    D3D12_RESOURCE_DESC rd = {};
-    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    rd.Width = static_cast<UINT64>(kTexSize); rd.Height = static_cast<UINT>(kTexSize);
-    rd.DepthOrArraySize = static_cast<UINT16>(kTexCount); rd.MipLevels = 1;
-    rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; rd.SampleDesc.Count = 1;
-    rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    Microsoft::WRL::ComPtr<ID3D12Resource> probe;
-    return SUCCEEDED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
-        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&probe)));
+    // ADR-077: the throwaway probe texture (added Session 36 on a TDR'd GPU, never verified on a healthy
+    // one) left the RELEASE device (no debug layer) in a DEVICE_REMOVED state on a perfectly healthy GPU --
+    // creating + releasing a committed DEFAULT texture during device selection, without the debug layer to
+    // serialize it, faulted the device. Accept any real hardware device (the v2.0 behaviour, which shipped).
+    return dev != nullptr;
 }
 
 // Shared device/queue/fence/list bring-up used by both headless and windowed.
 bool create_device_core(Renderer::Impl& d, std::string& err) {
     UINT factoryFlags = 0;
-#ifndef BR_RELEASE
-    // Debug layer + DRED (dev/gate builds). Errors here are non-fatal. Compiled OUT
-    // of the packaged release (BR_RELEASE, M17) so an end user with the Windows SDK
-    // installed never trips its debug layer / breakpoints on a shipped build.
+    // ADR-077: enable the D3D12 debug layer in ALL builds WHEN AVAILABLE (no-op if the Graphics Tools /
+    // SDK layers aren't installed). This is a WORKAROUND, not a debug aid: on the current NVIDIA driver, a
+    // device created WITHOUT the validation layer is REMOVED/RESET the instant a windowed FLIP swapchain is
+    // in play (raster + RT both; headless is unaffected, which is why --shot/--dxr-pt pass). The validation
+    // layer's presence changes the driver code path and dodges the fault -- the ONLY thing that does (not the
+    // adapter, the device-usable probe, the DXGI debug factory flag, or the swap effect -- all ruled out by
+    // bisection). Perf is fine (4K path tracing holds ~60 FPS with it on). The clean public-release fix is to
+    // bundle the D3D12 Agility SDK's d3d12SDKLayers.dll so this path exists on end-user machines without
+    // Graphics Tools too (tracked in ADR-077). DRED stays on for breadcrumbs if a fault still slips through.
     ComPtr<ID3D12Debug> debug;
     if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
         debug->EnableDebugLayer();
@@ -244,7 +241,6 @@ bool create_device_core(Renderer::Impl& d, std::string& err) {
         dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
         dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
     }
-#endif
 
     ComPtr<IDXGIFactory6> factory;
     if (FAILED(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&factory)))) {
@@ -264,7 +260,7 @@ bool create_device_core(Renderer::Impl& d, std::string& err) {
         if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0 &&
             SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0,
                                         IID_PPV_ARGS(&d.device))) &&
-            device_usable(d.device.Get())) {   // reject a born-removed device (post-TDR) -> next adapter, then WARP
+            device_usable(d.device.Get())) {   // accept the first real hardware device (see device_usable note)
             break;
         }
         adapter.Reset();

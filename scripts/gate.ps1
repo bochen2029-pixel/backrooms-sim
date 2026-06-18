@@ -2960,6 +2960,22 @@ function Invoke-GateM30 {
         Write-Note "game mouse-look: $lf Play frames -> clamped-frac $cf (~0, no self-spin) and $cw cursor warps (~0, no per-frame SetCursorPos fight) -- raw WM_INPUT look"
     }
 
+    # ADR-077: the LIVE dual-device ray-traced path. The instant-crash bug (a non-validated D3D12 device is
+    # device-REMOVED the moment a windowed FLIP swapchain is in play) shipped because M9 only ever builds DXR in
+    # ISOLATION -- a single headless Device5, no raster device, no swapchain, no window. This check drives the
+    # REAL path: the raster device + window + swapchain are already live, THEN a second DXR Device5 is created on
+    # top, renders, and presents. rt_frames >= 1 proves the whole pipeline ran (init + build_scene + DispatchRays
+    # + readback + present); exit 0 proves no instant crash; debug-clean proves both devices validate (the
+    # validation layer is forced on in every build now -- the workaround that dodges the driver fault).
+    Assert-Gate 'live RT path: windowed dual-device ray tracing renders + debug-clean (ADR-077 crash guard)' {
+        $r = Invoke-AppCapture @('--game', '--rt', '--auto-play', '--seconds', '6', '--no-audio', '--no-shoggoth-brain')
+        if ($r.Exit -ne 0) { throw "RT auto-play exited $($r.Exit) (the instant-crash bug, or a spin-guard FAIL): $($r.Out)" }
+        $rf = Get-Metric $r.Out 'rt_frames'
+        if ($rf -lt 1) { throw "rt_frames $rf < 1 -- the live ray-traced path never rendered (DXR init/build/dispatch crashed, or it silently fell back to raster): $($r.Out)" }
+        if ((Get-Metric $r.Out 'debug_error_count') -ne 0) { throw "the live RT path produced D3D12 debug-layer messages: $($r.Out)" }
+        Write-Note "live RT path: $rf windowed ray-traced frames presented (dual-device: raster swapchain + DXR Device5), debug-clean"
+    }
+
     # The abyss renders: look DOWN a shaft with a band of floors resident -> the depths show through
     # the void (then black where the bounded ring ends = fog-to-black), debug-clean + bounded.
     Assert-Gate 'abyss render: floors show down a shaft (fog-to-black), bounded + debug-clean' {

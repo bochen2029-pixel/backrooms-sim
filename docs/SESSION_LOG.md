@@ -4,6 +4,54 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 37 — RT/ray-tracing instant-crash FIXED (validation-layer workaround) + live-RT gate guard — ADR-077 ✅ (mission 1 of 2)
+
+**Operator ask (two missions).** (1) "In the RTX/ray-tracing version it crashes instantly, raster works fine; it used
+to work, something recently changed — find the cause." (2) Write the absolute best plan to make the AI Shoggoth have
+hearing/vision/speech and actually run well. Pointed me at `_brainstorm/GLM/` (GLM-5.2's read-only analysis) to read
+but use my own judgement. **This entry = mission 1 (the crash). Mission 2 (the Shoggoth plan) is the next task.**
+
+**Root cause (mission 1).** On the current NVIDIA driver, a D3D12 device created **without the validation (debug)
+layer** is device-REMOVED/RESET (`0x887A0005`/`0x887A0007`) the instant a **windowed FLIP swapchain** is in play —
+the fault surfaces at the first heavy DEFAULT resource (the 1.3 MB texture array). The raster device's debug layer
+was `#ifndef BR_RELEASE`-gated, so **release had no validation and faulted**; the DXR device already forced the layer
+on (so the `Device5` was fine — but the raster device+swapchain it presents *into* is created first and was the one
+faulting). Headless has no swapchain → never tripped → **no gate caught it** (every gate renders headless; M9 builds
+DXR only in isolation, never the live raster+swapchain+DXR dual-device path). GLM correctly fingered "M9 never tests
+the live path" but guessed the DXR device; bisection (mine, this session) showed it's the **raster** device's missing
+validation. Ruled out by bisection: the adapter, the ADR-076 `device_usable` probe (a *false lead* — it itself caused
+DEVICE_REMOVED on a healthy GPU without the layer), the DXGI debug factory flag alone, and the swap effect.
+
+**Fix (ADR-077).** (1) `create_device_core` (`render_d3d12/src/renderer.cpp`): **always** attempt
+`EnableDebugLayer()` + `DXGI_CREATE_FACTORY_DEBUG` + DRED (no-op if the SDK layers aren't installed). (2) Reverted the
+`device_usable` probe to accept any real hardware device. (3) `run_game` now prints `rt_frames`; **M30 gains a live
+dual-device RT smoke** (`--game --rt --auto-play` must exit 0, render `rt_frames>=1`, stay debug-clean) — closes the
+exact gap that let this ship.
+
+**Verification.** ctest **100/100**; **M9 GREEN**; **release** (BR_RELEASE) renders RT default + **RT 4K** + raster,
+all exit 0 + `debug_error_count:0` (the operator's exact config — crash gone); the new **live-RT gate guard GREEN**
+(`rt_frames:138`, debug-clean). **M30 = all green EXCEPT the pre-existing `game mouse-look` check**, which fails ONLY
+on this headless tool session's startup/GPU-downclock: the same `--game --auto-play --seconds 2` command yields **1
+frame @2s → 19 @5s → 473 @9s**, `lookcheck: PASS` (clamped_frac 0.000, no spin) in ALL — the 2 s window is pure
+process-startup here. It failed identically *before* my edits (not a regression) and passes on the operator's
+foreground machine (full GPU clocks, fast startup — which is why `m30-green` exists). **Did NOT widen the gate window
+to force-green it (no gaming, Iron Rule 6).**
+
+**PENDING.** (a) **Mission 2: the Shoggoth AI plan** — not started. (b) **Public-release follow-up (IMPORTANT):**
+`EnableDebugLayer()` needs the D3D12 SDK layers DLL — present on the operator's box (Graphics Tools) but **absent on a
+clean end-user Win11**, so the itch.io bundle must ship the **D3D12 Agility SDK redist** (`D3D12Core.dll` +
+`d3d12SDKLayers.dll` + the `D3D12SDKVersion`/`Path` exports) or end-users hit the original crash in RT. (c) The
+shipped bundle zip predates this fix — re-stage the exe (cheap) before any push. (d) Operator should confirm M30 green
+on their interactive machine.
+
+**Gotchas.** The release build's RC step (`version.rc`) needs the MSVC dev env (`Enter-VsDevEnv` → `INCLUDE`) or
+rc.exe can't find `windows.h` — `package.ps1` does this; a raw `cmake --build build-release` from a plain shell does
+not. The debug build always had the layer, so it never crashed — the bug was release-only, which is why "it used to
+work" (a prior debug run or pre-regression release). `_brainstorm/` is GLM's scratch dump — added to
+`check_inventory.ps1`'s `$known` (same class as `runs`), left untracked.
+
+---
+
 ## Session 36 — SELF-CONTAINED portable bundle (exe-relative paths + hidden launcher + VRAM auto-tier)  ⏳ — ADR-076, render test pending GPU recovery
 
 **Operator ask.** Ship ONE portable folder (copies of the models + llama.cpp + whisper.cpp + keel under the exe)

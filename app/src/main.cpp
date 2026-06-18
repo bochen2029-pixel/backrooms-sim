@@ -1451,6 +1451,8 @@ int run_game(const Options& o) {
     float accum = 0.0f;
     const bool timed = (o.seconds > 0);
     uint64_t frames = 0;
+    uint64_t rtFrames = 0;   // ADR-077: count live windowed ray-traced presents so the M30 gate can prove the
+                             // dual-device RT path actually runs (M9 only ever exercised DXR in isolation).
     bool running = true;
 
     // M21b: the LIVE async brain — KEEL inference off the frame thread so the creature
@@ -1803,6 +1805,7 @@ int run_game(const Options& o) {
                             }
                         }
                         renderer.present_overlay_windowed(rt.data(), dxrW, dxrH);
+                        ++rtFrames;  // a live ray-traced frame actually reached the screen
                     }
                 }
             }
@@ -1868,6 +1871,7 @@ int run_game(const Options& o) {
     std::printf("vision_produced: %llu\n", vis_prod);
     std::printf("chat_requests: %llu\n", chat_req);
     std::printf("chat_produced: %llu\n", chat_prod);
+    std::printf("rt_frames: %llu\n", static_cast<unsigned long long>(rtFrames));   // ADR-077: live RT presents (0 => RT crashed or silently fell back to raster)
     if (!last_pa_line.empty()) std::printf("director_last_line: %s\n", last_pa_line.c_str());
     std::printf("debug_error_count: %u\n", dbg);
     if (o.auto_play) {
