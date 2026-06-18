@@ -49,9 +49,15 @@ by `static_assert`; `event_from_intent`/`apply_event_to_intent` helpers; hash fo
 **behaviour-neutral**, record==replay bit-identical at level 0 (`409129a0236b3084`) AND level 7
 (`95945b9087214b14`), cold-verifier VERDICT CLEAN. Also adopted a **per-step self-audit**
 (`scripts/audit.ps1` — the Externality-Principle non-LLM oracle suite; run pre/post each step,
-verdict → the ledger). **Next: Phase C** (the LLM request broker / arbitration — "runs well" before
-live vision). Deferred (tracked): a level-7 case in `gate.ps1`'s sacred gate + the M29 *vision*-record
-prey-offset fix (`AUDIT_2026-06-15.md:207`) — both need KEEL :7071 up to fully green. (b) **Public-release
+verdict → the ledger). **Then (same session): the two deferred determinism items + Phase C core** —
+(E4, `f29bd11`) the M29 prey-offset fix across ALL record paths (vision/hearing/PA shared the
+`shoggoth-record` bug; new `shoggoth_prey()` helper; record==replay at level 7 = `95945b9087214b14`);
+(E5, `584d2fd`) an `Invoke-GateM29` VISION cross-seam case guarding it; (E6, tag `phaseC-core`,
+`6081cbf`) **Phase C core** — the pure `keel_scheduler.h` arbitration logic (priority ·
+single-multimodal-slot · latest-wins · concurrency cap · FIFO) + 6 property tests (ctest 103→**109**).
+**Next: Phase C.2** (the threaded `KeelBroker` wrapper around the pure scheduler + route the live hosts
+through it + the concurrency soak gate — best with KEEL :7071 up), then Phase D (live vision + Explore
++ ablation). (b) **Public-release
 follow-up (IMPORTANT):**
 `EnableDebugLayer()` needs the D3D12 SDK layers DLL — present on the operator's box (Graphics Tools) but **absent on a
 clean end-user Win11**, so the itch.io bundle must ship the **D3D12 Agility SDK redist** (`D3D12Core.dll` +
