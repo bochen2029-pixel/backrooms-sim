@@ -75,6 +75,16 @@ flashlight). New additive headless mode: walk the natural Stroller mid-corridor,
 debug-clean. No existing code/gate/golden touched. (Aesthetic: raster lights the whole ceiling; PT leaves it dark
 between the emissive strips.)
 
+**Green flare breadcrumbs (E16, `6a2a929`, tag `flares-green`, ADR-080).** Operator: drop green chemlight flares
+with R, light up, breadcrumbs, recycle at a cap. Built **option A** (analytic PT point lights, no geometry): new
+`app/src/flares.h` (`FlareField` ring, cap 256, oldest recycles), PT root SRV t2 + `uFlareN` + `set_flares`,
+`[branch]`-guarded `flare_light` (green cast, shadow-rayed, 7 m) + `flare_glow` (visible point); R drops at feet +
+resets the accumulator; nearest-64 culled to the GPU each frame (cost flat regardless of count; memory trivial).
+**Rollback anchor `pre-flares` tagged + pushed BEFORE the work** (operator's ask) → `git reset --hard pre-flares`,
+zero debug. Regression-proof: flares default none → `uFlareN=0` → branches skipped → **gate M9 PASSED, PT goldens
+bit-identical**. Verified: ctest 109/109, live `--game --rt` smoke debug-clean, A/B green cast+glow. RT-only (raster
+= follow-up). All launch exes re-staged.
+
 **Open questions.** None blocking. Whether to call the immersive arc "done" or continue to live hearing (Phase F) is
 an operator preference. The creature-POV image is real geometry (identical camera+`render_chunks`+`readback`+encode as
 the proven record path); a dedicated in-game POV PNG dump was deliberately NOT added (scope; the wiring is proven).
