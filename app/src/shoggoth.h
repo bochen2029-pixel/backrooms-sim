@@ -112,6 +112,53 @@ inline int next_step_dir(uint64_t seed, int32_t level, int64_t sgi, int64_t sgj,
     return -1;  // no path within the window
 }
 
+// Phase A (SHOGGOTH_PLAN.md §4) — the feature-aware idle planner. While LURKING, the creature
+// ambles toward a goal cell biased toward FEATURES (junctions / open forward space) instead of a
+// blind random hop (the old `rng % 7`). Pure + deterministic (seeded jitter only): the navigator
+// `next_step_dir` still does all wall-routing, so it never tunnels and the record/replay gate is
+// untouched (`shoggoth_step` stays a pure function of state + seed). This is the embryo of the
+// general `resolve_target` the later phases grow (adding an LLM-chosen target_kind / sector).
+inline void resolve_idle_goal(uint64_t seed, int32_t level, int64_t sgi, int64_t sgj, float facing,
+                              br::core::Pcg64& rng, int64_t& out_gi, int64_t& out_gj) {
+    constexpr int R = 6;  // ~24 m loiter window (small: a wander, not a march)
+    std::unordered_map<int64_t, br::gen::ChunkLayout> cache;
+    std::set<std::pair<int64_t, int64_t>> seen;
+    std::queue<std::pair<int64_t, int64_t>> q;
+    static const int dgi[4] = {1, -1, 0, 0};
+    static const int dgj[4] = {0, 0, 1, -1};
+    seen.insert({sgi, sgj});
+    q.push({sgi, sgj});
+    int64_t bgi = sgi, bgj = sgj;
+    float best = -1.0e9f;
+    while (!q.empty()) {
+        const auto cur = q.front(); q.pop();
+        const int64_t ci = cur.first, cj = cur.second;
+        // "junction-ness": ways out of this cell (4 = crossroads, 2 = corridor, 1 = dead-end).
+        int openN = 0;
+        for (int d = 0; d < 4; ++d)
+            if (maze_open(seed, ci, cj, d, cache, level)) ++openN;
+        const int64_t ddi = ci - sgi, ddj = cj - sgj;
+        const float d2 = static_cast<float>(ddi * ddi + ddj * ddj);
+        if (d2 > 1.0f) {  // skip self + immediate ring — we want somewhere to GO
+            const float dirYaw = std::atan2(static_cast<float>(ddi), static_cast<float>(ddj));
+            const float cosrel = std::cos(dirYaw - facing);            // 1 ahead, -1 behind (cos needs no wrap)
+            const float fwd = (cosrel > 0.0f) ? cosrel : 0.0f;          // gently prefer the forward cone
+            const float score = 2.0f * static_cast<float>(openN - 2)            // PRIMARY: junctions/open, shun dead-ends
+                              + 0.45f * std::sqrt(d2) * (0.5f + 0.5f * fwd)      // actually GO somewhere, gently forward
+                              + 0.6f * static_cast<float>(rng.next_double());    // a touch of life (seeded)
+            if (score > best) { best = score; bgi = ci; bgj = cj; }
+        }
+        for (int d = 0; d < 4; ++d) {
+            if (!maze_open(seed, ci, cj, d, cache, level)) continue;
+            const int64_t ni = ci + dgi[d], nj = cj + dgj[d];
+            if (std::llabs(ni - sgi) > R || std::llabs(nj - sgj) > R) continue;
+            if (seen.insert({ni, nj}).second) q.push({ni, nj});
+        }
+    }
+    out_gi = bgi;  // reachable by construction (BFS only crosses open walls) -> next_step_dir can route to it
+    out_gj = bgj;
+}
+
 // --- the creature --------------------------------------------------------------
 // Distances (m) for the state machine.
 constexpr float kShogHuntRange = 44.0f;
@@ -170,10 +217,10 @@ inline void shoggoth_step(Shoggoth& sh, const br::core::Vec3& wanderer, uint64_t
     } else if (sh.state == ShoggothState::Retreat) {
         tgi = sgi + (sgi >= wgi ? 3 : -3);
         tgj = sgj + (sgj >= wgj ? 3 : -3);
-    } else {  // lurk: amble to a random nearby cell, repick when reached or periodically
+    } else {  // lurk: amble toward a nearby FEATURE (Phase A), repick when reached or periodically
         if (pathfind && ((sgi == sh.wander_gi && sgj == sh.wander_gj) || (sh.state_ticks % 360u == 0u))) {
-            sh.wander_gi = sgi + (static_cast<int64_t>(sh.rng.next_u64() % 7u) - 3);
-            sh.wander_gj = sgj + (static_cast<int64_t>(sh.rng.next_u64() % 7u) - 3);
+            // Phase A: drift toward a junction / open forward cell instead of a blind rng%7 hop.
+            resolve_idle_goal(seed, sh.level, sgi, sgj, sh.yaw, sh.rng, sh.wander_gi, sh.wander_gj);
         }
         tgi = sh.wander_gi; tgj = sh.wander_gj;
     }
@@ -184,9 +231,16 @@ inline void shoggoth_step(Shoggoth& sh, const br::core::Vec3& wanderer, uint64_t
         case ShoggothAction::Hunt: break;                                   // state-machine goal
         case ShoggothAction::Stalk: tgi = wgi; tgj = wgj; break;            // approach (slowed below)
         case ShoggothAction::Lurk: tgi = sh.wander_gi; tgj = sh.wander_gj; break;
-        case ShoggothAction::Flank: {                                       // circle: rotate the approach 90°
-            const int64_t di = wgi - sgi, dj = wgj - sgj;
-            tgi = wgi - dj / 2; tgj = wgj + di / 2;
+        case ShoggothAction::Flank: {  // circle-strafe: aim a FIXED few cells to the wanderer's SIDE
+            const int64_t di = wgi - sgi, dj = wgj - sgj;                       // (perpendicular to the approach)
+            const float len = std::sqrt(static_cast<float>(di * di + dj * dj)); // so it doesn't degenerate to Hunt
+            if (len > 0.5f) {                                                   // at close range (old di/2 -> 0)
+                constexpr int64_t kFlankRadius = 3;                            // cells to the side
+                const float px = -static_cast<float>(dj) / len;                // perpendicular unit (rotate 90 deg)
+                const float pz = static_cast<float>(di) / len;
+                tgi = wgi + static_cast<int64_t>(std::lround(px * static_cast<float>(kFlankRadius)));
+                tgj = wgj + static_cast<int64_t>(std::lround(pz * static_cast<float>(kFlankRadius)));
+            } else { tgi = wgi; tgj = wgj; }
             break;
         }
         case ShoggothAction::Flee:

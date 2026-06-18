@@ -279,3 +279,76 @@ TEST_CASE("the live async brain host has a clean lifecycle and an empty initial 
     REQUIRE(host.produced() == 0u);
     // The destructor runs at scope exit: it signals stop + joins the worker (no hang).
 }
+
+// ---- Phase A (SHOGGOTH_PLAN.md): the feature-aware idle + the Flank fix ----------------------
+
+namespace {
+// junction-ness of a cell = how many of its 4 walls are open (4 = crossroads, 1 = dead-end).
+int cell_open_count(uint64_t seed, int32_t level, int64_t gi, int64_t gj) {
+    std::unordered_map<int64_t, br::gen::ChunkLayout> cache;
+    int o = 0;
+    for (int d = 0; d < 4; ++d)
+        if (maze_open(seed, gi, gj, d, cache, level)) ++o;
+    return o;
+}
+}  // namespace
+
+TEST_CASE("the idle resolver is deterministic and returns a reachable cell", "[phaseA][shoggoth]") {
+    const uint64_t seed = 5u;
+    // Same inputs + same RNG state -> identical goal (pure, seeded -> record/replay stays bit-exact).
+    br::core::Pcg64 r1(0x5170990000000001ull), r2(0x5170990000000001ull);
+    int64_t gi1, gj1, gi2, gj2;
+    resolve_idle_goal(seed, 0, 4, 4, 0.0f, r1, gi1, gj1);
+    resolve_idle_goal(seed, 0, 4, 4, 0.0f, r2, gi2, gj2);
+    REQUIRE(gi1 == gi2);
+    REQUIRE(gj1 == gj2);
+    // The goal sits inside the loiter window and is reachable through open walls (never a tunnel).
+    REQUIRE(std::llabs(gi1 - 4) <= 6);
+    REQUIRE(std::llabs(gj1 - 4) <= 6);
+    const bool reachable = (gi1 == 4 && gj1 == 4) || next_step_dir(seed, 0, 4, 4, gi1, gj1) >= 0;
+    REQUIRE(reachable);
+}
+
+TEST_CASE("the idle resolver prefers feature-rich cells over a blind random hop", "[phaseA][shoggoth]") {
+    // Over many seeds + start cells, the resolver's chosen goal is, on average, more of a junction
+    // (higher open-neighbour count) than the old rng%7 +-3 hop -> the lurking creature loiters at
+    // doorways/junctions instead of twitching randomly.
+    double sumResolver = 0.0, sumRandom = 0.0;
+    int n = 0;
+    for (uint64_t seed = 1; seed <= 24; ++seed) {
+        br::core::Pcg64 rr(seed * 2654435761ull + 1u);
+        for (int s = 0; s < 6; ++s) {
+            const int64_t sgi = static_cast<int64_t>(rr.next_u64() % 64u);
+            const int64_t sgj = static_cast<int64_t>(rr.next_u64() % 64u);
+            int64_t gi, gj;
+            resolve_idle_goal(seed, 0, sgi, sgj, 0.0f, rr, gi, gj);
+            sumResolver += cell_open_count(seed, 0, gi, gj);
+            const int64_t rgi = sgi + static_cast<int64_t>(rr.next_u64() % 7u) - 3;
+            const int64_t rgj = sgj + static_cast<int64_t>(rr.next_u64() % 7u) - 3;
+            sumRandom += cell_open_count(seed, 0, rgi, rgj);
+            ++n;
+        }
+    }
+    REQUIRE(n > 0);
+    REQUIRE(sumResolver / n > sumRandom / n);  // genuinely feature-biased, not just nominal
+}
+
+TEST_CASE("Flank no longer degenerates to Hunt at close range", "[phaseA][shoggoth]") {
+    // The old Flank used integer di/2, which rounds to 0 at 1-cell separation -> the flank goal
+    // collapsed onto the wanderer cell == the Hunt goal. The fix aims a FIXED few cells to the side,
+    // so Flank is a distinct (lateral) behaviour. Proven by trajectory divergence from Hunt at close
+    // range; a few seeds guard against a maze that happens to wall the lateral move off.
+    const br::core::Vec3 wanderer{16.0f, 1.0f, 16.0f};
+    int differing = 0;
+    for (uint64_t seed = 1; seed <= 8; ++seed) {
+        auto runIntent = [&](ShoggothAction act) {
+            Shoggoth s = spawn_at(20.0f, 16.0f);  // ~1 cell from the wanderer (where the old bug bit)
+            s.intent.action = act;
+            s.intent.aggression = 0.5f;
+            for (int t = 0; t < 400; ++t) shoggoth_step(s, wanderer, seed, (t % 8) == 0);
+            return shoggoth_hash(s);
+        };
+        if (runIntent(ShoggothAction::Flank) != runIntent(ShoggothAction::Hunt)) ++differing;
+    }
+    REQUIRE(differing >= 1);  // with the old di/2, Flank == Hunt at 1 cell for ALL seeds -> would be 0
+}
