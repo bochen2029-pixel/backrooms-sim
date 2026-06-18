@@ -63,6 +63,7 @@
 #include "shoggoth_vision.h"
 #include "shoggoth_vision_host.h"
 #include "flares.h"
+#include "ladder.h"
 #include "director_vision.h"
 #include "mic_capture.h"
 #include "director_chat.h"
@@ -129,6 +130,7 @@ struct Options {
     bool flashlight = false;                // --dxr-pt QC: render with the eye-torch ON (off by default)
     bool game_shot = false;                 // --game-shot: walk the Stroller into the maze, then render one framed shot (--rt for PT)
     bool drop_flares = false;               // --game-shot QC: drop a line of green flares ahead of the camera (RT A/B)
+    bool recolor_shot = false;              // --recolor-shot: POC -- the LLM recolours the walls from what you --say
     bool mic_test = false;                  // ADR-074: capture mic + VAD + whisper, print transcripts (verify voice input)
     bool chat_test = false;                 // ADR-074: TTS->whisper->Director reply (verify the conversation glue, no mic)
     bool shoggoth_pa_record = false;       // M24: PA voice spoken into the soundscape -> heard as words
@@ -268,6 +270,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--flashlight") == 0) o.flashlight = true;
         else if (std::strcmp(a, "--game-shot") == 0) o.game_shot = true;
+        else if (std::strcmp(a, "--recolor-shot") == 0) o.recolor_shot = true;
         else if (std::strcmp(a, "--flares") == 0) o.drop_flares = true;
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
         else if (std::strcmp(a, "--version") == 0) o.version = true;
@@ -912,7 +915,7 @@ int run_play(const Options& o) {
 
     std::vector<Aabb> collision;
     contracts::ChunkKey cached{ 0, static_cast<int64_t>(1) << 40, 0 };
-    auto rebuild = [&](contracts::ChunkKey c) { build_walk_collision(collision, o.seed, c); cached = c; };  // M30: holed floor -> live descent
+    auto rebuild = [&](contracts::ChunkKey c) { build_walk_collision(collision, o.seed, c); app::ladder::apply_to_collision(collision, c); cached = c; };  // M30 holed floor + the infinite 45-deg ladder
     // M19: lazy DXR for --play --rt (ray tracing at 2/3 internal res, upscaled to the window).
     std::unique_ptr<br::render_dxr::DxrRenderer> dxr;
     uint32_t dxrW = 0, dxrH = 0;
@@ -1444,7 +1447,7 @@ int run_game(const Options& o) {
     std::vector<Aabb> collision;
     contracts::ChunkKey cached{ 0, static_cast<int64_t>(1) << 40, 0 };
     uint64_t texSeed = model.seed;
-    auto rebuild = [&](contracts::ChunkKey c) { build_walk_collision(collision, texSeed, c); cached = c; };  // M30: holed floor -> live descent
+    auto rebuild = [&](contracts::ChunkKey c) { build_walk_collision(collision, texSeed, c); app::ladder::apply_to_collision(collision, c); cached = c; };  // M30 holed floor + the infinite 45-deg ladder
     uint64_t prevSteps = 0;
     auto start_session = [&](uint64_t seed) {
         texSeed = seed;
@@ -1954,6 +1957,9 @@ int run_game(const Options& o) {
                 app::build_shoggoth_mesh(shogBody, shog.pos, shog.writhe, 1.4f);  // M20b in-world body
                 std::vector<contracts::ResidentChunk> withShog = sm->resident();
                 withShog.push_back(contracts::ResidentChunk{contracts::ChunkKey{9999, static_cast<int64_t>(frames), 0}, shogBody.data(), static_cast<uint32_t>(shogBody.size())});
+                std::vector<contracts::ChunkVertex> ladderMesh;   // the infinite 45-deg ladder, drawn near the camera (raster)
+                app::ladder::build_mesh(ladderMesh, cam.pos[0], 36.0f);
+                withShog.push_back(contracts::ResidentChunk{contracts::ChunkKey{9998, static_cast<int64_t>(frames), 0}, ladderMesh.data(), static_cast<uint32_t>(ladderMesh.size())});
                 // Director SUBTITLES (raster path): alpha-blended overlay drawn over the world inside
                 // render_chunks_windowed (same frame, no HUD/post pass) while the line is fresh (~6 s).
                 uint32_t drawn = 0;
@@ -4642,6 +4648,105 @@ contracts::CameraPose canonical_pose(const Options& o, uint32_t pose) {
 // from its POV -- ray-traced (--rt, converged --spp) or raster. --seed varies the world, --ticks how far to walk.
 // The Stroller looks DOWN corridors (low faceplant), so the framing is natural. Presentation/QC only -- no gate,
 // no golden; never enables the flashlight.
+
+// ----- POC: "the world RECOLOURS based on what you SAY" -----------------------
+// The local-LLM Director already HEARS you (mic -> whisper). This proves the next step: your arbitrary words ->
+// the LLM understands -> the walls visibly change colour. Headless QC so it's testable from the CLI: build a
+// raster scene, render it, ask KEEL to pick a colour from --say, CPU-grade the readback toward that hue, write
+// <out>_before.png + <out>_after.png. Presentation-only -- no sim/replay/gate touched. Needs KEEL up (keel-up.ps1).
+static std::string render_recolor_prompt(const std::string& phrase) {
+    return std::string(
+        "You control the wall colour of an endless, monotonous YELLOW backrooms. The lone wanderer just said aloud: \"")
+        + phrase +
+        "\". Decide the wall colour they would want NOW. If they dislike the yellow, want a change, name a colour, or "
+        "set a mood, pick a fitting colour and reply with ONLY 'r,g,b' (each 0-255). Disliking the current yellow "
+        "means change it to a DIFFERENT colour. Examples: \"i hate this yellow\" -> 200,30,30 ; \"make it blue\" -> "
+        "40,80,220 ; \"too cold and clinical\" -> 230,120,40 ; \"calmer\" -> 90,150,120 ; \"i'm so bored\" -> 150,40,180 . "
+        "Reply NONE only if they said something with NO bearing on how the place looks or feels (e.g. \"what time is it\"). "
+        "Reply with ONLY 'r,g,b' or NONE.";
+}
+// Pull the first three 0-255 integers out of the model's reply (tolerates 'r,g,b', 'rgb(...)', or prose).
+static bool parse_recolor(const std::string& reply, uint8_t& r, uint8_t& g, uint8_t& b) {
+    int v[3]; int n = 0; size_t i = 0;
+    while (i < reply.size() && n < 3) {
+        if (reply[i] >= '0' && reply[i] <= '9') {
+            int x = 0; while (i < reply.size() && reply[i] >= '0' && reply[i] <= '9') { x = x * 10 + (reply[i] - '0'); ++i; }
+            v[n++] = (x > 255) ? 255 : x;
+        } else { ++i; }
+    }
+    if (n < 3) return false;
+    r = static_cast<uint8_t>(v[0]); g = static_cast<uint8_t>(v[1]); b = static_cast<uint8_t>(v[2]);
+    return true;
+}
+// CPU colour-grade RGBA toward a target hue, preserving each pixel's brightness (lit walls stay lit -- a vivid
+// recolour, not a dim multiply). strength 0..1.
+static void apply_recolor(std::vector<uint8_t>& rgba, uint8_t tr, uint8_t tg, uint8_t tb, float strength) {
+    const float t[3] = { tr / 255.0f, tg / 255.0f, tb / 255.0f };
+    float tl = 0.2126f * t[0] + 0.7152f * t[1] + 0.0722f * t[2]; if (tl < 1e-3f) tl = 1e-3f;
+    const float hue[3] = { t[0] / tl, t[1] / tl, t[2] / tl };   // unit-luminance target colour
+    for (size_t p = 0; p + 3 < rgba.size(); p += 4) {
+        const float c[3] = { rgba[p] / 255.0f, rgba[p + 1] / 255.0f, rgba[p + 2] / 255.0f };
+        const float L = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
+        for (int k = 0; k < 3; ++k) {
+            float out = c[k] * (1.0f - strength) + (L * hue[k]) * strength;
+            if (out < 0.0f) out = 0.0f;
+            if (out > 1.0f) out = 1.0f;
+            rgba[p + k] = static_cast<uint8_t>(out * 255.0f + 0.5f);
+        }
+    }
+}
+int run_recolor_shot(const Options& o) {
+    using namespace br::core;
+    // 1) build + frame a raster scene (Stroller walk -> POV), like --game-shot
+    WorldState s(o.seed);
+    s.wanderer.pos = Vec3{ 2.0f, kWandererHalfHeight + 0.02f, 2.0f };
+    Stroller bot(o.seed ^ 0x5170990000000001ull, s.wanderer.pos);
+    std::vector<Aabb> col; contracts::ChunkKey cached{ 0x7fffffff, 0, 0 };
+    auto rebuild = [&](contracts::ChunkKey c) { build_walk_collision(col, o.seed, c); cached = c; };
+    rebuild(contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z));
+    const uint64_t steps = (o.ticks > 0) ? o.ticks : 1800u;
+    for (uint64_t t = 0; t < steps; ++t) {
+        const contracts::ChunkKey here = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
+        if (here != cached) rebuild(here);
+        tick(s, bot.step(s, o.seed, col), col);
+    }
+    contracts::CameraPose cam{};
+    cam.pos[0] = s.wanderer.pos.x; cam.pos[1] = s.wanderer.pos.y + kEyeHeight; cam.pos[2] = s.wanderer.pos.z;
+    cam.yaw = s.wanderer.yaw; cam.pitch = 0.0f; cam.fov_y = 1.2217305f; cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    const contracts::ChunkKey center = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
+    sm.update(center); sm.wait_idle(); sm.update(center);
+    Renderer renderer;
+    if (!renderer.init_headless(o.width, o.height)) { std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1; }
+    renderer.set_texture_seed(o.seed);
+    uint32_t drawn = 0; const size_t tgt = sm.resident_count();
+    for (int wk = 0; wk < 400 && static_cast<size_t>(drawn) < tgt; ++wk) renderer.render_chunks(cam, sm.resident(), 64u, 0u, &drawn);
+    renderer.render_chunks(cam, sm.resident(), 256u, 0u, &drawn);
+    FrameImage img; if (!renderer.readback(img)) { std::fprintf(stderr, "readback: %s\n", renderer.last_error().c_str()); return 1; }
+    // 2) write the BEFORE frame
+    std::string base = o.out.empty() ? std::string("runs/recolor") : o.out;
+    if (base.size() > 4 && base.substr(base.size() - 4) == ".png") base = base.substr(0, base.size() - 4);
+    const std::string beforePng = base + "_before.png";
+    stbi_write_png(beforePng.c_str(), static_cast<int>(img.width), static_cast<int>(img.height), 4, img.rgba.data(), static_cast<int>(img.width) * 4);
+    // 3) ask the LLM for a colour from the utterance, then 4) grade toward it
+    const std::string phrase = o.say_text.empty() ? std::string("I hate this yellow") : o.say_text;
+    std::string host; int port; parse_host_port(o.director_url, host, port);
+    const br::director::KeelResponse resp = br::director::keel_complete(host, port, render_recolor_prompt(phrase), 8000);
+    std::printf("said: \"%s\"\n", phrase.c_str());
+    std::printf("director_reply: %s\n", resp.ok ? resp.content.c_str() : "(KEEL unreachable -- run scripts\\keel-up.ps1)");
+    uint8_t tr = 0, tg = 0, tb = 0; const bool ok = resp.ok && parse_recolor(resp.content, tr, tg, tb);
+    if (ok) {
+        std::printf("recolor: YES rgb(%u,%u,%u)\n", tr, tg, tb);
+        apply_recolor(img.rgba, tr, tg, tb, 0.78f);
+        const std::string afterPng = base + "_after.png";
+        stbi_write_png(afterPng.c_str(), static_cast<int>(img.width), static_cast<int>(img.height), 4, img.rgba.data(), static_cast<int>(img.width) * 4);
+        std::printf("out: %s + %s\n", beforePng.c_str(), afterPng.c_str());
+    } else {
+        std::printf("recolor: NONE (no colour intent, or KEEL down) -- only %s written\n", beforePng.c_str());
+    }
+    return 0;
+}
+
 int run_game_shot(const Options& o) {
     using namespace br::core;
     WorldState s(o.seed);
@@ -4661,6 +4766,12 @@ int run_game_shot(const Options& o) {
     cam.pos[0] = s.wanderer.pos.x; cam.pos[1] = s.wanderer.pos.y + kEyeHeight; cam.pos[2] = s.wanderer.pos.z;
     cam.yaw = s.wanderer.yaw; cam.pitch = 0.0f;
     cam.fov_y = 1.2217305f; cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+    if (o.ticks == 0) {   // ladder QC: stand ON the ascended steps, look DOWN the 45-deg descent
+        cam.pos[0] = app::ladder::kAnchorX - 8.0f;                              // ascended side (X=-6 -> Y=8)
+        cam.pos[2] = app::ladder::kAnchorZ;                                     // band centre
+        cam.pos[1] = app::ladder::surface_y(cam.pos[0]) + kEyeHeight + 0.2f;    // eye just above the step
+        cam.yaw = 1.5707963f; cam.pitch = -0.55f;                              // +X (down the slope)
+    }
 
     br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
     const contracts::ChunkKey center = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
@@ -4690,10 +4801,14 @@ int run_game_shot(const Options& o) {
         Renderer renderer;
         if (!renderer.init_headless(o.width, o.height)) { std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1; }
         renderer.set_texture_seed(o.seed);
+        std::vector<contracts::ResidentChunk> withLadder = sm.resident();
+        std::vector<contracts::ChunkVertex> ladderMesh;
+        app::ladder::build_mesh(ladderMesh, cam.pos[0], 40.0f);
+        withLadder.push_back(contracts::ResidentChunk{contracts::ChunkKey{9998, 0, 0}, ladderMesh.data(), static_cast<uint32_t>(ladderMesh.size())});
         uint32_t drawn = 0;
-        const size_t targetN = sm.resident_count();
-        for (int wk = 0; wk < 400 && static_cast<size_t>(drawn) < targetN; ++wk) renderer.render_chunks(cam, sm.resident(), 64u, 0u, &drawn);
-        renderer.render_chunks(cam, sm.resident(), 256u, 0u, &drawn);
+        const size_t targetN = withLadder.size();
+        for (int wk = 0; wk < 400 && static_cast<size_t>(drawn) < targetN; ++wk) renderer.render_chunks(cam, withLadder, 64u, 0u, &drawn);
+        renderer.render_chunks(cam, withLadder, 256u, 0u, &drawn);
         FrameImage img;
         if (!renderer.readback(img)) { std::fprintf(stderr, "readback: %s\n", renderer.last_error().c_str()); return 1; }
         stbi_write_png(out.c_str(), static_cast<int>(img.width), static_cast<int>(img.height), 4, img.rgba.data(), static_cast<int>(img.width) * 4);
@@ -5506,6 +5621,7 @@ int main(int argc, char** argv) {
     if (o.dxr_test)   return run_dxr_test(o);
     if (o.dxr_depth)  return run_dxr_depth(o);
     if (o.game_shot)  return run_game_shot(o);
+    if (o.recolor_shot) return run_recolor_shot(o);
     if (o.dxr_pt)     return run_dxr_pt(o);
     if (o.dxr_fps)    return run_dxr_fps(o);
     if (o.dxr_ghost)  return run_dxr_ghost(o);

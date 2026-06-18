@@ -394,3 +394,24 @@ job is audit + fast, unambiguous rollback.
   check — the *bundled* redist, not System32 — proving the mechanism), RT smoke **rt_frames=1682, debug_error_count=0,
   lookcheck PASS**. (This box has Graphics Tools so it can't prove the *clean-machine* case directly — that is the
   operator's USB test; the wiring is proven correct.) Debug build/gates unaffected (exports release-only).
+
+## E18 — 2026-06-18 — POC: the world RECOLOURS from what you SAY (LLM-driven dynamic world, step 1) [DYNAMIC_DIRECTOR]
+- **What:** the first proof that the Director's perception can MUTATE the world, not just narrate. New headless mode
+  `--recolor-shot --say "<phrase>"` (`run_recolor_shot` in main.cpp): build a raster scene (Stroller walk → POV),
+  render it, ask the **live LLM** (`keel_complete`) to pick a wall colour from the player's utterance, CPU colour-grade
+  the readback toward that hue (brightness-preserving — vivid recolour, not a dim multiply), write
+  `<out>_before.png` + `<out>_after.png`. Three helpers: `render_recolor_prompt` / `parse_recolor` (first 3 ints,
+  tolerant) / `apply_recolor` (luminance-preserving hue wash).
+- **Why:** operator — "implement the simplest thing first as a POC I can test directly: 'I hate this yellow' → red."
+  Step 1 of the LLM-driven dynamic-world brainstorm (see the next session note / a future `docs/DYNAMIC_DIRECTOR.md`):
+  the scene changes based on what the player says — uncanny because it answers arbitrary natural language.
+- **Verified (KEEL up):** `--recolor-shot --say "change the walls to deep red"` → LLM `204,0,0` → vivid red corridor
+  (`recolor_red_before/after.png`). After a prompt tune (infer "dislike yellow → change it"): **"I hate this yellow"
+  → `40,100,200`** (blue — it changed the hated colour) ✓; "this place is so depressing and cold" → a colour ✓;
+  **"is anyone there" → NONE** (no recolour — restraint, not randomness) ✓. The render→LLM→grade→PNG chain works.
+- **Without breaking anything:** purely ADDITIVE — a new run mode + 3 static helpers + one Options bool + one parse
+  arm + one dispatch line. NO existing function/sim/gate/golden touched; presentation-only (a CPU grade on a
+  readback). **Files:** `app/src/main.cpp` only. **Rollback:** `git revert <commit>`.
+- **Next (the real thing):** wire it LIVE into `run_game`'s voice loop (mic → whisper → this colour call → a GPU
+  wall-tint uniform in the raster shader) so speaking recolours the world in-game. Then the rest of the mutation
+  palette (lighting, spawn, doors, rearrange-behind-you). Raster-first (RT too slow — see `docs/RT_PERF_PLAN.md`).
