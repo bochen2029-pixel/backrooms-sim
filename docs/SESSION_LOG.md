@@ -71,6 +71,17 @@ not. The debug build always had the layer, so it never crashed — the bug was r
 work" (a prior debug run or pre-regression release). `_brainstorm/` is GLM's scratch dump — added to
 `check_inventory.ps1`'s `$known` (same class as `runs`), left untracked.
 
+**SELF-CONTAINED AI RUNTIME — no C:\ ever (ADR-078, `dc41a87`).** Operator: never need anything outside
+C:\backrooms again. The bundle was self-contained (ADR-076); this closed the dev-tree + packager + lock
+leaks (GLM doc 04): main.cpp `bundled_w/a` fall back to in-repo `dist\Backrooms` (never C:\); new
+`scripts\keel-up.ps1`/`keel-down.ps1` run the bundled sidecar from `dist\Backrooms` (replaces
+`C:\keel-sidecar-7071`); gate.ps1 C:\ hints → keel-up.ps1; package.ps1 treats runtime/models/DXC as
+persistent in-repo assets (refresh exe only, never C:\/SDK); keel.lock C:\ → bundle-relative. **PROVEN
+from C:\backrooms only:** keel-up brought up llama :8080 + keel :7071 from the bundle → sacred
+record→replay `valid_intents=5` + record==replay `1ade340c4648b041`. To bring KEEL up for any gate /
+Phase C.2 / D: `scripts\keel-up.ps1`. Deferred (doc 04): Tier-1 console fix (release-only
+`WIN32_EXECUTABLE`) + exe-relative DXC probe; GLM doc 01 (RT perf) unread.
+
 ---
 
 ## Session 36 — SELF-CONTAINED portable bundle (exe-relative paths + hidden launcher + VRAM auto-tier)  ⏳ — ADR-076, render test pending GPU recovery
