@@ -27,6 +27,17 @@ target_link_libraries(backrooms PRIVATE
 target_compile_definitions(backrooms PRIVATE UNICODE _UNICODE)
 set_target_properties(backrooms PROPERTIES OUTPUT_NAME "backrooms")
 
+# ADR-078 / doc-04 Tier 1 -- NO DOS WINDOW EVER. The RELEASE (shipped) build is a /SUBSYSTEM:WINDOWS
+# app: Windows allocates no console, so the game's own console window (the last popup -- the sidecars
+# are already CREATE_NO_WINDOW) is gone. /ENTRY:mainCRTStartup keeps main() as the entry unchanged, so
+# printf/fprintf just become no-ops when there is no console (and still flow to a redirected pipe when
+# one is attached). The DEBUG build stays CONSOLE-subsystem so the gates can still capture its stdout
+# (lookcheck / combined_hash / rt_frames). Release-only -> the dev gates are completely unaffected.
+if(WIN32 AND BACKROOMS_RELEASE)
+  set_target_properties(backrooms PROPERTIES WIN32_EXECUTABLE TRUE)
+  target_link_options(backrooms PRIVATE /ENTRY:mainCRTStartup)
+endif()
+
 # Windows screensaver: a .scr IS just the exe renamed (it self-detects /s /p /c). Emit Backrooms.scr
 # next to the exe on EVERY build so it is reproducible -- it used to be a one-off manual copy, so a
 # clean build (which wipes build/bin) had nothing to regenerate it and it vanished. The copy goes via

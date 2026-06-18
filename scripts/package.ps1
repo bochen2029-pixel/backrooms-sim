@@ -102,10 +102,9 @@ Requirements:  Windows 10/11 x64. A Direct3D-12 GPU. For the local AI Director/v
 No data leaves your machine -- all inference is local. See CREDITS.txt and licenses\NOTICE.txt.
 "@ | Out-File -Encoding ASCII (Join-Path $stage 'README.txt')
 
-@'
-@echo off
-start "" "%~dp0Backrooms.exe"
-'@ | Out-File -Encoding ASCII (Join-Path $stage 'RUN.cmd')
+# (RUN.cmd removed -- ADR-078: the release exe is /SUBSYSTEM:WINDOWS, so users double-click
+#  Backrooms.exe directly; the old .cmd launcher flashed a console window, which we no longer want.)
+Remove-Item (Join-Path $stage 'RUN.cmd') -Force -ErrorAction SilentlyContinue
 
 # --- 8) report sizes -----------------------------------------------------------
 $total = (Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum).Sum

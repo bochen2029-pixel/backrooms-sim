@@ -147,3 +147,16 @@ job is audit + fast, unambiguous rollback.
 - **Deferred (doc 04):** Tier-1 console fix (`WIN32_EXECUTABLE` — must verify it doesn't break the
   gates' stdout capture); exe-relative DXC probe (the dev exe's DXR still finds `dxcompiler.dll` via
   the Windows SDK); manifest hash-pinning (Gap D), DLL allowlist (Gap E), end-to-end bundle smoke (Gap J).
+
+## E8 — 2026-06-18 — No DOS window EVER: release exe is /SUBSYSTEM:WINDOWS (doc 04 Tier 1) [ADR-078]
+- **What:** `app/CMakeLists.txt` makes the RELEASE build a Windows-GUI (no-console) exe
+  (`WIN32_EXECUTABLE` + `/ENTRY:mainCRTStartup`), keeping `main()` unchanged. The DEBUG build stays
+  console-subsystem so the gates keep capturing stdout. Removed `RUN.cmd` (its `start` flashed a
+  console) from `package.ps1` + the bundle; users double-click `Backrooms.exe`. Bundle exe refreshed.
+- **Why:** operator — no DOS windows popping up, ever. The sidecars were already `CREATE_NO_WINDOW`;
+  the game's own console was the last popup.
+- **Files:** `app/CMakeLists.txt`, `scripts/package.ps1`. **Rollback:** `git revert <commit>`.
+- **Verification:** `dumpbin` → release = **"2 subsystem (Windows GUI)"** (no console), debug = "3
+  subsystem (Windows CUI)" (gates OK). Release smoke (Windows-subsystem): **rt_frames=486**, debug-clean,
+  exit 0, and stdout STILL reaches a redirected pipe (capture works). `audit.ps1` PASS: ctest 109/109,
+  determinism + inventory + isolation green.
