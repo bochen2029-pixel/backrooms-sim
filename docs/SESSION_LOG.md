@@ -2,6 +2,8 @@
 
 Newest entry first. Every session appends: done / pending / open questions / gotchas.
 
+> ⏸ **RESUMING → read `_run_state/REHYDRATE.md` FIRST** (reconstitution pointer: state · the single next action [live pixel-POV render] · don't-assume list · verify-commands). Then run `scripts\audit.ps1` + `git log --oneline -12`. KEEL is self-contained: `scripts\keel-up.ps1` (never C:\).
+
 ---
 
 ## Session 37 — RT/ray-tracing instant-crash FIXED (validation-layer workaround) + live-RT gate guard — ADR-077 ✅ (mission 1 of 2)
