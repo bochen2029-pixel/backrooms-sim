@@ -62,6 +62,19 @@ re-greened Tier-1 (169 FPS, no-ghost). Toggling forces an accumulator reset (lig
 --flashlight`, dark pose): luma 31→68, clean cone, debug-clean. Cone width/softness/intensity =
 `kFlashCosOut`/`kFlashCosIn`/`kFlashIntensity` (trivial retune). All 3 launch exes re-staged.
 
+**AI model-tier toggle (E14, `693c1d2`, ADR-079).** Operator wanted to force 4B even on a 9B-capable card. New
+Settings row **"AI MODEL" AUTO/9B VISION/4B TEXT** (`model_tier` 0/1/2; `kSettingsItems` 10→11, new index 9 before
+Back so existing indices stable). `try_start_sidecar` reads `g_modelTier`: 0=AUTO=prior VRAM logic exactly (zero
+behaviour change), 1=force 9B, 2=force 4B (text-only → vision no-ops). Applies on restart (sidecar reloads ~6 GB).
+The intentional Settings-render change → `goldens/m15/settings.png` regenerated via `goldgen capture` (Iron Rule 6)
++ ADR-079, same commit. Verified: **gate M15 PASSED** (all 4 menu goldens bit-match), ctest 109/109.
+
+**`--game-shot` screenshot mode (E15, `fdea368`).** Operator wanted nice screenshots (most RT, some raster, no
+flashlight). New additive headless mode: walk the natural Stroller mid-corridor, then render one clean frame
+(`--rt` PT / else raster; `--seed`/`--ticks`/`--spp`). Delivered 5 RT (moody) + 3 raster (bright) at 1080p,
+debug-clean. No existing code/gate/golden touched. (Aesthetic: raster lights the whole ceiling; PT leaves it dark
+between the emissive strips.)
+
 **Open questions.** None blocking. Whether to call the immersive arc "done" or continue to live hearing (Phase F) is
 an operator preference. The creature-POV image is real geometry (identical camera+`render_chunks`+`readback`+encode as
 the proven record path); a dedicated in-game POV PNG dump was deliberately NOT added (scope; the wiring is proven).
