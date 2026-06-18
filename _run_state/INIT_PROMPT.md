@@ -178,8 +178,12 @@ multimodal slot · latest-wins-per-class · concurrency cap · FIFO; 6 determini
 - **Public release** — bundle the **D3D12 Agility SDK** (`D3D12Core.dll` + `d3d12SDKLayers.dll` + the SDK-version
   exports) so the ADR-077 validation-layer fix works on a clean end-user Win11 without Graphics Tools; re-stage
   the bundle exe (the shipped zip predates the fixes) before any itch.io push.
-- **GLM `_brainstorm/GLM/01_RTX_RENDERING_EFFICIENCY.md` is UNREAD** (RT path-tracer noise/speed; read + polish it
-  with your own judgement, like the others — the operator asked for all of GLM's brainstorm to be reviewed).
+- **GLM `_brainstorm/GLM/01_RTX_RENDERING_EFFICIENCY.md` — READ + Tier 1 APPLIED (E12, `af186f6`).** Temporal
+  accumulation is live in the interactive RT path (a still view converges clean at 1 spp/frame instead of
+  4-spp-from-scratch); fixed the operator's "noisy+slow" playtest report. **Remaining GLM tiers (optional, measure
+  first):** Tier 2 (frame-pipeline de-sync — remove the 3 sync GPU round-trips/frame), Tier 3 (SVGF temporal
+  denoiser — also removes the creature-ghost-while-still tradeoff from Tier 1), Tier 4 (cheaper stochastic light
+  sampling). Also from the playtest: caption word-wrap fixed (E12); the bitmap font lacks a 'J' glyph (tiny TODO).
 - **Operator should confirm `gate.ps1 -Milestone M30` green** on their interactive machine (the mouse-look check
   needs a foreground GPU; see DON'T-ASSUME #2).
 

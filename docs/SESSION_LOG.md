@@ -40,9 +40,18 @@ route all live hosts (brain / director-vision / chat / **creature-vision**) thro
 `keel_scheduler.h`, so the single multimodal slot is **arbitrated** (priority: player-speech > shoggoth-vision >
 director-vision > …) rather than the current best-effort offset-cadence queueing — now more relevant since 4 consumers
 share KEEL (the smoke proved they coexist debug-clean, but unarbitrated). Then **Phase F** (live cheap-tier hearing),
-**Phase G** (Escape polish). Also: GLM `_brainstorm/GLM/01_RTX_RENDERING_EFFICIENCY.md` still UNREAD; public-release
-**D3D12 Agility SDK** bundling (so ADR-077 validation works on a clean Win11 without Graphics Tools) + re-stage the
-bundle exe before any itch.io push.
+**Phase G** (Escape polish). Public-release **D3D12 Agility SDK** bundling (so ADR-077 validation works on a clean
+Win11 without Graphics Tools) + re-stage the bundle exe before any itch.io push.
+
+**Playtest addendum (E12, `af186f6`).** The operator took the "play it first" advice and surfaced two RT-build issues,
+both fixed this session: (1) **RTX noisy+slow** — GLM doc 01 (now READ) named the root cause: the interactive PT path
+reset the temporal accumulator every frame (4-spp-from-scratch). Applied GLM **Tier 1**: accumulate across frames
+(reset only on view-move / scene-rebuild / first frame; 1 spp/frame when static) → a still view converges clean at ~¼
+the rays. Interactive-only (golden `render_pt` untouched) → record==replay green. Known tradeoff: the creature ghosts
+slightly while you stand still (GLM 1a); SVGF (Tier 3) is the follow-up. (2) **Caption runoff** — `build_caption_overlay`
+now word-wraps + stacks (was one centered row that overflowed at 4K). Verified: audit green, caption wraps at 2560×1440,
+live `--game --rt` smoke rt_frames=2008/debug-clean, A/B 4spp-grainy→64spp-smooth. GLM Tiers 2–4 remain (optional). Tiny
+TODO: the bitmap font lacks a 'J' glyph.
 
 **Open questions.** None blocking. Whether to call the immersive arc "done" or continue to live hearing (Phase F) is
 an operator preference. The creature-POV image is real geometry (identical camera+`render_chunks`+`readback`+encode as

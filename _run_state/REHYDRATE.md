@@ -72,7 +72,7 @@ fixed in all record paths + gated. **ADR-078** self-contained AI runtime (no C:\
 + the per-step audit cadence. Tags: `pre-phaseA phaseA phaseB phaseC-core`; backups `C:\backrooms_backups\`.
 
 ## 4. RING 3 — pointers / pending
-GLM brainstorm `_brainstorm/GLM/` (00,02,03,04,05 read; **01 RT-perf UNREAD**). Also pending: Phase C.2 (threaded
+GLM brainstorm `_brainstorm/GLM/` (00–05 all read; **01 RT-perf READ + Tier 1 temporal accumulation APPLIED E12 `af186f6`** — fixed the operator's noisy+slow playtest report; Tiers 2–4 optional, measure first). Also pending: Phase C.2 (threaded
 `KeelBroker` + host integration + soak — needs KEEL up); live cheap-tier hearing (Phase F); Escape polish (Phase G —
 `resolve_target` already does Stairs = the yearning); public-release D3D12 Agility SDK (so the validation-layer fix
 works on a clean end-user Win11 without Graphics Tools); re-stage the bundle exe before any itch.io push.
