@@ -330,3 +330,19 @@ job is audit + fast, unambiguous rollback.
   + menu-wraps all green | record==replay | inventory | isolation. The "AI MODEL AUTO" row + hint render correctly
   (`runs\settings_model.png`). NOTE on live test: the model actually loaded only changes at the next sidecar launch
   (game restart) — verifiable by the operator (pick 4B → restart → Director/creature run text-only, vision no-ops).
+
+## E15 — 2026-06-18 — `--game-shot`: a framed marketing/QC screenshot mode (walk-then-render) [operator request]
+- **What:** a new headless mode `run_game_shot` (`--game-shot`) that walks the natural **Stroller** into the maze
+  (default 1800 ticks; `--ticks` tunes distance) so the camera sits MID-CORRIDOR, then renders ONE clean frame
+  from its POV — ray-traced (`--rt`, converged `--spp`, default 320) or raster. `--seed` varies the world,
+  `--out` the PNG. The existing `--shot` / `--dxr-pt` sit at the fixed (16,16) spawn cell (often against a wall);
+  this frames naturally (the Stroller looks DOWN corridors — low faceplant, per `--strollcheck`).
+- **Why:** operator — "render me some nice screenshots, some raster but most ray tracing, without flashlight."
+  Produced the delivered batch (5 RT moody + 3 raster bright, 1920×1080); none enable the flashlight.
+- **Without breaking anything:** purely ADDITIVE — a new run mode + one Options bool (`game_shot`) + one parse
+  arm + one dispatch line; touches NO existing function, NO gated path, NO golden, NO module inventory (run modes
+  aren't inventory). Reuses the proven Stroller + `build_walk_collision` + `render_pt`/`render_chunks` paths.
+- **Files:** `app/src/main.cpp` (only). **Rollback:** `git revert <commit>`.
+- **Verified:** build clean (/WX); ~12 `--game-shot` renders (RT + raster, varied seed/ticks) all
+  **debug_error_count=0**; the audit's ctest/determinism are unaffected (no existing code touched). Aesthetic note:
+  raster lights the whole ceiling (bright, classic Level-0), PT leaves it dark between the emissive strips (moody).

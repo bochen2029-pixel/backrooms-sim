@@ -116,6 +116,7 @@ struct Options {
     bool tts_check = false;                 // M24: TTS -> whisper round-trip (intelligibility check)
     bool caption_shot = false;              // render the Director subtitle over a gray bg -> PNG (visibility proof)
     bool flashlight = false;                // --dxr-pt QC: render with the eye-torch ON (off by default)
+    bool game_shot = false;                 // --game-shot: walk the Stroller into the maze, then render one framed shot (--rt for PT)
     bool mic_test = false;                  // ADR-074: capture mic + VAD + whisper, print transcripts (verify voice input)
     bool chat_test = false;                 // ADR-074: TTS->whisper->Director reply (verify the conversation glue, no mic)
     bool shoggoth_pa_record = false;       // M24: PA voice spoken into the soundscape -> heard as words
@@ -254,6 +255,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--flashlight") == 0) o.flashlight = true;
+        else if (std::strcmp(a, "--game-shot") == 0) o.game_shot = true;
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
         else if (std::strcmp(a, "--version") == 0) o.version = true;
         else if (std::strcmp(a, "--frames") == 0) { if (!u32(o.frames)) return false; }
@@ -4610,6 +4612,66 @@ contracts::CameraPose canonical_pose(const Options& o, uint32_t pose) {
 }
 
 // ----- M9 phase 3: path-traced render (emissive fluorescents + GI, accumulated) -
+// A FRAMED screenshot (marketing / QC): walk the natural Stroller into the maze so the camera sits mid-corridor
+// (the fixed-(16,16) --shot / --dxr-pt sit in the spawn cell, often against a wall), then render ONE clean frame
+// from its POV -- ray-traced (--rt, converged --spp) or raster. --seed varies the world, --ticks how far to walk.
+// The Stroller looks DOWN corridors (low faceplant), so the framing is natural. Presentation/QC only -- no gate,
+// no golden; never enables the flashlight.
+int run_game_shot(const Options& o) {
+    using namespace br::core;
+    WorldState s(o.seed);
+    s.wanderer.pos = Vec3{ 2.0f, kWandererHalfHeight + 0.02f, 2.0f };
+    Stroller bot(o.seed ^ 0x5170990000000001ull, s.wanderer.pos);
+    std::vector<Aabb> col;
+    contracts::ChunkKey cached{ 0x7fffffff, 0, 0 };
+    auto rebuild = [&](contracts::ChunkKey c) { build_walk_collision(col, o.seed, c); cached = c; };
+    rebuild(contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z));
+    const uint64_t steps = (o.ticks > 0) ? o.ticks : 1800u;   // ~15 s of walking -> well into the maze
+    for (uint64_t t = 0; t < steps; ++t) {
+        const contracts::ChunkKey here = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
+        if (here != cached) rebuild(here);
+        tick(s, bot.step(s, o.seed, col), col);
+    }
+    contracts::CameraPose cam{};
+    cam.pos[0] = s.wanderer.pos.x; cam.pos[1] = s.wanderer.pos.y + kEyeHeight; cam.pos[2] = s.wanderer.pos.z;
+    cam.yaw = s.wanderer.yaw; cam.pitch = 0.0f;
+    cam.fov_y = 1.2217305f; cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
+
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    const contracts::ChunkKey center = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
+    sm.update(center); sm.wait_idle(); sm.update(center);
+    const std::string out = o.out.empty() ? std::string("runs/game_shot.png") : o.out;
+    uint32_t dbg = 0;
+
+    if (o.rt) {
+        br::render_dxr::DxrRenderer r;
+        if (!r.init(o.width, o.height)) { std::fprintf(stderr, "dxr init: %s\n", r.last_error().c_str()); return 1; }
+        if (!r.build_scene(sm.resident())) { std::fprintf(stderr, "dxr scene: %s\n", r.last_error().c_str()); return 1; }
+        const uint32_t spp = (o.spp > 0) ? o.spp : 320u;
+        if (!r.render_pt(cam, spp, static_cast<uint32_t>(o.seed))) { std::fprintf(stderr, "dxr pt: %s\n", r.last_error().c_str()); return 1; }
+        std::vector<uint8_t> rgba;
+        if (!r.readback(rgba)) { std::fprintf(stderr, "readback: %s\n", r.last_error().c_str()); return 1; }
+        stbi_write_png(out.c_str(), static_cast<int>(o.width), static_cast<int>(o.height), 4, rgba.data(), static_cast<int>(o.width) * 4);
+        dbg = r.debug_error_count();
+    } else {
+        Renderer renderer;
+        if (!renderer.init_headless(o.width, o.height)) { std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1; }
+        renderer.set_texture_seed(o.seed);
+        uint32_t drawn = 0;
+        const size_t targetN = sm.resident_count();
+        for (int wk = 0; wk < 400 && static_cast<size_t>(drawn) < targetN; ++wk) renderer.render_chunks(cam, sm.resident(), 64u, 0u, &drawn);
+        renderer.render_chunks(cam, sm.resident(), 256u, 0u, &drawn);
+        FrameImage img;
+        if (!renderer.readback(img)) { std::fprintf(stderr, "readback: %s\n", renderer.last_error().c_str()); return 1; }
+        stbi_write_png(out.c_str(), static_cast<int>(img.width), static_cast<int>(img.height), 4, img.rgba.data(), static_cast<int>(img.width) * 4);
+        dbg = renderer.debug_error_count();
+    }
+    std::printf("shot_pos: %.1f %.1f yaw %.2f\n", static_cast<double>(s.wanderer.pos.x), static_cast<double>(s.wanderer.pos.z), static_cast<double>(cam.yaw));
+    std::printf("debug_error_count: %u\n", dbg);
+    std::printf("out: %s\n", out.c_str());
+    return dbg == 0 ? 0 : 3;
+}
+
 int run_dxr_pt(const Options& o) {
     struct Pose { float yaw, pitch; };
     static const Pose kPoses[5] = {
@@ -5410,6 +5472,7 @@ int main(int argc, char** argv) {
     if (o.dxr_probe)  return run_dxr_probe(o);
     if (o.dxr_test)   return run_dxr_test(o);
     if (o.dxr_depth)  return run_dxr_depth(o);
+    if (o.game_shot)  return run_game_shot(o);
     if (o.dxr_pt)     return run_dxr_pt(o);
     if (o.dxr_fps)    return run_dxr_fps(o);
     if (o.dxr_ghost)  return run_dxr_ghost(o);
