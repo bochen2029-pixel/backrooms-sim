@@ -79,3 +79,17 @@ job is audit + fast, unambiguous rollback.
 - **Note:** `valid_intents=0` (KEEL :7071 down) — Phase B is LLM-free; the determinism oracle is KEEL-independent.
 - **Deferred (tracked, kept Phase B atomic):** a level-7 case added to the `gate.ps1` sacred gate; the
   M29 *vision*-record prey-offset logic fix (`AUDIT_2026-06-15.md:207`) — both separate increments.
+
+## E4 — 2026-06-17 — Fix the M29 prey-offset in ALL shoggoth record paths (vision/hearing/PA)
+- **What:** the vision/hearing/PA record paths used the **un-offset** wanderer in `shoggoth_step`,
+  while `--shoggoth-record` + `--shoggoth-replay` apply the M29 cross-seam prey-offset → a
+  `--level != 0` record on those paths would NOT replay bit-exact. `AUDIT_2026-06-15.md:207` flagged
+  *vision*; measure-first found **hearing + PA had the identical bug**. Added a shared `shoggoth_prey()`
+  helper (single source of truth) and routed all three paths' summary + step through it.
+- **Why:** a latent determinism bug — closes the AUDIT item and the whole class. Pure anti-entropy.
+- **Files:** `app/src/main.cpp` (1 helper + 2 replace-all of 3 sites each). Behaviour-neutral at level 0.
+- **Rollback:** `git revert <commit>`, or `git reset --hard phaseB`.
+- **Verification (oracle):** record==replay **bit-identical at LEVEL 7** for vision/hearing/PA (all
+  `95945b9087214b14` = the plain-record level-7 chase) AND level-0 vision **unchanged**
+  (`409129a0236b3084` = M22/M23/M24 byte-identical). `audit.ps1` POST: `build ok | ctest 103/103 |
+  determ 409129a0 (lvl0) | inventory ok | isolation ok`.

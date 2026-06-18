@@ -3132,6 +3132,16 @@ int run_director_replay(const Options& o) {
     return 0;
 }
 
+// M29: the prey the per-floor Shoggoth senses -- the wanderer, shifted onto o.level's floor at the
+// midpoint so a cross-seam escape is reproducible. SHARED by every record path + replay so they stay
+// byte-identical (closes AUDIT_2026-06-15.md:207, where the vision/hearing/PA record paths lacked it).
+// At --level 0 (every M21/M22/M23/M24 gate) prey == the wanderer, so those gates are byte-unchanged.
+inline br::core::Vec3 shoggoth_prey(const br::core::Vec3& wanderer, int32_t level, uint64_t t, uint64_t N) {
+    br::core::Vec3 prey = wanderer;
+    if (level != 0 && t >= N / 2) prey.y += contracts::level_base_y(level);
+    return prey;
+}
+
 // ----- M21 Shoggoth brain record/replay: prove the sacred gate (model off) -----
 // Record: a wanderer walks the maze; the Shoggoth hunts with its KEEL brain ON. Every
 // few seconds it asks KEEL (with the shoggoth system prompt) for an intent, validates
@@ -3236,7 +3246,7 @@ int run_shoggoth_vision_record(const Options& o) {
             }, &png, static_cast<int>(img.width), static_cast<int>(img.height), 4, img.rgba.data(), static_cast<int>(img.width) * 4);
             const std::string b64 = app::base64_encode(png.data(), png.size());
             // 3) Ask the vision model what to do, given what it SEES + senses.
-            const app::ShoggothSummary sum = app::build_shoggoth_summary(sh, w.s.wanderer.pos, t);
+            const app::ShoggothSummary sum = app::build_shoggoth_summary(sh, shoggoth_prey(w.s.wanderer.pos, o.level, t, N), t);
             const br::director::KeelResponse resp = br::director::keel_complete_vision(host, port, app::render_shoggoth_vision_prompt(sum), b64, 30000);
             bool ok = false;
             const app::ShoggothIntent intent = resp.ok ? app::parse_shoggoth_intent(resp.content, ok) : app::ShoggothIntent{};
@@ -3247,7 +3257,7 @@ int run_shoggoth_vision_record(const Options& o) {
                 H = fold_bytes(H, &events.back(), sizeof(app::ShoggothEvent));
             }
         }
-        app::shoggoth_step(sh, w.s.wanderer.pos, o.seed, (t % 8u) == 0u);
+        app::shoggoth_step(sh, shoggoth_prey(w.s.wanderer.pos, o.level, t, N), o.seed, (t % 8u) == 0u);
         H = fold_u64(H, app::shoggoth_hash(sh));
     }
     if (!o.director_log.empty()) {
@@ -3416,7 +3426,7 @@ int run_shoggoth_hearing_record(const Options& o) {
                 heard = whisper_transcribe(wav, wexe, wmodel);
                 if (!heard.empty()) { ++heard_nonempty; last_heard = heard; }
             }
-            const app::ShoggothSummary sum = app::build_shoggoth_summary(sh, w.s.wanderer.pos, t);
+            const app::ShoggothSummary sum = app::build_shoggoth_summary(sh, shoggoth_prey(w.s.wanderer.pos, o.level, t, N), t);
             const br::director::KeelResponse resp = br::director::keel_complete(host, port, app::render_shoggoth_hearing_prompt(sum, heard), 15000);
             bool ok = false;
             const app::ShoggothIntent intent = resp.ok ? app::parse_shoggoth_intent(resp.content, ok) : app::ShoggothIntent{};
@@ -3427,7 +3437,7 @@ int run_shoggoth_hearing_record(const Options& o) {
                 H = fold_bytes(H, &events.back(), sizeof(app::ShoggothEvent));
             }
         }
-        app::shoggoth_step(sh, w.s.wanderer.pos, o.seed, (t % 8u) == 0u);
+        app::shoggoth_step(sh, shoggoth_prey(w.s.wanderer.pos, o.level, t, N), o.seed, (t % 8u) == 0u);
         H = fold_u64(H, app::shoggoth_hash(sh));
     }
     if (!o.director_log.empty()) {
@@ -3529,7 +3539,7 @@ int run_shoggoth_pa_record(const Options& o) {
                 heard = whisper_transcribe(wav, wexe, wmodel);
                 if (!heard.empty()) { ++heard_nonempty; last_heard = heard; }
             }
-            const app::ShoggothSummary sum = app::build_shoggoth_summary(sh, w.s.wanderer.pos, t);
+            const app::ShoggothSummary sum = app::build_shoggoth_summary(sh, shoggoth_prey(w.s.wanderer.pos, o.level, t, N), t);
             const br::director::KeelResponse resp = br::director::keel_complete(host, port, app::render_shoggoth_hearing_prompt(sum, heard), 15000);
             bool ok = false;
             const app::ShoggothIntent intent = resp.ok ? app::parse_shoggoth_intent(resp.content, ok) : app::ShoggothIntent{};
@@ -3540,7 +3550,7 @@ int run_shoggoth_pa_record(const Options& o) {
                 H = fold_bytes(H, &events.back(), sizeof(app::ShoggothEvent));
             }
         }
-        app::shoggoth_step(sh, w.s.wanderer.pos, o.seed, (t % 8u) == 0u);
+        app::shoggoth_step(sh, shoggoth_prey(w.s.wanderer.pos, o.level, t, N), o.seed, (t % 8u) == 0u);
         H = fold_u64(H, app::shoggoth_hash(sh));
     }
     if (!o.director_log.empty()) {
