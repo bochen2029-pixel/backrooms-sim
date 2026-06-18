@@ -37,7 +37,15 @@ process-startup here. It failed identically *before* my edits (not a regression)
 foreground machine (full GPU clocks, fast startup — which is why `m30-green` exists). **Did NOT widen the gate window
 to force-green it (no gaming, Iron Rule 6).**
 
-**PENDING.** (a) **Mission 2: the Shoggoth AI plan** — not started. (b) **Public-release follow-up (IMPORTANT):**
+**PENDING.** (a) **Mission 2: the Shoggoth AI plan — DONE** (`docs/SHOGGOTH_PLAN.md`) and **Phase A
+shipped** (tag `phaseA`, `501294d`): the Lurk idle is now feature-aware — `resolve_idle_goal`
+(pure, seeded bounded-BFS) loiters toward junctions/open cells instead of the blind `rng%7` hop —
+and Flank no longer degenerates to Hunt at close range. ctest 103/103; shoggoth record==replay
+bit-identical (`29310b6befab8895`, model offline). Backup/rollback anchors: tags `pre-phaseA` +
+`phaseA`, local zip `C:\backrooms_backups\`, append-only ledger `docs/CHANGE_AUDIT_LOG.md`. Next:
+**Phase B** (the `ShoggothIntent` schema bump — the one determinism-risky increment; `SHOGLOG1`→`2`,
+extend `ShoggothEvent`+hash+replay, fold in the M29 vision-record AUDIT fix). (b) **Public-release
+follow-up (IMPORTANT):**
 `EnableDebugLayer()` needs the D3D12 SDK layers DLL — present on the operator's box (Graphics Tools) but **absent on a
 clean end-user Win11**, so the itch.io bundle must ship the **D3D12 Agility SDK redist** (`D3D12Core.dll` +
 `d3d12SDKLayers.dll` + the `D3D12SDKVersion`/`Path` exports) or end-users hit the original crash in RT. (c) The
