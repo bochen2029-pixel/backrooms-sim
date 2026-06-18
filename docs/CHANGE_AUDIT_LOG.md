@@ -160,3 +160,17 @@ job is audit + fast, unambiguous rollback.
   subsystem (Windows CUI)" (gates OK). Release smoke (Windows-subsystem): **rt_frames=486**, debug-clean,
   exit 0, and stdout STILL reaches a redirected pipe (capture works). `audit.ps1` PASS: ctest 109/109,
   determinism + inventory + isolation green.
+
+## E9 — 2026-06-18 — Shoggoth Phase D/E core: vision-driven motion (resolve_target) + voice field [SHOGGOTH_PLAN]
+- **What:** `resolve_target` (shoggoth.h) maps a semantic `target_kind` → a real goal cell (Wanderer →
+  the engine's exact cell; Stairs → nearest up-stair; else → the feature-aware wander), wired into
+  `shoggoth_step` (target_kind != None overrides the goal). `ShoggothIntent` gains `utterance` (voice-only,
+  never hashed/serialized). `parse_shoggoth_intent` now reads the semantic fields + utterance (all optional,
+  backward-compatible). `render_shoggoth_vision_prompt` asks for the full semantic schema.
+- **Why:** SHOGGOTH_PLAN Phase D (vision drives behaviour) + E (voice) — the immersive core.
+- **Determinism-safe:** target_kind=None (the text-brain path + every default) → `resolve_target` skipped →
+  M21/M29 byte-unchanged. The vision path carries the fields through the Phase-B event log → record==replay.
+- **Files:** `app/src/shoggoth.h`, `shoggoth_brain.h`, `shoggoth_vision.h`. **Rollback:** `git revert <commit>`.
+- **Verified (KEEL self-contained :7071):** `audit.ps1` ctest 109/109 + text record==replay (`476a9c07`);
+  VISION record==replay `valid_intents=3` (`a91b512d`) — the semantic schema drives `resolve_target`
+  deterministically.

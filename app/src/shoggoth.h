@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <queue>
 #include <set>
+#include <string>
 #include <unordered_map>
 
 #include "core/rng.h"
@@ -51,6 +52,10 @@ struct ShoggothIntent {
     Proximity proximity = Proximity::Far;
     Mood mood = Mood::Idle;
     float snap = 0.5f;  // per-mode resolution fidelity: 1 = lock the cell, 0 = head the sector
+    // Phase E (voice): a short sensory utterance the creature speaks when close. Presentation-only --
+    // NEVER hashed or serialized into ShoggothEvent (so it can live here with no log-version bump and
+    // never perturbs determinism). Empty = silent.
+    std::string utterance;
 };
 
 struct Shoggoth {
@@ -178,6 +183,35 @@ inline void resolve_idle_goal(uint64_t seed, int32_t level, int64_t sgi, int64_t
     out_gj = bgj;
 }
 
+// Phase D (SHOGGOTH_PLAN.md S4): the brain PROPOSES a semantic target (from vision); the engine
+// DISPOSES it to a real, reachable goal cell. Pure + deterministic. The model never touches motion --
+// only this goal, which next_step_dir then wall-routes. Wanderer -> the engine's exact cell (vision
+// can't be wrong about ground truth); Stairs -> the nearest up-stair cell within a few chunks (the
+// Escape yearning); everything else (doorway/dark/light/shaft) -> the feature-aware wander, the
+// Explore drift. (sector/proximity/snap are accepted now for the schema; the bearing/proximity
+// scoring is a v2 refinement -- v1 targets by KIND, which is the load-bearing behaviour.)
+inline void resolve_target(uint64_t seed, int32_t level, int64_t sgi, int64_t sgj, float facing,
+                           TargetKind kind, Sector /*sector*/, Proximity /*proximity*/, float /*snap*/,
+                           int64_t wgi, int64_t wgj, br::core::Pcg64& rng,
+                           int64_t& out_gi, int64_t& out_gj) {
+    if (kind == TargetKind::Wanderer) { out_gi = wgi; out_gj = wgj; return; }
+    if (kind == TargetKind::Stairs) {
+        const int G = br::gen::kCellsPerChunk;
+        const int64_t ccx = floor_div(sgi, G), ccz = floor_div(sgj, G);
+        int64_t bgi = sgi, bgj = sgj, bestd2 = -1;
+        for (int64_t dz = -2; dz <= 2; ++dz) for (int64_t dx = -2; dx <= 2; ++dx) {
+            const br::gen::StairSpec s = br::gen::stair_at(seed, level, ccx + dx, ccz + dz);
+            if (!s.present) continue;
+            const int64_t gi = (ccx + dx) * G + s.cell_i, gj = (ccz + dz) * G + s.cell_j;
+            const int64_t d2 = (gi - sgi) * (gi - sgi) + (gj - sgj) * (gj - sgj);
+            if (bestd2 < 0 || d2 < bestd2) { bestd2 = d2; bgi = gi; bgj = gj; }
+        }
+        if (bestd2 >= 0) { out_gi = bgi; out_gj = bgj; return; }
+        // no stair nearby -> fall through to the wander (yearning with nowhere yet to yearn toward)
+    }
+    resolve_idle_goal(seed, level, sgi, sgj, facing, rng, out_gi, out_gj);   // doorway/dark/light/shaft/Explore
+}
+
 // --- the creature --------------------------------------------------------------
 // Distances (m) for the state machine.
 constexpr float kShogHuntRange = 44.0f;
@@ -266,6 +300,16 @@ inline void shoggoth_step(Shoggoth& sh, const br::core::Vec3& wanderer, uint64_t
             tgi = sgi + (sgi >= wgi ? 4 : -4);
             tgj = sgj + (sgj >= wgj ? 4 : -4);
             break;
+    }
+
+    // Phase D: a SEMANTIC target from the brain (vision) resolves to a real cell and overrides the
+    // action-goal. None (the default, and the whole text-brain path) leaves the FSM/action goal
+    // untouched -> M20/M21/M29 behaviour + the sacred record/replay stay bit-identical.
+    if (sh.intent.target_kind != TargetKind::None) {
+        int64_t rgi, rgj;
+        resolve_target(seed, sh.level, sgi, sgj, sh.yaw, sh.intent.target_kind, sh.intent.sector,
+                       sh.intent.proximity, sh.intent.snap, wgi, wgj, sh.rng, rgi, rgj);
+        tgi = rgi; tgj = rgj;
     }
 
     // Steer toward the centre of the next cell along the BFS route (stays in corridors).

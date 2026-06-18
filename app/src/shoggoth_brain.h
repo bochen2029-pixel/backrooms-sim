@@ -88,6 +88,50 @@ inline ShoggothIntent parse_shoggoth_intent(const std::string& content, bool& ok
         const float ag = static_cast<float>(g->num);
         intent.aggression = ag < 0.0f ? 0.0f : (ag > 1.0f ? 1.0f : ag);
     }
+    // Phase D/E: the semantic perception fields + the voice utterance. All OPTIONAL -- the text-brain
+    // reply (action/aggression only) leaves them at their defaults, so its behaviour + the sacred gate
+    // are unchanged; the vision reply fills them and drives resolve_target + the voice.
+    if (const auto* tk = v.find("target_kind"); tk && tk->is_string()) {
+        const std::string& k = tk->str;
+        if (k == "wanderer") intent.target_kind = TargetKind::Wanderer;
+        else if (k == "doorway") intent.target_kind = TargetKind::Doorway;
+        else if (k == "stairs") intent.target_kind = TargetKind::Stairs;
+        else if (k == "shaft") intent.target_kind = TargetKind::Shaft;
+        else if (k == "dark") intent.target_kind = TargetKind::Dark;
+        else if (k == "light") intent.target_kind = TargetKind::Light;
+    }
+    if (const auto* se = v.find("sector"); se && se->is_string()) {
+        const std::string& k = se->str;
+        if (k == "ahead") intent.sector = Sector::Ahead;
+        else if (k == "ahead_left") intent.sector = Sector::AheadLeft;
+        else if (k == "left") intent.sector = Sector::Left;
+        else if (k == "behind_left") intent.sector = Sector::BehindLeft;
+        else if (k == "behind") intent.sector = Sector::Behind;
+        else if (k == "behind_right") intent.sector = Sector::BehindRight;
+        else if (k == "right") intent.sector = Sector::Right;
+        else if (k == "ahead_right") intent.sector = Sector::AheadRight;
+    }
+    if (const auto* px = v.find("proximity"); px && px->is_string()) {
+        const std::string& k = px->str;
+        if (k == "near") intent.proximity = Proximity::Near;
+        else if (k == "mid") intent.proximity = Proximity::Mid;
+        else if (k == "far") intent.proximity = Proximity::Far;
+    }
+    if (const auto* md = v.find("mood"); md && md->is_string()) {
+        const std::string& k = md->str;
+        if (k == "curious") intent.mood = Mood::Curious;
+        else if (k == "fixated") intent.mood = Mood::Fixated;
+        else if (k == "afraid") intent.mood = Mood::Afraid;
+        else if (k == "idle") intent.mood = Mood::Idle;
+    }
+    if (const auto* sn = v.find("snap"); sn && sn->is_number()) {
+        const float q = static_cast<float>(sn->num);
+        intent.snap = q < 0.0f ? 0.0f : (q > 1.0f ? 1.0f : q);
+    }
+    if (const auto* ut = v.find("utterance"); ut && ut->is_string()) {
+        intent.utterance = ut->str;
+        if (intent.utterance.size() > 120u) intent.utterance.resize(120u);  // structural cage: hard length cap
+    }
     ok = true;
     return intent;
 }

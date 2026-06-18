@@ -40,19 +40,22 @@ inline contracts::CameraPose shoggoth_pov_camera(const Shoggoth& sh, float aspec
 // same schema parse_shoggoth_intent validates, so a bad reply still degrades to Hunt.
 inline std::string render_shoggoth_vision_prompt(const ShoggothSummary& s) {
     static const char* kStates[4] = {"lurking", "hunting", "chasing", "retreating"};
-    char buf[1300];
+    char buf[2048];
     std::snprintf(buf, sizeof(buf),
-        "You are a SHOGGOTH - a vast, amorphous, intelligent horror loose in the infinite "
-        "Backrooms, hunting a lone wanderer. Your single eye SEES the attached image: the "
-        "Backrooms corridor directly ahead of you (yellowed walls, fluorescent light, "
-        "openings, junctions, dead ends). Read it - is the way ahead open or blocked? is "
-        "there a turn to cut the wanderer off? Combine what you SEE with what you sense: you "
-        "are %s, %.0f m from the wanderer; you are at cell (%lld,%lld) and it is at "
-        "(%lld,%lld). Choose ONE behaviour and emit EXACTLY ONE compact JSON object and "
-        "nothing else:\n"
-        "{\"action\":\"hunt|stalk|lurk|flank|flee\",\"aggression\":<0.0-1.0>}\n"
-        "  hunt = close in directly;  stalk = creep closer slowly;  lurk = wait / withdraw;\n"
-        "  flank = circle around to cut it off;  flee = retreat (rare). Output ONLY the JSON.",
+        "You are a SHOGGOTH - a vast, amorphous, dim, patient horror loose in the infinite Backrooms, "
+        "hunting a lone wanderer. Your single eye SEES the attached image: the corridor ahead (yellowed "
+        "walls, fluorescent buzz, openings, junctions, dead ends). What in the frame draws you? Combine "
+        "what you SEE with what you sense: you are %s, %.0f m from the wanderer; you are at cell "
+        "(%lld,%lld) and it is at (%lld,%lld). Emit EXACTLY ONE compact JSON object and nothing else:\n"
+        "{\"action\":\"hunt|stalk|lurk|flank|flee\",\"aggression\":<0.0-1.0>,"
+        "\"target_kind\":\"wanderer|doorway|stairs|shaft|dark|light|none\","
+        "\"sector\":\"ahead|ahead_left|left|right|ahead_right|behind\",\"proximity\":\"near|mid|far\","
+        "\"mood\":\"curious|fixated|afraid|idle\",\"utterance\":\"\"}\n"
+        "  target_kind = what in the image pulls you (a doorway? the dark? the wanderer?); sector + "
+        "proximity = where it sits in your view. utterance = at most a dozen words you MURMUR if it is "
+        "near - impressionistic, sensory, NEVER naming objects (e.g. \"something soft... closer\"), or "
+        "\"\" for silence. action: hunt=close in; stalk=creep; lurk=wait; flank=circle; flee=retreat. "
+        "Output ONLY the JSON.",
         kStates[(s.state >= 0 && s.state < 4) ? s.state : 0], static_cast<double>(s.distance_m),
         static_cast<long long>(s.sgi), static_cast<long long>(s.sgj),
         static_cast<long long>(s.wgi), static_cast<long long>(s.wgj));
