@@ -40,3 +40,19 @@ job is audit + fast, unambiguous rollback.
   (`combined_hash 29310b6befab8895`, model offline) → determinism intact. The sacred gate's
   `valid_intents ≥ 1` non-vacuity clause needs the KEEL sidecar at :7071 (not up this session);
   Phase A is LLM-free, so that clause is structurally unaffected by this change.
+
+## E2 — 2026-06-17 — Adopt per-step self-audit (Externality Principle) + `scripts/audit.ps1`
+- **What:** added `scripts/audit.ps1` — the fast non-LLM oracle suite (build /WX · ctest · shoggoth
+  record==replay determinism · module inventory · core isolation) in one command, with a paste-ready
+  verdict line. Encoded the **pre/post-step audit cadence** in `CLAUDE.md` (Commands + Verification
+  etiquette).
+- **Why:** operator directive — self-test at each step so the build doesn't drift, errors don't
+  accumulate, entropy doesn't compound. Implements the **Externality Principle** from Bo Chen's
+  `solo-enterprise-architect` v7 (`C:\ClaudeCode\`): ground truth must originate *outside* the model;
+  run the externalized oracles continuously, not only at milestone gates. `gate.ps1` stays the
+  milestone gate; `audit.ps1` is the lightweight between-gates check.
+- **Files:** `scripts/audit.ps1` (new), `CLAUDE.md` (commands + cadence), this ledger.
+- **Rollback:** `git revert <commit>` — pure infra/docs; `audit.ps1` only *reads* existing checks.
+- **Verification (pre-audit baseline at this commit):** `AUDIT PASS — build ok | ctest 103 tests,
+  0 failed | determ 29310b6befab8895 | inventory ok | isolation ok | tree clean @ phaseA`.
+- **Going forward:** each change-set entry below should carry an `audit.ps1` PASS line (pre + post).

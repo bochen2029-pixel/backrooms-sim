@@ -17,6 +17,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Clean
 ctest --test-dir build --output-on-failure                                           # all tests
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/gate.ps1 -Milestone M3   # milestone gate
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/soak.ps1 -Hours 8        # walk-bot soak
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/audit.ps1                # fast per-step self-audit (non-LLM oracle suite)
 ```
 
 (These scripts are created in M0. Until then, bootstrap them as part of M0's scope.)
@@ -46,6 +47,7 @@ C++20, MSVC, warnings-as-errors. Errors cross module boundaries as typed results
 ## Verification etiquette
 
 - Hooks auto-run a quick build+test after edits (`.claude/settings.json`, activated in M0). If the hook fails, fix before doing anything else.
+- **Self-audit cadence (Externality Principle — ground truth lives outside the model).** Run `scripts/audit.ps1` as a **pre- and post-step audit**: it runs every fast non-LLM oracle in one shot — build (/WX), ctest, shoggoth record==replay determinism, module inventory (Iron Rule 7), core isolation (INV-5) — so drift is caught per-step, not per-milestone. Append the one-line verdict to `docs/CHANGE_AUDIT_LOG.md`. `gate.ps1 -Milestone M<N>` stays the milestone completion gate (clean build + GPU goldens); `audit.ps1` is the lightweight continuous check between gates. Never self-assert "done" — let an oracle say so.
 - Long operations (soaks, converged PT goldens) run via `scripts/soak.ps1` — start them, then verify telemetry output, don't sit idle.
 - D3D12 debug layer output is a gate: zero errors or warnings, always. Never disable the debug layer to pass.
 - Walk-bot getting stuck, sealed rooms, seam cracks, or determinism hash drift are **always** generator/sim bugs — never "tune around" them.
