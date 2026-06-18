@@ -279,3 +279,30 @@ job is audit + fast, unambiguous rollback.
   fully fixed: word-wrap + the complete glyph set.)
 - **Still deferred (optional, measure first):** GLM Tiers 2 (frame-pipeline de-sync — more raw fps), 3 (SVGF
   temporal denoiser — also removes the Tier-1 creature-ghost-while-still), 4 (cheaper stochastic light sampling).
+
+## E13 — 2026-06-18 — RT flashlight (eye-torch) toggled with F [operator request]
+- **What:** an interactive flashlight for the ray-traced path — a soft cone of light co-located with the eye,
+  aimed along the camera forward, that brightens dark areas. No 3D model (operator: "i dont need to see a 3d
+  flashlight, just a cone of light"). Toggle = **F** (in `run_game`; F2/F11 were taken). Added at PRIMARY hits
+  only — a primary hit is eye-visible by construction, so NO shadow ray is needed (cheap). Shader: repurposed
+  the spare CB pad slot `uPad0` → `float uFlashI` (0 = off), a `flashlight()` spotlight function (cone via
+  smoothstep on the axis cosine, gentle distance falloff, near-white color), and a **`[branch]`-guarded** add at
+  the primary-hit shade so when off the existing path is provably skipped. C++: `Impl::flashIntensity` (default
+  0), `setf(c,25,...)` in `render_pt_frame`, `DxrRenderer::set_flashlight(bool)`. App: F edge-toggle + `flashOn`
+  state; the RT block calls `set_flashlight(flashOn)` and **forces a `ptReset` when `flashOn` changes** (the
+  lighting changed → the temporal accumulator must re-converge). A `--flashlight` QC flag on `--dxr-pt` renders
+  the torch headless for the A/B. Docs: USER_GUIDE controls table + the bundle README control line.
+- **Why:** operator request — some areas are too dark; a flashlight to brighten the scene.
+- **Regression-proof / determinism:** the flashlight is OFF by default and the offline/golden path (`render_pt`
+  → `render_pt_frame`, `d.flashIntensity` never set) leaves `uFlashI == 0`, so the `[branch]` is skipped and the
+  PT output is **bit-identical**. PROVEN: `gate.ps1 -Milestone M9` PASSED — converged PT goldens
+  **diff_vs_golden = 0.000004 / 0.000677 / 0.000000** at poses 1/3/4 (≪ the 1.0 threshold); also re-greened the
+  Tier-1 accumulation gate (169.6 FPS @ 1440p, no-ghost reset clean=0). The sim/replay path is untouched.
+- **Files:** `render_dxr/include/render_dxr/dxr.h`, `render_dxr/src/dxr.cpp`, `app/src/main.cpp`,
+  `docs/USER_GUIDE.md`, `scripts/package.ps1`, `docs/CHANGE_AUDIT_LOG.md`. **Rollback:** `git revert <commit>`
+  (additive + default-off; the shader add is branch-guarded).
+- **Verified:** `gate.ps1 M9` PASSED (goldens bit-identical, debug-clean). `audit.ps1` POST — build ok | ctest
+  **109/109** | record==replay | inventory | isolation. A/B render (`--dxr-pt --flashlight`, pose 4 dark
+  down-view): **luma 31 → 68**, a clean soft-edged cone, debug_error_count 0 (`runs\flash_p4_off/on.png`). Live
+  `--game --auto-play --rt` smoke: rt_frames 1143, debug-clean, lookcheck PASS. Cone width/softness/intensity are
+  the three shader constants `kFlashCosOut`/`kFlashCosIn`/`kFlashIntensity` — trivial to retune.

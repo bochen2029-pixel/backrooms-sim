@@ -115,6 +115,7 @@ struct Options {
     bool tts_say = false;                  // M24: procedural TTS -> WAV (the Backrooms PA voice)
     bool tts_check = false;                 // M24: TTS -> whisper round-trip (intelligibility check)
     bool caption_shot = false;              // render the Director subtitle over a gray bg -> PNG (visibility proof)
+    bool flashlight = false;                // --dxr-pt QC: render with the eye-torch ON (off by default)
     bool mic_test = false;                  // ADR-074: capture mic + VAD + whisper, print transcripts (verify voice input)
     bool chat_test = false;                 // ADR-074: TTS->whisper->Director reply (verify the conversation glue, no mic)
     bool shoggoth_pa_record = false;       // M24: PA voice spoken into the soundscape -> heard as words
@@ -252,6 +253,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--say") == 0) { if (!str(o.say_text)) return false; }
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
+        else if (std::strcmp(a, "--flashlight") == 0) o.flashlight = true;
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
         else if (std::strcmp(a, "--version") == 0) o.version = true;
         else if (std::strcmp(a, "--frames") == 0) { if (!u32(o.frames)) return false; }
@@ -1454,7 +1456,8 @@ int run_game(const Options& o) {
     };
     long rawDX = 0, rawDY = 0;   // relative mouse delta accumulated this frame (from WM_INPUT)
     bool cursorHidden = false, firstPlayLook = true;
-    bool prevF11 = false, prevPadStart = false, prevF2 = false;
+    bool prevF11 = false, prevPadStart = false, prevF2 = false, prevF = false;
+    bool flashOn = false, dxrFlashApplied = false;   // F: ray-traced eye-torch flashlight (RT only, off by default)
 
     // M19: lazy DXR renderer for the ray-tracing toggle. Rendered at a reduced internal
     // resolution (perf) + upscaled to the window by present_overlay_windowed. Scene rebuilt
@@ -1600,6 +1603,9 @@ int run_game(const Options& o) {
         const bool f2 = focused && (GetAsyncKeyState(VK_F2) & 0x8000) != 0;  // M19: toggle ray tracing
         if (f2 && !prevF2) model.settings.rt ^= 1;
         prevF2 = f2;
+        const bool fkey = focused && (GetAsyncKeyState('F') & 0x8000) != 0;  // F: toggle the RT flashlight (eye-torch)
+        if (fkey && !prevF) flashOn = !flashOn;
+        prevF = fkey;
 
         // Gamepad (M16): Start pauses from play / activates in a menu (movement below).
         const app::GamepadState pad = poll_gamepad();
@@ -1876,7 +1882,10 @@ int run_game(const Options& o) {
                     // frame instead of 4-spp-from-scratch every frame (the noise+cost root cause). Motion keeps 4 spp
                     // (masked by movement) + denoise. The creature ghosts slightly while you stand still and it
                     // writhes (GLM 1a) -- acceptable for v1; SVGF temporal reproject is the follow-up if it bothers.
-                    const bool ptReset = !dxrHaveCam || sceneRebuilt || pt_view_moved(cam, dxrPrevCam);
+                    dxr->set_flashlight(flashOn);                       // F-toggled eye-torch (RT only)
+                    const bool flashChanged = (flashOn != dxrFlashApplied);   // lighting changed -> must re-converge
+                    dxrFlashApplied = flashOn;
+                    const bool ptReset = !dxrHaveCam || sceneRebuilt || flashChanged || pt_view_moved(cam, dxrPrevCam);
                     dxr->render_pt_frame(cam, ptReset ? 4u : 1u, static_cast<uint32_t>(texSeed) + static_cast<uint32_t>(frames),
                                          ptReset, true, static_cast<uint32_t>(frames));
                     dxrPrevCam = cam; dxrHaveCam = true;
@@ -4616,6 +4625,7 @@ int run_dxr_pt(const Options& o) {
     br::render_dxr::DxrRenderer r;
     if (!r.init(o.width, o.height)) { std::fprintf(stderr, "dxr init: %s\n", r.last_error().c_str()); return 1; }
     if (!r.build_scene(sm.resident())) { std::fprintf(stderr, "dxr scene: %s\n", r.last_error().c_str()); return 1; }
+    if (o.flashlight) r.set_flashlight(true);   // QC: render the eye-torch (off by default -> the goldens are unaffected)
     if (!r.render_pt(cam, o.spp, static_cast<uint32_t>(o.seed))) { std::fprintf(stderr, "dxr pt: %s\n", r.last_error().c_str()); return 1; }
     std::vector<uint8_t> rgba;
     if (!r.readback(rgba)) { std::fprintf(stderr, "dxr readback: %s\n", r.last_error().c_str()); return 1; }

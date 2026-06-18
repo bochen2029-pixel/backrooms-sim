@@ -81,6 +81,12 @@ public:
     bool render_pt_frame(const contracts::CameraPose& camera, uint32_t samples,
                          uint32_t seed, bool reset, bool denoise = false, uint32_t frame = 0);
 
+    // Interactive flashlight (default OFF): a torch co-located with the eye, aimed along the camera
+    // forward, that brightens primary hits inside a soft cone — no 3D model, no shadow rays (a primary
+    // hit is eye-visible by construction). OFF (the default, and the only state the offline/golden path
+    // ever uses) keeps the PT output bit-identical: the shader's flashlight branch is skipped.
+    void set_flashlight(bool on);
+
     // Samples accumulated into the current (un-reset) image — 0 right after a reset.
     uint32_t accum_samples() const;
 

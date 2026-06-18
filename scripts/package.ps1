@@ -90,7 +90,7 @@ BACKROOMS SIM (portable, self-contained)
 ========================================
 Double-click Backrooms.exe to play. Everything it needs is in this folder -- no install, no setup.
 
-Controls:  WASD / arrows move | Mouse look | Space jump | Shift run | Esc pause | F11 fullscreen | F2 ray tracing
+Controls:  WASD / arrows move | Mouse look | Space jump | Shift run | Esc pause | F11 fullscreen | F2 ray tracing | F flashlight (RT)
 Talk to it:  with DIRECTOR on, the facility intelligence SEES your view and narrates it -- and you can SPEAK
              into your mic and it answers, aloud + subtitled. Try Settings -> TEST MICROPHONE first.
 

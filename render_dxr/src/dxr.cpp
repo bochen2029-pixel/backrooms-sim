@@ -203,6 +203,7 @@ struct DxrRenderer::Impl {
     ComPtr<ID3D12StateObject> ptPso;
     ComPtr<ID3D12Resource> ptSbt;          // raygen-only table
     uint32_t accumSamples = 0;             // spp accumulated since the last reset
+    float flashIntensity = 0.0f;           // interactive flashlight (0 = off -> goldens bit-identical)
 
     uint32_t width = 0, height = 0;
 
@@ -548,6 +549,10 @@ void Miss(inout Payload p) { p.color = float3(0.02, 0.02, 0.06); }
 // Tonemap exposure for the PT resolve (tuned so the lit scene sits mid-band).
 constexpr float kPtExposure = 1.4f;
 
+// Interactive flashlight intensity when ON (radiance scale of the eye torch; 0 = off). Tuned to clearly
+// lift dark areas inside the cone without blowing out a normally-lit corridor. Off by default (goldens).
+constexpr float kFlashIntensity = 6.0f;
+
 // M9 phase 3 path tracer — inline RayQuery (SM 6.5). Emissive fluorescent ceiling
 // grid as area lights (NEE + shadow rays for direct), one cosine-weighted diffuse
 // GI bounce, seeded per-(pixel,sample) RNG, accumulated across dispatches.
@@ -560,7 +565,7 @@ cbuffer PT : register(b0) {
     float3 uUp;    float uFar;
     uint uSampleStart; uint uSampleCount; uint uTotal; uint uSeed;
     uint uResolve; float uExposure; float uWidth; float uHeight;  // uResolve: 0 accum, 1 accum+tonemap, 2 accum+guide, 3 denoise
-    uint uFrame; uint uPad0; uint uPad1; uint uPad2;              // uFrame: per-frame decorrelation index (interactive only)
+    uint uFrame; float uFlashI; uint uPad1; uint uPad2;          // uFrame: decorrelation index; uFlashI: flashlight intensity (0=off)
 };
 RWTexture2D<float4> g_out   : register(u0);
 RWTexture2D<float>  g_depth : register(u1);
@@ -616,6 +621,25 @@ float3 direct_light(float3 P, float3 N){
         sum += ndl / (1.0 + 0.35 * dist2);
     }
     return sum * kLightColor * kLightPower;
+}
+
+// Interactive eye-torch (uFlashI > 0): a soft cone of light from the camera (uPos) along uFwd. Only ever
+// called for PRIMARY hits, which are visible from the eye by construction -> no shadow ray needed. The
+// call site is [branch]-guarded on uFlashI, so when off (every golden) this is never reached.
+static const float3 kFlashColor  = float3(1.0, 0.98, 0.92);  // crisp near-white torch (vs the warm ceiling)
+static const float  kFlashCosIn  = 0.94;   // ~20 deg: full-bright inner cone
+static const float  kFlashCosOut = 0.84;   // ~33 deg: soft outer edge
+static const float  kFlashFall   = 0.035;  // distance falloff (gentle, for corridor reach)
+float3 flashlight(float3 P, float3 N){
+    float3 toL = uPos - P;
+    float dist2 = dot(toL, toL);
+    float dist = sqrt(max(dist2, 1e-8));
+    float3 wl = toL / dist;
+    float ndl = max(dot(N, wl), 0.0);
+    float cs = dot(-wl, uFwd);                          // cosine of the angle off the torch axis
+    float cone = smoothstep(kFlashCosOut, kFlashCosIn, cs);
+    float atten = 1.0 / (1.0 + kFlashFall * dist2);
+    return (uFlashI * cone * ndl * atten) * kFlashColor;
 }
 
 float3 cosine_dir(float3 N, float u1, float u2){
@@ -710,6 +734,7 @@ void RayGen(){
         } else {
             baseAlb = albedo_of(h.mat);
             deterministic = baseAlb * (direct_light(h.P, h.N) + kAmbient);
+            [branch] if (uFlashI > 0.0) deterministic += baseAlb * flashlight(h.P, h.N);  // eye-torch (off -> skipped; goldens bit-identical)
             diffuse = true;
         }
     }
@@ -1219,6 +1244,7 @@ bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t sam
         c[20] = resolve ? (denoise ? 2u : 1u) : 0u; setf(c, 21, kPtExposure);
         setf(c, 22, static_cast<float>(d.width)); setf(c, 23, static_cast<float>(d.height));
         c[24] = frame;  // uFrame: per-frame noise decorrelation (0 for the deterministic offline/golden path)
+        setf(c, 25, d.flashIntensity);  // uFlashI: interactive flashlight (0 = off -> shader branch skipped, goldens bit-identical)
 
         if (FAILED(d.alloc->Reset())) { last_error_ = "pt alloc reset"; return false; }
         if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "pt list reset"; return false; }
@@ -1267,6 +1293,8 @@ bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t sam
 bool DxrRenderer::render_pt(const contracts::CameraPose& cam, uint32_t samples, uint32_t seed) {
     return render_pt_frame(cam, samples, seed, true);
 }
+
+void DxrRenderer::set_flashlight(bool on) { if (impl_) impl_->flashIntensity = on ? kFlashIntensity : 0.0f; }
 
 uint32_t DxrRenderer::accum_samples() const { return impl_ ? impl_->accumSamples : 0; }
 
