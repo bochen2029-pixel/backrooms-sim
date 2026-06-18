@@ -85,6 +85,18 @@ zero debug. Regression-proof: flares default none → `uFlareN=0` → branches s
 bit-identical**. Verified: ctest 109/109, live `--game --rt` smoke debug-clean, A/B green cast+glow. RT-only (raster
 = follow-up). All launch exes re-staged.
 
+**D3D12 Agility SDK bundled — itch.io / clean-machine RT (E17, `0d6c968`, ADR-081).** Operator wants a single zip to
+USB-test on a NEW machine then upload to itch.io. The new machine is exactly where the **ADR-077 blocker** bites:
+the RT-crash fix needs the D3D12 validation layer, absent on a clean Win11 (it ships only with the Graphics Tools
+feature) → RT would crash. Closed it: vendored the **Agility SDK redist** (1.619.3: `D3D12Core.dll` +
+`d3d12SDKLayers.dll`) into `dist\Backrooms\D3D12\`; the RELEASE exe exports `D3D12SDKVersion=619` +
+`D3D12SDKPath=".\D3D12\"` (`#ifdef BR_RELEASE`) so the **bundled** validation layer loads. **Release-gated → debug
+gates untouched.** Proven: the bundle exe LOADS `dist\Backrooms\D3D12\D3D12Core.dll` (module check, not System32),
+RT smoke rt_frames 1682 debug-clean. The clean-machine end-to-end proof is the operator's USB test. **The
+single-file portable zip is `dist\Backrooms-portable.zip`** (~10.9 GB store-mode). Note: stop KEEL
+(`keel-down.ps1`) before zipping or the bundle's own running llama/keel lock their files. itch.io: prefer `butler
+push dist\Backrooms` (the FOLDER) over the zip for >2 GB + cheap patches; confirm the Qwen GGUF HF license tag first.
+
 **Open questions.** None blocking. Whether to call the immersive arc "done" or continue to live hearing (Phase F) is
 an operator preference. The creature-POV image is real geometry (identical camera+`render_chunks`+`readback`+encode as
 the proven record path); a dedicated in-game POV PNG dump was deliberately NOT added (scope; the wiring is proven).
