@@ -1472,6 +1472,8 @@ int run_game(const Options& o) {
     const auto brain_interval = milliseconds(3000);
     auto last_brain = t_start - brain_interval;
     uint64_t brain_intents = 0;
+    std::string lastShogUtter;                       // Phase E: the creature's last spoken murmur (de-dupe)
+    auto lastShogSpoke = t_start - milliseconds(10000);  // + a cooldown so it murmurs, never chatters
     LlmProbe llmProbe;   // Settings "Test Connection" -> async LLM ping (status shown in the Settings overlay)
     MicProbe micProbe;   // Settings "Test Microphone" -> async mic->whisper->Director->caption + spoken reply
 
@@ -1652,6 +1654,17 @@ int run_game(const Options& o) {
                     last_brain = now;
                 }
                 for (const app::ShoggothIntent& it : brain->poll()) { shog.intent = it; ++brain_intents; }
+                // Phase E: the creature SPEAKS its murmur when the wanderer is NEAR (<6 m), it has
+                // something NEW to say, and a cooldown has passed -- impressionistic dread, not chatter.
+                // Presentation-only (no sim state, not hashed/logged) -> determinism untouched.
+                if (audioOn && !shog.intent.utterance.empty() && shog.intent.utterance != lastShogUtter) {
+                    const float vdx = s.wanderer.pos.x - shog.pos.x, vdz = s.wanderer.pos.z - shog.pos.z;
+                    if (vdx * vdx + vdz * vdz < 36.0f && now - lastShogSpoke > milliseconds(7000)) {
+                        speak_pa(shog.intent.utterance, contracts::kAudioSampleRate);
+                        lastShogUtter = shog.intent.utterance;
+                        lastShogSpoke = now;
+                    }
+                }
             }
             // Director (M11) TEXT narration -- RASTER fallback only. The RT path uses the VLM-vision narrator
             // (below); when RT is off there is no frame readback to send, so raster keeps the text-stats Director.

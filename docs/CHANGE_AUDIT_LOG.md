@@ -174,3 +174,15 @@ job is audit + fast, unambiguous rollback.
 - **Verified (KEEL self-contained :7071):** `audit.ps1` ctest 109/109 + text record==replay (`476a9c07`);
   VISION record==replay `valid_intents=3` (`a91b512d`) — the semantic schema drives `resolve_target`
   deterministically.
+
+## E10 — 2026-06-18 — Shoggoth Phase E LIVE: the creature SPEAKS in the playable game [SHOGGOTH_PLAN]
+- **What:** `render_shoggoth_prompt` (the live text brain) now asks for an `utterance`; `run_game` speaks
+  it (`speak_pa`) when the wanderer is NEAR (<6 m), it's a NEW line, and a 7 s cooldown has passed
+  (audioOn-gated). The creature murmurs impressionistic dread as it hunts — the highest-affect sense, live.
+- **Why:** SHOGGOTH_PLAN Phase E — the voice.
+- **Determinism-safe:** `utterance` is never hashed/serialized; the voice is live-only (`run_game`), so the
+  record/replay gates are untouched.
+- **Files:** `app/src/shoggoth_brain.h`, `app/src/main.cpp`. **Rollback:** `git revert <commit>`.
+- **Verified (KEEL self-contained):** `audit.ps1` ctest 109/109 + determinism record==replay (`9a6ab59`);
+  live `--game` smoke `brain_intents=3`, debug-clean, exit 0 (the brain runs with the utterance prompt;
+  the voice path active — fires in-game when the creature closes in).

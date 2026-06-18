@@ -42,14 +42,16 @@ inline ShoggothSummary build_shoggoth_summary(const Shoggoth& sh, const br::core
 
 inline std::string render_shoggoth_prompt(const ShoggothSummary& s) {
     static const char* kStates[4] = {"lurking", "hunting", "chasing", "retreating"};
-    char buf[1100];
+    char buf[1500];
     std::snprintf(buf, sizeof(buf),
-        "You are a SHOGGOTH - a vast, amorphous, intelligent horror loose in the infinite "
-        "Backrooms, hunting a lone wanderer. You are patient, cruel, and curious. Given your "
-        "situation, choose ONE behaviour and emit EXACTLY ONE compact JSON object and nothing else:\n"
-        "{\"action\":\"hunt|stalk|lurk|flank|flee\",\"aggression\":<0.0-1.0>}\n"
-        "  hunt = close in directly;  stalk = creep closer slowly;  lurk = wait / withdraw;\n"
-        "  flank = circle around to cut it off;  flee = retreat (rare). Output ONLY the JSON.\n\n"
+        "You are a SHOGGOTH - a vast, amorphous, dim, patient horror loose in the infinite Backrooms, "
+        "hunting a lone wanderer. You are patient, cruel, and curious. Given your situation, emit EXACTLY "
+        "ONE compact JSON object and nothing else:\n"
+        "{\"action\":\"hunt|stalk|lurk|flank|flee\",\"aggression\":<0.0-1.0>,\"utterance\":\"\"}\n"
+        "  hunt=close in; stalk=creep closer; lurk=wait/withdraw; flank=circle to cut it off; flee=retreat (rare).\n"
+        "  utterance = at most a dozen words you MURMUR when the wanderer is near - impressionistic, sensory, "
+        "NEVER naming objects (e.g. \"something warm... it stops\"), or \"\" for silence.\n"
+        "Output ONLY the JSON.\n\n"
         "Situation: you are %s, %.0f m from the wanderer. You are at cell (%lld,%lld); it is at "
         "(%lld,%lld). Tick %llu.",
         kStates[(s.state >= 0 && s.state < 4) ? s.state : 0], static_cast<double>(s.distance_m),
