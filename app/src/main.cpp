@@ -61,6 +61,7 @@
 #include "shoggoth_brain.h"
 #include "shoggoth_brain_host.h"
 #include "shoggoth_vision.h"
+#include "shoggoth_vision_host.h"
 #include "director_vision.h"
 #include "mic_capture.h"
 #include "director_chat.h"
@@ -1492,6 +1493,20 @@ int run_game(const Options& o) {
     std::unique_ptr<app::DirectorVisionHost> visionDir;
     const auto vision_interval = milliseconds(28000);                  // sparse ~28 s cadence (hides VLM latency)
     auto last_vision = t_start - vision_interval + milliseconds(8000);   // first POV ~8 s in
+    // Phase D LIVE: the creature reasons from a RENDERED POV, not just its text sense. A 2nd headless device
+    // renders the Shoggoth's vantage offscreen (shoggoth_vision.h camera) and an off-thread qwen-VL host
+    // (shoggoth_vision_host.h) turns it into a validated intent whose target_kind drives resolve_target -- so
+    // its MOTION follows what it SEES. The chunk upload is budget-spread across a short warm window (never a
+    // big-budget stall on the frame thread). Gated on the live brain + a vision-capable KEEL; graceful no-op
+    // otherwise (the text brain keeps driving). Presentation only (INV-1 untouched), like the live text brain.
+    std::unique_ptr<app::ShoggothVisionHost> shogVision;
+    std::unique_ptr<Renderer> shogPov;                                   // 2nd headless device for the creature's vantage
+    const auto svision_interval = milliseconds(25000);                   // sparse; offset from the Director's ~28 s vision
+    auto last_svision = t_start - svision_interval + milliseconds(6000);  // first creature POV ~6 s in
+    bool svWarming = false; int svWarmFrames = 0;                         // warm-window state: spread the upload, then snapshot
+    constexpr int kSvWarmFrames = 24;                                    // frames to spread the chunk upload over (no hitch)
+    constexpr uint32_t kSvBudget = 16u;                                  // chunk meshes uploaded per warm frame
+    uint64_t svision_intents = 0;                                        // vision intents applied to the live creature
     // ADR-074: two-way voice. A live mic + VAD (mic_capture.h) feeds an off-thread whisper+VLM
     // conversation host (director_chat.h); the reply is spoken back through the PA voice. Created
     // lazily with Director on; graceful no-op if there's no mic / the VLM is down. Echo-gated via
@@ -1653,7 +1668,15 @@ int run_game(const Options& o) {
                     brain->submit(app::build_shoggoth_summary(shog, s.wanderer.pos, s.tick));
                     last_brain = now;
                 }
-                for (const app::ShoggothIntent& it : brain->poll()) { shog.intent = it; ++brain_intents; }
+                for (app::ShoggothIntent it : brain->poll()) {
+                    // Vision owns the SEEN target: the perception fields drive resolve_target, so the
+                    // text brain (which cannot see) only updates action/aggression/voice -- its 3 s
+                    // cadence can't clobber what the creature saw between the sparse ~25 s vision frames.
+                    // Behaviour-neutral when vision is off (these stay None/defaults, as before).
+                    it.target_kind = shog.intent.target_kind; it.sector = shog.intent.sector;
+                    it.proximity = shog.intent.proximity; it.snap = shog.intent.snap;
+                    shog.intent = it; ++brain_intents;
+                }
                 // Phase E: the creature SPEAKS its murmur when the wanderer is NEAR (<6 m), it has
                 // something NEW to say, and a cooldown has passed -- impressionistic dread, not chatter.
                 // Presentation-only (no sim state, not hashed/logged) -> determinism untouched.
@@ -1665,6 +1688,40 @@ int run_game(const Options& o) {
                         lastShogSpoke = now;
                     }
                 }
+            }
+            // Phase D LIVE: the creature reasons from a RENDERED POV. Render its vantage offscreen on a 2nd
+            // headless device, then every ~25 s hand the snapshot to the off-thread qwen-VL host. The chunk
+            // upload is budget-spread across a short warm window (kSvWarmFrames frames at kSvBudget meshes each)
+            // so the frame thread never eats a big-budget stall. The returned intent (with target_kind) is
+            // applied to shog.intent -> resolve_target -> its MOTION follows what it SEES. Gated on the live
+            // brain + a vision-capable KEEL; graceful no-op otherwise (the text brain keeps driving). Presentation
+            // only -- the intent enters via shog.intent exactly like the live text brain (INV-1 untouched).
+            if (brain && g_visionAvailable.load()) {
+                if (!shogVision) {
+                    std::string vh; int vp; parse_host_port(o.director_url, vh, vp);
+                    shogVision = std::make_unique<app::ShoggothVisionHost>(vh, vp);
+                    shogPov = std::make_unique<Renderer>();
+                    if (!shogPov->init_headless(384u, 216u)) shogPov.reset();   // no 2nd device -> graceful no-op
+                    else shogPov->set_texture_seed(texSeed);
+                }
+                if (shogPov) {
+                    const contracts::CameraPose svCam = app::shoggoth_pov_camera(shog, 384.0f / 216.0f);
+                    if (!svWarming && now - last_svision >= svision_interval) { svWarming = true; svWarmFrames = kSvWarmFrames; }
+                    if (svWarming) {
+                        uint32_t drawn = 0;
+                        if (!shogPov->render_chunks(svCam, sm->resident(), kSvBudget, s.tick, &drawn)) {
+                            shogPov.reset(); svWarming = false;   // device lost -> stop (graceful; text brain drives on)
+                        } else if (--svWarmFrames <= 0) {
+                            svWarming = false; last_svision = now;
+                            FrameImage img;
+                            if (shogPov->readback(img)) {
+                                const std::string b64 = encode_pov_b64(img.rgba, img.width, img.height);   // 384x216 -> PNG -> base64
+                                if (!b64.empty()) shogVision->submit(b64, app::build_shoggoth_summary(shog, s.wanderer.pos, s.tick));
+                            }
+                        }
+                    }
+                }
+                for (const app::ShoggothIntent& it : shogVision->poll()) { shog.intent = it; ++svision_intents; }
             }
             // Director (M11) TEXT narration -- RASTER fallback only. The RT path uses the VLM-vision narrator
             // (below); when RT is off there is no frame readback to send, so raster keeps the text-stats Director.
@@ -1875,6 +1932,10 @@ int run_game(const Options& o) {
     const unsigned long long vis_req = visionDir ? visionDir->requests() : 0ull;
     const unsigned long long vis_prod = visionDir ? visionDir->produced() : 0ull;
     visionDir.reset();  // join the vision narrator worker thread before exit
+    const unsigned long long svis_req = shogVision ? shogVision->requests() : 0ull;   // Phase D LIVE: the creature's eyes
+    const unsigned long long svis_prod = shogVision ? shogVision->produced() : 0ull;
+    shogVision.reset();  // join the creature-vision worker thread before exit
+    shogPov.reset();     // release the 2nd headless device (creature POV)
     const unsigned long long chat_req = chat ? chat->requests() : 0ull;
     const unsigned long long chat_prod = chat ? chat->produced() : 0ull;
     mic.reset();   // stop mic capture
@@ -1887,6 +1948,9 @@ int run_game(const Options& o) {
     std::printf("director_produced: %llu\n", static_cast<unsigned long long>(dir_prod));
     std::printf("vision_requests: %llu\n", vis_req);
     std::printf("vision_produced: %llu\n", vis_prod);
+    std::printf("svision_requests: %llu\n", svis_req);    // Phase D LIVE: creature-POV vision calls attempted
+    std::printf("svision_produced: %llu\n", svis_prod);   // valid intents the qwen-VL eye yielded
+    std::printf("svision_intents: %llu\n", static_cast<unsigned long long>(svision_intents));  // applied to the live creature
     std::printf("chat_requests: %llu\n", chat_req);
     std::printf("chat_produced: %llu\n", chat_prod);
     std::printf("rt_frames: %llu\n", static_cast<unsigned long long>(rtFrames));   // ADR-077: live RT presents (0 => RT crashed or silently fell back to raster)

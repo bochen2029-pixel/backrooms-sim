@@ -186,3 +186,37 @@ job is audit + fast, unambiguous rollback.
 - **Verified (KEEL self-contained):** `audit.ps1` ctest 109/109 + determinism record==replay (`9a6ab59`);
   live `--game` smoke `brain_intents=3`, debug-clean, exit 0 (the brain runs with the utterance prompt;
   the voice path active — fires in-game when the creature closes in).
+
+## E11 — 2026-06-18 — Shoggoth Phase D LIVE: live in-game PIXEL-vision render [SHOGGOTH_PLAN]
+- **What:** the creature now reasons from a RENDERED POV live in `run_game` (it previously reasoned from its
+  text sense only there; the rendered-POV path was proven only headless in `--shoggoth-vision-record`). New
+  `app/src/shoggoth_vision_host.h` (`ShoggothVisionHost`) — an off-thread qwen-VL eye, a faithful merge of
+  `DirectorVisionHost` (image→VLM) + `ShoggothBrainHost` (returns a validated `ShoggothIntent`): latest-wins
+  `submit`, non-blocking `poll`, graceful no-op when KEEL is down. In `run_game`: a 2nd headless `Renderer`
+  (384×216) renders the Shoggoth's vantage (`shoggoth_pov_camera`); every ~25 s the snapshot is encoded
+  (`encode_pov_b64`) + submitted; the returned intent (with `target_kind`) is applied to `shog.intent` →
+  `resolve_target` → its MOTION follows what it SEES. **Upload-stall solution:** the chunk upload is
+  budget-spread across a 24-frame warm window at 16 meshes/frame (`render_chunks`'s existing `upload_budget`),
+  so the frame thread never eats the headless path's ~400-iteration / 256-budget stall. The text-brain apply
+  now PRESERVES the four perception fields `resolve_target` reads (`target_kind/sector/proximity/snap`) so the
+  3 s text brain (which cannot see) can't clobber the seen target between the sparse ~25 s vision frames —
+  behaviour-neutral when vision is off (they stay None/default, sacred path unchanged). New counters
+  `svision_requests/produced/intents`.
+- **Why:** `SHOGGOTH_PLAN.md` Phase D LIVE / REHYDRATE "the single next action" — the last immersive piece: the
+  creature SEES live in the playable game (not just at record time).
+- **Determinism-safe:** entirely in `run_game` (interactive, non-gated, INV-1 untouched); the intent enters via
+  `shog.intent` exactly like the existing live text brain. No contract/schema change. The record path
+  (`run_shoggoth_record` / `run_shoggoth_vision_record`) is byte-identical → record==replay green by construction.
+- **Files:** `app/src/shoggoth_vision_host.h` (new), `app/src/main.cpp`, `docs/CHANGE_AUDIT_LOG.md`.
+  **Rollback:** `git revert <commit>` (additive + gated — new header + a gated block in `run_game`).
+- **Verified (KEEL self-contained, 9B+vision tier up):** `audit.ps1` POST — build ok | ctest **109/109** |
+  determinism **record==replay** (`20bc9469…`) | inventory ok | isolation ok. Live windowed `--game --auto-play
+  --seconds 35` smoke (config had RT+Director on, so all three multimodal consumers ran at once):
+  **svision_requests=2 / svision_produced=2 / svision_intents=2** (the creature saw live + its intents drove
+  it), **debug_error_count=0** across THREE concurrent D3D12 devices (windowed raster + DXR + the creature-POV
+  headless), **frames=3763 in 35 s (~107 fps — no stall)**, `lookcheck: PASS`, clean exit. The budget-spread
+  warm window solved the upload-stall concern; ADR-077 (forced validation) made the 3rd device viable.
+- **DEFERRED (unchanged):** Phase C.2 — route all live hosts (brain / director-vision / chat / **this**) through
+  the threaded `KeelBroker` wrapping `keel_scheduler.h` so the single multimodal slot is arbitrated rather than
+  best-effort-queued (today they share KEEL on offset sparse cadences). Phase F (cheap-tier hearing), G (Escape
+  polish). Public-release Agility SDK.
