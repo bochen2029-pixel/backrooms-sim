@@ -14,7 +14,7 @@
 
 **VERIFY reality (disk wins over this doc):**
 ```
-git -C C:\backrooms log --oneline -12          # HEAD should be 1ac1fcf (or later)
+git -C C:\backrooms log --oneline -12          # HEAD should be 577eef1 (or later); tag phaseD-live
 git -C C:\backrooms status --short             # clean except ?? _brainstorm/ (+ now _run_state files)
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\backrooms\scripts\audit.ps1   # expect: ctest 109/109, record==replay, inventory+isolation green
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\backrooms\scripts\keel-up.ps1 # self-contained sidecar :8080+:7071 BEFORE any LLM-gated work
@@ -23,31 +23,37 @@ Raw-transcript backstop (grep, don't re-read whole): `C:\Users\user\.claude\proj
 
 ## 1. CORE — where we are + the single next action
 **Project:** C:\backrooms — native Win32 C++20 D3D12+DXR Backrooms sim; local-LLM AI "Shoggoth" creature.
-**State:** all green @ HEAD `1ac1fcf`, pushed. ctest **109/109**, determinism record==replay, no D3D12 errors,
-inventory+isolation clean. **No DOS windows** (release exe = /SUBSYSTEM:WINDOWS). **KEEL fully self-contained**
-(runs from `dist\Backrooms` via `scripts\keel-up.ps1`; nothing outside C:\backrooms is ever needed).
-**The Shoggoth is immersive + LIVE in-game:** it THINKS (live LLM brain ~3 s), SPEAKS (impressionistic
-murmurs via `speak_pa` when <6 m, Phase E), HUNTS, and its VISION drives motion (`resolve_target`,
-determinism-proven in record/replay).
+**State:** all green @ HEAD `577eef1` (tag `phaseD-live`), pushed. ctest **109/109**, determinism record==replay,
+no D3D12 errors, inventory+isolation clean. **No DOS windows** (release exe = /SUBSYSTEM:WINDOWS). **KEEL fully
+self-contained** (runs from `dist\Backrooms` via `scripts\keel-up.ps1`; nothing outside C:\backrooms is ever needed).
+**The Shoggoth's immersive arc is COMPLETE + LIVE in-game:** it THINKS (live LLM brain ~3 s), **SEES (live rendered
+POV, Phase D LIVE — DONE this session)**, SPEAKS (impressionistic murmurs via `speak_pa` when <6 m, Phase E), HUNTS,
+and its VISION drives its MOTION (`target_kind` → `resolve_target`), live in the playable game — not just at record time.
 
-**THE SINGLE NEXT ACTION → live in-game PIXEL-vision render.** Make the creature reason from a *rendered*
-POV live (vs its current live text-sense). It needs: a **2nd headless D3D12 device** in `run_game` (note
-`render_chunks`/`readback` are headless-only — see `render_d3d12/include/.../renderer.h`), feeding a new
-`ShoggothVisionHost` (mirror `app/src/director_vision.h`; the prompt+parse already exist:
-`render_shoggoth_vision_prompt` in `shoggoth_vision.h` + `parse_shoggoth_intent` in `shoggoth_brain.h`).
-**The hard part = chunk-upload management:** the headless record path uploads in a ~400-iteration loop
-(fine offscreen, a STALL in the live game). Do it with **incremental/budget-spread uploads + a frame-time
-check** — do NOT bolt on a hitchy render. ADR-077 (validation layer forced on) makes the 2nd device viable
-(the RT path already runs dual-device). Verify with a windowed `--game` smoke (no crash + the host produces
-intents) + `audit.ps1`. It's additive/revertable.
+**Phase D LIVE shipped (the prior "single next action" — DONE).** `app/src/shoggoth_vision_host.h` (`ShoggothVisionHost`,
+off-thread qwen-VL eye → validated intent) + a **2nd headless `Renderer` (384×216)** in `run_game` rendering
+`shoggoth_pov_camera`; the upload-stall solved by a **budget-spread warm window** (24 frames × 16 meshes via
+`render_chunks`'s `upload_budget` — no hitch). Text-brain apply preserves the 4 perception fields `resolve_target` reads
+so the 3 s text brain can't clobber the seen target. Verified: `audit.ps1` green + live `--game` smoke svision **2/2/2**,
+**debug_error_count=0 across 3 concurrent D3D12 devices**, 3763 frames/35 s (~107 fps, no stall), lookcheck PASS. Ledger E11.
+
+**THE SINGLE NEXT ACTION → Phase C.2 (KeelBroker arbitration).** Now that FOUR multimodal/LLM consumers share the one
+KEEL backend (creature-brain, creature-vision, director-vision, chat) on best-effort offset cadences (the smoke proved
+they coexist debug-clean but UNarbitrated), wire them through a **threaded `KeelBroker`** (mutex+condvar) wrapping the
+already-built, already-tested `app/src/keel_scheduler.h` (Phase C-core: priority · single multimodal slot · latest-wins ·
+concurrency cap · FIFO; 6 property tests). Route `ShoggothBrainHost` / `ShoggothVisionHost` / `DirectorVisionHost` /
+`DirectorChatHost` through it; add a concurrency soak gate (frame p99 < 2× median; vision never starves a player-speech
+turn). Needs KEEL :7071 up. (Alternatively the operator may pick **Phase F** live hearing, **Phase G** Escape polish, or
+call the immersive arc done.)
 
 ## 2. RING 1 — DON'T ASSUME (avoid these wrong moves)
 1. **KEEL is self-contained.** `scripts\keel-up.ps1` runs llama :8080 + keel :7071 from `dist\Backrooms`.
    NEVER reference `C:\llama.cpp` / `C:\keel-sidecar-7071` / `C:\models` / `C:\whisper.cpp` — closed (ADR-078).
 2. **M30 `game mouse-look` gate red is tool-session cold-start** (1 frame @2s, 473 @9s; `lookcheck: PASS`),
    NOT a regression — passes on the operator's foreground GPU. Do NOT "fix" it or widen the gate window.
-3. **Live pixel-vision is NOT in-game yet** (that's the next action). Vision *drives motion* via
-   `resolve_target` (proven record/replay); the creature reasons from its text-sense live. Don't claim it sees pixels live.
+3. **Live pixel-vision IS now in-game** (Phase D LIVE, tag `phaseD-live`, `577eef1`). A 2nd headless device renders the
+   creature POV in `run_game` → `ShoggothVisionHost` → intent → `resolve_target`. Verified svision 2/2/2, 3 devices
+   debug-clean, no stall. The text brain still drives between the sparse ~25 s vision frames (it preserves the seen target).
 4. **Determinism is sacred:** record==replay is THE proof; `ShoggothEvent` = `SHOGLOG2`, padding-free
    (`static_assert(sizeof==40)`); `resolve_target` gated by `target_kind != None` (default None → byte-unchanged →
    M21/M29 gates intact); `utterance` is voice-only (never hashed/serialized). `shoggoth_prey()` is the shared
@@ -77,7 +83,8 @@ verify · log EVERY change to `CHANGE_AUDIT_LOG.md` · take backups (tags/zip) w
 windows · per-step self-audit. The operator gets frustrated with "going in circles" — be decisive, finish things.
 
 ## 6. Anticipated questions a fresh agent will ask → answers
-- *"Is the live vision render done?"* No — it's THE next action (§1). Vision drives motion (proven); the live render is pending.
+- *"Is the live vision render done?"* YES — Phase D LIVE shipped (`577eef1`, tag `phaseD-live`, ledger E11). The creature
+  SEES live in `run_game` (svision 2/2/2, 3 devices debug-clean, no stall). The next action is now Phase C.2 (§1).
 - *"How do I get KEEL/the LLM up?"* `scripts\keel-up.ps1` (self-contained). `keel-down.ps1` to stop. Never C:\.
 - *"Why is M30 red?"* Tool-session cold-start, not a regression (§2.2). Don't touch it.
 - *"Can I just summarize git to catch up?"* Read §1–§4 + run the §0 verify commands; then act. The CHANGE_AUDIT_LOG E0–E10 has the why.

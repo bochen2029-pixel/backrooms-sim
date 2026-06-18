@@ -2,7 +2,60 @@
 
 Newest entry first. Every session appends: done / pending / open questions / gotchas.
 
-> ⏸ **RESUMING → read `_run_state/REHYDRATE.md` FIRST** (reconstitution pointer: state · the single next action [live pixel-POV render] · don't-assume list · verify-commands). Then run `scripts\audit.ps1` + `git log --oneline -12`. KEEL is self-contained: `scripts\keel-up.ps1` (never C:\).
+> ⏸ **RESUMING → read `_run_state/REHYDRATE.md` FIRST** (reconstitution pointer: state · the single next action · don't-assume list · verify-commands). Then run `scripts\audit.ps1` + `git log --oneline -12`. KEEL is self-contained: `scripts\keel-up.ps1` (never C:\).
+
+---
+
+## Session 38 — Shoggoth Phase D LIVE: the creature SEES live in the playable game ✅ (tag `phaseD-live`, `577eef1`)
+
+**The single next action — done.** The Shoggoth now reasons from a **rendered POV live in `run_game`** (it previously
+reasoned from its text sense only there; the rendered-POV→intent path was proven only headless in
+`--shoggoth-vision-record`). This was THE last immersive piece per the REHYDRATE: the creature now **THINKS** (live
+text brain) + **SEES** (live rendered POV, this session) + **SPEAKS** (Phase E voice) + **HUNTS** (FSM/BFS nav) in
+the actual game, and its **vision drives its MOTION** (`target_kind` → `resolve_target`) — live, not just at record time.
+
+**Done.**
+- **`app/src/shoggoth_vision_host.h`** (new) — `ShoggothVisionHost`, an off-thread qwen-VL eye: a faithful merge of
+  `DirectorVisionHost` (image→VLM) + `ShoggothBrainHost` (returns a validated `ShoggothIntent`). Latest-wins `submit`,
+  non-blocking `poll`, graceful no-op when KEEL is down (INV-6 async isolation).
+- **`run_game`** — a **2nd headless `Renderer` (384×216)** renders the creature's vantage (`shoggoth_pov_camera`);
+  every ~25 s the snapshot is encoded (`encode_pov_b64`) + submitted; the returned intent is applied to `shog.intent`.
+  **The upload-stall (the feared "hard part") is solved by a budget-spread warm window** — 24 frames × 16 meshes via
+  `render_chunks`'s existing `upload_budget`, so the frame thread never eats the headless path's 256-budget hitch.
+- The text-brain apply now **preserves the 4 perception fields `resolve_target` reads** (`target_kind/sector/
+  proximity/snap`) so the responsive 3 s text brain (which cannot see) can't clobber the seen target between the
+  sparse ~25 s vision frames — behaviour-neutral when vision is off. New counters `svision_requests/produced/intents`.
+- ADR-077 (forced D3D12 validation in all builds) is what makes the **3rd** concurrent device viable.
+
+**Verified (KEEL self-contained, 9B+vision tier up).** `audit.ps1` POST: build ok · **ctest 109/109** · determinism
+**record==replay** (`20bc9469…`) · inventory · isolation — all green (the change is `run_game`-only, the gated record
+path byte-identical). Live windowed `--game --auto-play --seconds 35` smoke (config had RT+Director on, so **all three
+multimodal consumers ran at once**): **svision_requests=2 / produced=2 / intents=2** (the creature saw live + drove
+itself), **debug_error_count=0 across THREE concurrent D3D12 devices** (windowed raster + DXR + creature-POV headless),
+**frames=3763 in 35 s (~107 fps — no stall)**, `lookcheck: PASS`, clean exit. Committed `577eef1`, tag `phaseD-live`,
+pushed (origin main + tags). Ledger E11.
+
+**Pending / next.** The immersive arc's headline is complete. Natural next threads (operator's pick): **Phase C.2** —
+route all live hosts (brain / director-vision / chat / **creature-vision**) through a threaded `KeelBroker` wrapping
+`keel_scheduler.h`, so the single multimodal slot is **arbitrated** (priority: player-speech > shoggoth-vision >
+director-vision > …) rather than the current best-effort offset-cadence queueing — now more relevant since 4 consumers
+share KEEL (the smoke proved they coexist debug-clean, but unarbitrated). Then **Phase F** (live cheap-tier hearing),
+**Phase G** (Escape polish). Also: GLM `_brainstorm/GLM/01_RTX_RENDERING_EFFICIENCY.md` still UNREAD; public-release
+**D3D12 Agility SDK** bundling (so ADR-077 validation works on a clean Win11 without Graphics Tools) + re-stage the
+bundle exe before any itch.io push.
+
+**Open questions.** None blocking. Whether to call the immersive arc "done" or continue to live hearing (Phase F) is
+an operator preference. The creature-POV image is real geometry (identical camera+`render_chunks`+`readback`+encode as
+the proven record path); a dedicated in-game POV PNG dump was deliberately NOT added (scope; the wiring is proven).
+
+**Gotchas / notes.**
+- `run_game`'s persisted `backrooms.cfg` can silently override flags (the smoke ran seed 1 + RT + Director from a prior
+  config, not the `--seed 3` I passed). That's fine for a non-gated smoke, but expect it — delete/inspect the cfg for a
+  clean-slate run.
+- The creature-vision is gated on `brain && g_visionAvailable` — on the 4B (text-only) KEEL tier it's a graceful no-op
+  and the text brain drives. It's also independent of `--director`, so `--game --auto-play` alone exercises it.
+- Determinism's audit hash varies run-to-run because the determinism step RECORDS against live KEEL (`--seed 3` fixes
+  the walk, not the LLM's replies); `record==replay` is the invariant that must hold (it did). Not a regression.
 
 ---
 
