@@ -50,8 +50,17 @@ reset the temporal accumulator every frame (4-spp-from-scratch). Applied GLM **T
 the rays. Interactive-only (golden `render_pt` untouched) → record==replay green. Known tradeoff: the creature ghosts
 slightly while you stand still (GLM 1a); SVGF (Tier 3) is the follow-up. (2) **Caption runoff** — `build_caption_overlay`
 now word-wraps + stacks (was one centered row that overflowed at 4K). Verified: audit green, caption wraps at 2560×1440,
-live `--game --rt` smoke rt_frames=2008/debug-clean, A/B 4spp-grainy→64spp-smooth. GLM Tiers 2–4 remain (optional). Tiny
-TODO: the bitmap font lacks a 'J' glyph.
+live `--game --rt` smoke rt_frames=2008/debug-clean, A/B 4spp-grainy→64spp-smooth. GLM Tiers 2–4 remain (optional).
+(The font's missing 'J' glyph was then added too — captions fully fixed.)
+
+**RT flashlight (E13, `c1ae63c`).** Operator: "some areas are too dark — give me a flashlight in raytracing, map it
+to F, just a cone of light (no 3D model)." Shipped: an eye-co-located soft spotlight along the camera forward,
+brightening PRIMARY hits inside a cone (no shadow ray — eye-visible by construction), **F**-toggled in `run_game`,
+off by default. Regression-proof: a spare PT cbuffer pad → `uFlashI`, the shade add is `[branch]`-guarded so OFF is
+provably skipped → **`gate.ps1 M9` PASSED, PT goldens bit-identical** (diff 0.000004/0.000677/0.000000); also
+re-greened Tier-1 (169 FPS, no-ghost). Toggling forces an accumulator reset (lighting changed). A/B (`--dxr-pt
+--flashlight`, dark pose): luma 31→68, clean cone, debug-clean. Cone width/softness/intensity =
+`kFlashCosOut`/`kFlashCosIn`/`kFlashIntensity` (trivial retune). All 3 launch exes re-staged.
 
 **Open questions.** None blocking. Whether to call the immersive arc "done" or continue to live hearing (Phase F) is
 an operator preference. The creature-POV image is real geometry (identical camera+`render_chunks`+`readback`+encode as
