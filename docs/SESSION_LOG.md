@@ -42,9 +42,16 @@ shipped** (tag `phaseA`, `501294d`): the Lurk idle is now feature-aware — `res
 (pure, seeded bounded-BFS) loiters toward junctions/open cells instead of the blind `rng%7` hop —
 and Flank no longer degenerates to Hunt at close range. ctest 103/103; shoggoth record==replay
 bit-identical (`29310b6befab8895`, model offline). Backup/rollback anchors: tags `pre-phaseA` +
-`phaseA`, local zip `C:\backrooms_backups\`, append-only ledger `docs/CHANGE_AUDIT_LOG.md`. Next:
-**Phase B** (the `ShoggothIntent` schema bump — the one determinism-risky increment; `SHOGLOG1`→`2`,
-extend `ShoggothEvent`+hash+replay, fold in the M29 vision-record AUDIT fix). (b) **Public-release
+`phaseA`, local zip `C:\backrooms_backups\`, append-only ledger `docs/CHANGE_AUDIT_LOG.md`.
+**Phase B shipped** too (tag `phaseB`, `65248f7`): the `ShoggothIntent`/`ShoggothEvent` schema bump
+(`SHOGLOG1`→`2`; +5 motion fields target_kind/sector/proximity/mood/snap; padding-free event locked
+by `static_assert`; `event_from_intent`/`apply_event_to_intent` helpers; hash folds the 5) —
+**behaviour-neutral**, record==replay bit-identical at level 0 (`409129a0236b3084`) AND level 7
+(`95945b9087214b14`), cold-verifier VERDICT CLEAN. Also adopted a **per-step self-audit**
+(`scripts/audit.ps1` — the Externality-Principle non-LLM oracle suite; run pre/post each step,
+verdict → the ledger). **Next: Phase C** (the LLM request broker / arbitration — "runs well" before
+live vision). Deferred (tracked): a level-7 case in `gate.ps1`'s sacred gate + the M29 *vision*-record
+prey-offset fix (`AUDIT_2026-06-15.md:207`) — both need KEEL :7071 up to fully green. (b) **Public-release
 follow-up (IMPORTANT):**
 `EnableDebugLayer()` needs the D3D12 SDK layers DLL — present on the operator's box (Graphics Tools) but **absent on a
 clean end-user Win11**, so the itch.io bundle must ship the **D3D12 Agility SDK redist** (`D3D12Core.dll` +
