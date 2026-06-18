@@ -614,6 +614,7 @@ static unsigned detect_vram_mb() {
 
 static HANDLE g_llmJob = nullptr;                  // holds the LLM-stack children; KILL_ON_JOB_CLOSE
 static std::atomic<bool> g_visionAvailable{true};  // 9B+mmproj tier -> vision; 4B tier -> text-only Director
+static std::atomic<int> g_modelTier{0};            // Settings override: 0 AUTO (VRAM-picked), 1 force 9B, 2 force 4B (read at sidecar launch)
 
 // Launch a console exe HIDDEN (no window) inside the kill-on-close job; stdio -> a log file. The MS
 // pattern (create-suspended -> assign-to-job -> resume) keeps the child from escaping the job.
@@ -656,7 +657,8 @@ static void try_start_sidecar() {
     const std::wstring logDir   = exe_dir_w() + L"logs\\"; CreateDirectoryW(logDir.c_str(), nullptr);
 
     const unsigned vram = detect_vram_mb();
-    const bool use9b = (vram == 0u) || (vram >= 11000u);   // unknown/big -> 9B; small -> 4B
+    const int tier = g_modelTier.load();   // Settings override: 1 force 9B, 2 force 4B, 0 AUTO (VRAM-picked)
+    const bool use9b = (tier == 1) ? true : ((tier == 2) ? false : ((vram == 0u) || (vram >= 11000u)));
     g_visionAvailable.store(use9b);
     const std::wstring model = use9b ? model9b : model4b;
 
@@ -1410,6 +1412,8 @@ int run_game(const Options& o) {
     model.settings.mouse_pct = cfg.mouse; model.settings.director = (cfg.director || o.director) ? 1 : 0;  // --director forces on
     model.settings.rt = o.rt ? 1 : cfg.renderer;  // M19: --rt forces on; else from config
     model.settings.res_w = cfg.width; model.settings.res_h = cfg.height;  // the in-menu resolution picker
+    model.settings.model_tier = cfg.model_tier;   // AI model tier (0 AUTO / 1 9B / 2 4B); drives g_modelTier (read at sidecar launch)
+    g_modelTier.store(cfg.model_tier);
 
     WinSaved fsSaved; bool isFull = false;
     auto apply_fullscreen = [&](bool on) {
@@ -1606,6 +1610,7 @@ int run_game(const Options& o) {
         const bool fkey = focused && (GetAsyncKeyState('F') & 0x8000) != 0;  // F: toggle the RT flashlight (eye-torch)
         if (fkey && !prevF) flashOn = !flashOn;
         prevF = fkey;
+        g_modelTier.store(model.settings.model_tier);  // a Settings change applies at the next sidecar launch (so a pre-Play menu pick takes effect this session)
 
         // Gamepad (M16): Start pauses from play / activates in a menu (movement below).
         const app::GamepadState pad = poll_gamepad();
@@ -1947,6 +1952,7 @@ int run_game(const Options& o) {
     cfg.master = model.settings.master_pct; cfg.sfx = model.settings.sfx_pct;
     cfg.mouse = model.settings.mouse_pct; cfg.director = model.settings.director;
     cfg.renderer = model.settings.rt;  // M19 persist the ray-tracing toggle
+    cfg.model_tier = model.settings.model_tier;  // persist the AI model tier (applies next launch)
     cfg.fullscreen = isFull ? 1 : 0; cfg.seed = model.seed;
     cfg.width = model.settings.res_w; cfg.height = model.settings.res_h;  // the picked resolution (applies next launch)
     app::save_config(cfgPath, app::sanitize(cfg));

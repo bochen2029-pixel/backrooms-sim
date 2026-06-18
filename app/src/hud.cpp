@@ -208,8 +208,11 @@ void build_menu_overlay(std::vector<uint8_t>& rgba, uint32_t width, uint32_t hei
             std::snprintf(rows[6], 32, "TEST CONNECTION");
             std::snprintf(rows[7], 32, "TEST MICROPHONE");
             std::snprintf(rows[8], 32, "SUBTITLES  %s", m.settings.subtitles ? "ON" : "OFF");
-            std::snprintf(rows[9], 32, "BACK");
-            const char* labels[kSettingsItems] = {rows[0], rows[1], rows[2], rows[3], rows[4], rows[5], rows[6], rows[7], rows[8], rows[9]};
+            const char* kTierName[3] = {"AUTO", "9B VISION", "4B TEXT"};
+            const int mt = (m.settings.model_tier >= 0 && m.settings.model_tier < 3) ? m.settings.model_tier : 0;
+            std::snprintf(rows[kSettingsModel], 32, "AI MODEL  %s", kTierName[mt]);
+            std::snprintf(rows[10], 32, "BACK");
+            const char* labels[kSettingsItems] = {rows[0], rows[1], rows[2], rows[3], rows[4], rows[5], rows[6], rows[7], rows[8], rows[9], rows[10]};
             items(labels, nullptr, kSettingsItems, m.settings_sel, height * 2 / 5);
             // Hint + the live LLM + MIC diagnostics, placed directly UNDER the list (NOT pinned to the screen
             // bottom -- at 4K the old bottom line was ~800 px below the menu, nearly invisible). Bigger scale too.
@@ -218,6 +221,7 @@ void build_menu_overlay(std::vector<uint8_t>& rgba, uint32_t width, uint32_t hei
             int iy = listBottom + base * 10;
             const char* hint = nullptr;
             if (m.settings_sel == 5) hint = "* APPLIES ON RESTART";
+            else if (m.settings_sel == kSettingsModel) hint = "* APPLIES ON RESTART - 4B IS TEXT-ONLY (NO VISION)";
             else if (m.settings_sel == 3) hint = "NEEDS THE LOCAL LLM - RUN TEST CONNECTION";
             else if (m.settings_sel == kSettingsTestConn) hint = "ENTER - PING THE DIRECTOR LLM (KEEL)";
             else if (m.settings_sel == kSettingsTestMic) hint = "ENTER - SPEAK; THE DIRECTOR REPLIES (CAPTION + VOICE)";

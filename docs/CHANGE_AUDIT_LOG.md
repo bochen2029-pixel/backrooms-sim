@@ -306,3 +306,27 @@ job is audit + fast, unambiguous rollback.
   down-view): **luma 31 → 68**, a clean soft-edged cone, debug_error_count 0 (`runs\flash_p4_off/on.png`). Live
   `--game --auto-play --rt` smoke: rt_frames 1143, debug-clean, lookcheck PASS. Cone width/softness/intensity are
   the three shader constants `kFlashCosOut`/`kFlashCosIn`/`kFlashIntensity` — trivial to retune.
+
+## E14 — 2026-06-18 — Settings: manual AI model-tier toggle (AUTO / 9B-vision / 4B-text) [operator request, ADR-079]
+- **What:** a new **"AI MODEL"** Settings row to manually pick the LLM tier instead of only the VRAM auto-tier —
+  cycles **AUTO / 9B VISION / 4B TEXT** (Left/Right). `Settings.model_tier` + `Config.model_tier` (0/1/2);
+  `kSettingsItems` 10→11 with `kSettingsModel=9` inserted BEFORE Back (so Test-Connection/Mic/Subtitles indices
+  are unchanged — minimal disruption). `try_start_sidecar()` reads a `g_modelTier` global: 1→force 9B(+mmproj),
+  2→force 4B (text-only, `g_visionAvailable=false` → vision hosts no-op), **0=AUTO=the exact prior VRAM logic**.
+  Applied on (re)start (the sidecar reloads a ~6 GB model — live restart is the risky path we avoid; a fresh pick
+  before first Play still applies this session; hint = "APPLIES ON RESTART - 4B IS TEXT-ONLY (NO VISION)").
+- **Why:** operator — "even if i can run 9b, i still want option to run the smaller 4b." Default AUTO = no change.
+- **Without breaking anything:** default `model_tier=0` (AUTO) is byte-for-byte the prior behaviour. Config is
+  backward/forward compatible (unknown keys ignored, missing → default). The new menu index 9 doesn't touch the
+  indices the menu tests assert (3/5/`kSettingsItems-1`). The intentional Settings-render change required the
+  **`goldens/m15/settings.png` golden to be regenerated via `goldgen capture`** (the sanctioned sole writer,
+  Iron Rule 6) — blessed in THIS commit with ADR-079; the other 3 menu goldens are unchanged.
+- **Files:** `app/src/config.h`, `app/src/menu.h`, `app/src/hud.cpp`, `app/src/main.cpp`, `goldens/m15/settings.png`
+  (regenerated), `docs/DECISIONS.md` (ADR-079), `docs/USER_GUIDE.md`, `docs/CHANGE_AUDIT_LOG.md`.
+  **Rollback:** `git revert <commit>` — restores the 10-item menu + the prior golden (all in one commit).
+- **Verified:** `gate.ps1 -Milestone M15` **PASSED** — all 4 menu goldens bit-match (incl. regenerated
+  settings.png), state-machine transition tests green, menu compositing debug-clean, shell boots clean.
+  `audit.ps1`: build ok | ctest **109/110 (109 run, 0 failed)** — config round-trip + defaults-survive + sanitize
+  + menu-wraps all green | record==replay | inventory | isolation. The "AI MODEL AUTO" row + hint render correctly
+  (`runs\settings_model.png`). NOTE on live test: the model actually loaded only changes at the next sidecar launch
+  (game restart) — verifiable by the operator (pick 4B → restart → Director/creature run text-only, vision no-ops).

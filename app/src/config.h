@@ -27,6 +27,7 @@ struct Config {
     int director = 0;       // 0/1
     int fov = 70;           // degrees
     int renderer = 0;       // 0 raster, 1 DXR (reserved)
+    int model_tier = 0;     // LLM model: 0 AUTO (VRAM-picked), 1 force 9B (vision), 2 force 4B (text). Applies on restart.
     uint64_t seed = 1;
 };
 
@@ -44,6 +45,7 @@ inline Config sanitize(Config c) {
     c.director = c.director ? 1 : 0;
     c.fov = clamp_int(c.fov, 50, 110);
     c.renderer = c.renderer ? 1 : 0;
+    c.model_tier = clamp_int(c.model_tier, 0, 2);
     if (c.seed == 0) c.seed = 1;
     return c;
 }
@@ -61,6 +63,7 @@ inline std::string serialize(const Config& c) {
     o << "director=" << c.director << "\n";
     o << "fov=" << c.fov << "\n";
     o << "renderer=" << c.renderer << "\n";
+    o << "model_tier=" << c.model_tier << "\n";
     o << "seed=" << c.seed << "\n";
     return o.str();
 }
@@ -85,6 +88,7 @@ inline Config parse(const std::string& text) {
         else if (k == "director") c.director = std::atoi(v.c_str());
         else if (k == "fov") c.fov = std::atoi(v.c_str());
         else if (k == "renderer") c.renderer = std::atoi(v.c_str());
+        else if (k == "model_tier") c.model_tier = std::atoi(v.c_str());
         else if (k == "seed") c.seed = std::strtoull(v.c_str(), nullptr, 10);
     }
     return sanitize(c);

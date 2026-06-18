@@ -37,15 +37,17 @@ struct Settings {
     int rt = 0;           // 0/1 ray tracing on/off (M19; default off = no regression)
     int res_w = 1920;     // chosen render resolution (applied on relaunch; default 1080p)
     int res_h = 1080;
+    int model_tier = 0;   // LLM model: 0 AUTO (VRAM-picked), 1 force 9B (vision), 2 force 4B (text). Applies on restart.
 };
 
 // Item counts per screen — shared so the renderer and the logic never disagree.
 constexpr int kMainItems = 4;      // New Game, Continue, Settings, Quit
 constexpr int kPauseItems = 3;     // Resume, Settings, Quit to Menu
-constexpr int kSettingsItems = 10;  // Master, SFX, Mouse, Director, Ray Tracing, Resolution, Test Connection, Test Microphone, Subtitles, Back
+constexpr int kSettingsItems = 11;  // Master, SFX, Mouse, Director, Ray Tracing, Resolution, Test Connection, Test Microphone, Subtitles, AI Model, Back
 constexpr int kSettingsTestConn = 6;  // index of the "Test Connection" row (Activate -> UiCommand::TestConnection)
 constexpr int kSettingsTestMic = 7;   // index of the "Test Microphone" row (Activate -> UiCommand::TestMic)
 constexpr int kSettingsSubtitles = 8;  // index of the "Subtitles" toggle row
+constexpr int kSettingsModel = 9;      // index of the "AI Model" tier toggle (AUTO / 9B vision / 4B text)
 
 struct MenuModel {
     Screen screen = Screen::Splash;
@@ -100,6 +102,7 @@ inline void adjust_setting(Settings& s, int sel, int dir) {
         case 4: s.rt = dir > 0 ? 1 : 0; break;
         case 5: res_step(s.res_w, s.res_h, dir); break;  // resolution (applied on relaunch)
         case kSettingsSubtitles: s.subtitles = dir > 0 ? 1 : 0; break;  // Director subtitles on/off
+        case kSettingsModel: s.model_tier = clampi(s.model_tier + dir, 0, 2); break;  // AUTO/9B/4B (applies on restart)
         default: break;  // "Test Connection" + "Back" rows have no Left/Right value
     }
 }

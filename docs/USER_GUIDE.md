@@ -64,8 +64,12 @@ setting (below).
   - **Mouse** — look sensitivity (0–100).
   - **Director** — turn the optional local-LLM "Director" on/off (see §6).
   - **Ray Tracing** — toggle real-time **path-traced lighting** (DXR). Off by default;
-    needs an RTX / DXR GPU. Softer, more physically realistic light + shadows (and a touch
-    of noise while moving). Also toggled in-game with **F2**.
+    needs an RTX / DXR GPU. Softer, more physically realistic light + shadows. Also toggled
+    in-game with **F2**; press **F** for a flashlight (a cone of light, ray tracing only).
+  - **AI Model** — choose the local LLM tier: **AUTO** (picked from your VRAM — the default),
+    **9B VISION** (the larger model; the Director/creature can *see* your screen), or **4B TEXT**
+    (the smaller, lighter model — text only, no vision). **Applies on restart** (the model loads
+    when the game next launches its AI sidecar).
   - **Back** — return.
 
 All settings (plus resolution, fullscreen, and the last seed) **persist** across launches
