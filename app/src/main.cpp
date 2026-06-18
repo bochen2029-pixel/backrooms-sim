@@ -76,6 +76,16 @@ namespace app = br::app;
 using br::render_d3d12::Renderer;
 using br::render_d3d12::FrameImage;
 
+// D3D12 Agility SDK redist (RELEASE/bundle only): the exe exports these so the OS d3d12.dll loads the BUNDLED
+// D3D12Core.dll + d3d12SDKLayers.dll from ".\D3D12\". That is what makes ADR-077's forced validation layer
+// available on a CLEAN end-user Win11 that lacks the "Graphics Tools" optional feature -- without it, RT crashes
+// there (the non-validated-device + windowed-FLIP fault). The DEBUG build omits these (no .\D3D12\ beside
+// build\bin), so the gates use the OS D3D12 exactly as before. [ADR-081]
+#ifdef BR_RELEASE
+extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 619; }
+extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"; }
+#endif
+
 namespace {
 
 struct Options {

@@ -373,3 +373,24 @@ job is audit + fast, unambiguous rollback.
   (`--game-shot --rt --flares`, 2 scenes): green cast-light + glowing orbs, debug-clean
   (`runs\shots\flares_off/on/on2.png`). **RT-only** for now (raster: no flares — a noted follow-up). Tunables:
   `kFlareColor`/`kFlareReach`/`kFlareGlowR` (dxr.cpp), intensity 2.2 + cap 256 (`FlareField::kCap`).
+
+## E17 — 2026-06-18 — Bundle the D3D12 Agility SDK redist: RT works on a clean Win11 (itch.io-ready) [ADR-081]
+- **What:** vendored the **D3D12 Agility SDK redist** (Microsoft.Direct3D.D3D12 **1.619.3** from nuget.org) into the
+  bundle — `D3D12Core.dll` + `d3d12SDKLayers.dll` under `dist\Backrooms\D3D12\` — and the RELEASE exe now **exports**
+  `D3D12SDKVersion=619` + `D3D12SDKPath=".\\D3D12\\"` (`app/src/main.cpp`, `#ifdef BR_RELEASE`). This makes the OS
+  d3d12 loader pull the **bundled** runtime + validation layer, so ADR-077's forced validation (the RT-crash fix)
+  works on a clean end-user Win11 that lacks the **Graphics Tools** feature — without it, RT crashes there.
+- **Why:** operator is USB-copying a zip to a NEW machine then uploading to itch.io. A clean machine is exactly
+  where the ADR-077 blocker bites. This closes it — the zip becomes the real shippable artifact.
+- **Without breaking anything (release-gated):** the exports are `#ifdef BR_RELEASE`, so the DEBUG build (every
+  gate) has no exports and no `.\D3D12\` beside `build\bin` → it uses the OS D3D12 exactly as before. Zero gate
+  impact by construction. `package.ps1` treats the two DLLs as persistent verified bundle assets (never sourced
+  from C:\). Additive.
+- **Files:** `app/src/main.cpp` (release-only exports), `scripts/package.ps1` (stage + verify the D3D12\ folder),
+  `docs/DECISIONS.md` (ADR-081), `docs/CHANGE_AUDIT_LOG.md`; bundle: `dist\Backrooms\D3D12\*.dll` (gitignored, like
+  the rest of the bundle; backup in `runs\agility\`). **Rollback:** `git revert <commit>` + delete `dist\Backrooms\D3D12\`.
+- **Verified:** release build clean; **`dumpbin /exports`** shows `D3D12SDKVersion` + `D3D12SDKPath` on the staged
+  exe; the running **bundle exe LOADS `dist\Backrooms\D3D12\D3D12Core.dll` + `D3D12SDKLayers.dll`** (module-path
+  check — the *bundled* redist, not System32 — proving the mechanism), RT smoke **rt_frames=1682, debug_error_count=0,
+  lookcheck PASS**. (This box has Graphics Tools so it can't prove the *clean-machine* case directly — that is the
+  operator's USB test; the wiring is proven correct.) Debug build/gates unaffected (exports release-only).

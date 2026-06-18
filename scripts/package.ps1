@@ -48,13 +48,14 @@ $exe = Need (Join-Path $rel 'bin\backrooms.exe')
 # The runtime + models + DXC were staged ONCE (ADR-076) and persist under dist\Backrooms. We do NOT
 # wipe them and do NOT re-source from C:\ / the SDK -- only the exe (which changes per build) is refreshed.
 Write-Step "refresh exe -> $stage (preserving the in-repo runtime + models + DXC)"
-foreach ($d in @('', 'runtime\llama', 'runtime\keel', 'runtime\whisper', 'models', 'licenses', 'logs')) {
+foreach ($d in @('', 'runtime\llama', 'runtime\keel', 'runtime\whisper', 'models', 'licenses', 'logs', 'D3D12')) {
     New-Item -ItemType Directory -Force -Path (Join-Path $stage $d) | Out-Null
 }
 Copy-Item $exe (Join-Path $stage 'Backrooms.exe') -Force
 
 # --- 3) verify the persistent in-repo assets are present (NEVER copied from C:\ / SDK) ---
 $required = @('dxcompiler.dll', 'dxil.dll',
+              'D3D12\D3D12Core.dll', 'D3D12\d3d12SDKLayers.dll',   # ADR-081: Agility SDK redist -> RT works on a clean Win11 (no Graphics Tools)
               'runtime\llama\llama-server.exe', 'runtime\keel\keel-serve.exe', 'runtime\keel\keel.lock',
               'runtime\whisper\whisper-cli.exe') + ($MODEL_FILES | ForEach-Object { "models\$_" })
 $missing = @()
