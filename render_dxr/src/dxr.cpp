@@ -204,6 +204,8 @@ struct DxrRenderer::Impl {
     ComPtr<ID3D12Resource> ptSbt;          // raygen-only table
     uint32_t accumSamples = 0;             // spp accumulated since the last reset
     float flashIntensity = 0.0f;           // interactive flashlight (0 = off -> goldens bit-identical)
+    ComPtr<ID3D12Resource> flareBuf;       // up to kFlareGpuMax green flares (StructuredBuffer t2); upload heap
+    uint32_t flareCount = 0;               // active flares this frame (0 = none -> shader branches skipped)
 
     uint32_t width = 0, height = 0;
 
@@ -553,6 +555,10 @@ constexpr float kPtExposure = 1.4f;
 // lift dark areas inside the cone without blowing out a normally-lit corridor. Off by default (goldens).
 constexpr float kFlashIntensity = 6.0f;
 
+// Max green flares uploaded + rendered per frame (the caller pre-culls to the nearest this many). Caps the
+// shader's per-pixel flare work regardless of how many the player has dropped. 64 * float4 = 1 KB.
+constexpr uint32_t kFlareGpuMax = 64u;
+
 // M9 phase 3 path tracer — inline RayQuery (SM 6.5). Emissive fluorescent ceiling
 // grid as area lights (NEE + shadow rays for direct), one cosine-weighted diffuse
 // GI bounce, seeded per-(pixel,sample) RNG, accumulated across dispatches.
@@ -565,7 +571,7 @@ cbuffer PT : register(b0) {
     float3 uUp;    float uFar;
     uint uSampleStart; uint uSampleCount; uint uTotal; uint uSeed;
     uint uResolve; float uExposure; float uWidth; float uHeight;  // uResolve: 0 accum, 1 accum+tonemap, 2 accum+guide, 3 denoise
-    uint uFrame; float uFlashI; uint uPad1; uint uPad2;          // uFrame: decorrelation index; uFlashI: flashlight intensity (0=off)
+    uint uFrame; float uFlashI; uint uFlareN; uint uPad2;        // uFlashI: flashlight; uFlareN: active green flare count (0=none)
 };
 RWTexture2D<float4> g_out   : register(u0);
 RWTexture2D<float>  g_depth : register(u1);
@@ -573,6 +579,7 @@ RWTexture2D<float4> g_accum : register(u2);
 RWTexture2D<float4> g_guide : register(u3);   // denoiser guide: world normal.xyz + view-Z in .w
 RaytracingAccelerationStructure g_scene : register(t0);
 StructuredBuffer<Vertex> g_verts : register(t1);
+StructuredBuffer<float4> g_flares : register(t2);   // up to uFlareN green flares: xyz = world pos, w = intensity
 
 static const float PI = 3.14159265;
 static const float kCell = 4.0;   // contracts::kCellSize
@@ -640,6 +647,46 @@ float3 flashlight(float3 P, float3 N){
     float cone = smoothstep(kFlashCosOut, kFlashCosIn, cs);
     float atten = 1.0 / (1.0 + kFlashFall * dist2);
     return (uFlashI * cone * ndl * atten) * kFlashColor;
+}
+
+// Green "chemlight" flares (option A: analytic point lights, NO scene geometry). uFlareN == 0 -> never called
+// (the call sites are [branch]-guarded), so every golden render is bit-identical. The host pre-culls to the
+// nearest uFlareN (<= kFlareGpuMax), so these loops are short.
+static const float3 kFlareColor = float3(0.16, 1.0, 0.28);   // chemlight green
+static const float  kFlareReach = 7.0;     // metres a flare meaningfully lights a surface
+static const float  kFlareGlowR = 0.40;    // radius of the visible glowing point along a view ray
+
+// Diffuse green cast onto a surface from nearby flares (shadow-rayed, like direct_light -- no light through walls).
+float3 flare_light(float3 P, float3 N){
+    float3 sum = 0;
+    const float reach2 = kFlareReach * kFlareReach;
+    [loop] for (uint i = 0u; i < uFlareN; ++i){
+        float4 f = g_flares[i];
+        float3 toF = f.xyz - P; float d2 = dot(toF, toF);
+        if (d2 > reach2) continue;
+        float d = sqrt(max(d2, 1e-6));
+        float ndl = max(dot(N, toF / d), 0.0);
+        if (ndl <= 0.0) continue;
+        if (occluded(P + N * 2e-3, f.xyz)) continue;
+        sum += f.w * ndl / (1.0 + 0.7 * d2);
+    }
+    return sum * kFlareColor;
+}
+
+// The visible glowing stick: a flare sitting along the primary ray, in FRONT of the surface hit, adds green.
+float3 flare_glow(float3 ro, float3 rd, float tHit){
+    float3 g = 0;
+    [loop] for (uint i = 0u; i < uFlareN; ++i){
+        float4 f = g_flares[i];
+        float t = dot(f.xyz - ro, rd);
+        if (t <= 0.05 || t >= tHit) continue;               // behind the eye, or occluded by the wall we hit
+        float3 closest = ro + rd * t;
+        float r2 = dot(f.xyz - closest, f.xyz - closest);
+        if (r2 > kFlareGlowR * kFlareGlowR) continue;
+        float k = 1.0 - sqrt(r2) / kFlareGlowR;
+        g += f.w * k * k * 5.0;                              // bright core, soft edge
+    }
+    return g * kFlareColor;
 }
 
 float3 cosine_dir(float3 N, float u1, float u2){
@@ -735,9 +782,13 @@ void RayGen(){
             baseAlb = albedo_of(h.mat);
             deterministic = baseAlb * (direct_light(h.P, h.N) + kAmbient);
             [branch] if (uFlashI > 0.0) deterministic += baseAlb * flashlight(h.P, h.N);  // eye-torch (off -> skipped; goldens bit-identical)
+            [branch] if (uFlareN > 0u) deterministic += baseAlb * flare_light(h.P, h.N);  // green flares cast onto this surface
             diffuse = true;
         }
     }
+
+    // Visible green flare points: emission along the primary ray (in front of the hit). Off (uFlareN==0) -> skipped.
+    [branch] if (uFlareN > 0u) deterministic += flare_glow(uPos, dir, h.hit ? h.t : uFar);
 
     // Stochastic one-bounce indirect over this dispatch's samples.
     float3 indirectSum = 0;
@@ -888,6 +939,12 @@ bool DxrRenderer::build_scene(const std::vector<contracts::ResidentChunk>& chunk
     std::memcpy(sv, allVerts.data(), static_cast<size_t>(allVerts.size()) * sizeof(contracts::ChunkVertex));
     d.shadeVb->Unmap(0, nullptr);
     d.shadeVertCount = vtxOffset;
+    // Flare upload buffer (StructuredBuffer t2): always present so the PT root SRV binds even when no flares
+    // are dropped. flareCount stays 0 until set_flares() -> the shader's flare branches are skipped -> the
+    // offline/golden render is bit-identical (set_flares is never called on the --dxr-pt / golden path).
+    d.flareBuf = make_buffer(d.device.Get(), static_cast<UINT64>(kFlareGpuMax) * 16u, D3D12_HEAP_TYPE_UPLOAD,
+                             D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+    if (!d.flareBuf) { last_error_ = "flare buf"; return false; }
     d.chunkInstances = instances;  // M25: cached for per-frame TLAS rebuilds
     d.chunkVertCount = vtxOffset;
 
@@ -984,14 +1041,15 @@ bool DxrRenderer::build_scene(const std::vector<contracts::ResidentChunk>& chunk
         D3D12_DESCRIPTOR_RANGE prange{};
         prange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; prange.NumDescriptors = 4; prange.BaseShaderRegister = 0;  // u0,u1,u2,u3
         prange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-        D3D12_ROOT_PARAMETER prp[4]{};
+        D3D12_ROOT_PARAMETER prp[5]{};
         prp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         prp[0].Constants.Num32BitValues = 28; prp[0].Constants.ShaderRegister = 0;
         prp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         prp[1].DescriptorTable.NumDescriptorRanges = 1; prp[1].DescriptorTable.pDescriptorRanges = &prange;
         prp[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; prp[2].Descriptor.ShaderRegister = 0;  // t0 = TLAS
         prp[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; prp[3].Descriptor.ShaderRegister = 1;  // t1 = shadeVb
-        D3D12_ROOT_SIGNATURE_DESC prs{}; prs.NumParameters = 4; prs.pParameters = prp; prs.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+        prp[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV; prp[4].Descriptor.ShaderRegister = 2;  // t2 = flares
+        D3D12_ROOT_SIGNATURE_DESC prs{}; prs.NumParameters = 5; prs.pParameters = prp; prs.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
         ComPtr<ID3DBlob> psig, pse;
         if (FAILED(D3D12SerializeRootSignature(&prs, D3D_ROOT_SIGNATURE_VERSION_1, &psig, &pse))) { last_error_ = "pt RS serialize"; return false; }
         if (FAILED(d.device->CreateRootSignature(0, psig->GetBufferPointer(), psig->GetBufferSize(), IID_PPV_ARGS(&d.ptRS)))) { last_error_ = "pt RS"; return false; }
@@ -1221,6 +1279,7 @@ bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t sam
         d.list->SetComputeRootDescriptorTable(1, d.uavHeap->GetGPUDescriptorHandleForHeapStart());
         d.list->SetComputeRootShaderResourceView(2, d.tlas->GetGPUVirtualAddress());
         d.list->SetComputeRootShaderResourceView(3, d.shadeVb->GetGPUVirtualAddress());
+        d.list->SetComputeRootShaderResourceView(4, d.flareBuf->GetGPUVirtualAddress());   // t2: green flares
         d.list->SetPipelineState1(d.ptPso.Get());
     };
     D3D12_DISPATCH_RAYS_DESC dr{};
@@ -1245,6 +1304,7 @@ bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t sam
         setf(c, 22, static_cast<float>(d.width)); setf(c, 23, static_cast<float>(d.height));
         c[24] = frame;  // uFrame: per-frame noise decorrelation (0 for the deterministic offline/golden path)
         setf(c, 25, d.flashIntensity);  // uFlashI: interactive flashlight (0 = off -> shader branch skipped, goldens bit-identical)
+        c[26] = d.flareCount;           // uFlareN: active green flares (0 = none -> flare branches skipped, goldens bit-identical)
 
         if (FAILED(d.alloc->Reset())) { last_error_ = "pt alloc reset"; return false; }
         if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "pt list reset"; return false; }
@@ -1295,6 +1355,19 @@ bool DxrRenderer::render_pt(const contracts::CameraPose& cam, uint32_t samples, 
 }
 
 void DxrRenderer::set_flashlight(bool on) { if (impl_) impl_->flashIntensity = on ? kFlashIntensity : 0.0f; }
+
+void DxrRenderer::set_flares(const float* xyzi, uint32_t count) {
+    if (!impl_) return;
+    Impl& d = *impl_;
+    if (count > kFlareGpuMax) count = kFlareGpuMax;
+    d.flareCount = count;
+    if (count == 0u || !d.flareBuf || !xyzi) return;   // nothing to upload (uFlareN stays 0 -> shader skips)
+    void* p = nullptr; const D3D12_RANGE none{ 0, 0 };
+    if (SUCCEEDED(d.flareBuf->Map(0, &none, &p)) && p) {
+        std::memcpy(p, xyzi, static_cast<size_t>(count) * 16u);   // float4 {x,y,z,intensity} per flare
+        d.flareBuf->Unmap(0, nullptr);
+    }
+}
 
 uint32_t DxrRenderer::accum_samples() const { return impl_ ? impl_->accumSamples : 0; }
 

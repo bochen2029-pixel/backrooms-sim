@@ -346,3 +346,30 @@ job is audit + fast, unambiguous rollback.
 - **Verified:** build clean (/WX); ~12 `--game-shot` renders (RT + raster, varied seed/ticks) all
   **debug_error_count=0**; the audit's ctest/determinism are unaffected (no existing code touched). Aesthetic note:
   raster lights the whole ceiling (bright, classic Level-0), PT leaves it dark between the emissive strips (moody).
+
+## E16 — 2026-06-18 — Green flare "breadcrumbs" (R): analytic emissive point lights in the PT [operator request, ADR-080]
+- **What:** `R` drops a green "chemlight" flare at the wanderer's feet — it LIGHTS the ray-traced scene (green
+  cast on nearby surfaces + a visible glowing point) and serves as a breadcrumb. **Option A** (analytic point
+  lights, no scene geometry). New `app/src/flares.h` (`FlareField` — a pure ring buffer, cap 256, oldest
+  recycles → the trail decays behind you; `pack_nearest` pre-culls to the nearest 64 for the GPU). DXR: PT root
+  SRV **t2** `StructuredBuffer<float4> g_flares` (mirror of the t1 vertex buffer) + `uFlareN` (repurposed CB pad)
+  + `DxrRenderer::set_flares()`; shader `flare_light()` (shadow-rayed green cast, ≤7 m) + `flare_glow()` (the
+  visible point), both `[branch]`-guarded. `run_game`: R edge-toggle, per-frame nearest-cull + `set_flares`,
+  drop forces a PT accumulator reset. A `--flares` QC flag on `--game-shot` drops a line ahead for the A/B.
+- **Why:** operator — green flare breadcrumbs, mapped to R, "perfect for ray tracing." Answered their scaling
+  question: memory trivial (256 ≈ 8 KB; GPU buffer fixed 1 KB), cost bounded by the nearest-64 cap + 7 m shader
+  cull, so it's flat whether 5 or 999 are dropped (cap is 256; bump trivially).
+- **Regression-proof + EASY ROLLBACK (operator's explicit ask):** flares default to NONE; the golden/offline
+  path (`render_pt` / `--dxr-pt`) never calls `set_flares` → `uFlareN==0` → the `[branch]` flare code is skipped
+  and the (bound but empty) t2 buffer is unread → **PT output bit-identical**. Tagged **`pre-flares`** (pushed)
+  BEFORE any work → rollback is `git reset --hard pre-flares`, zero debug; or `git revert` the one change-set.
+- **Files:** `app/src/flares.h` (new), `render_dxr/include/render_dxr/dxr.h`, `render_dxr/src/dxr.cpp`,
+  `app/src/main.cpp`, `docs/USER_GUIDE.md`, `scripts/package.ps1`, `docs/DECISIONS.md` (ADR-080),
+  `docs/CHANGE_AUDIT_LOG.md`. **Rollback:** `git reset --hard pre-flares` OR `git revert <commit>`.
+- **Verified:** `gate.ps1 -Milestone M9` **PASSED** — converged PT goldens **bit-identical** (diff
+  0.000004/0.000677/0.000000), 178 FPS, no-ghost, 1 km TLAS walk debug-clean (the new root SRV t2 + shader are
+  inert with no flares). `audit.ps1` build+ctest 109/109+determinism+inventory+isolation green. Live `--game
+  --rt` smoke (flare build, none dropped): rt_frames 863, **debug_error_count 0**, lookcheck PASS. A/B
+  (`--game-shot --rt --flares`, 2 scenes): green cast-light + glowing orbs, debug-clean
+  (`runs\shots\flares_off/on/on2.png`). **RT-only** for now (raster: no flares — a noted follow-up). Tunables:
+  `kFlareColor`/`kFlareReach`/`kFlareGlowR` (dxr.cpp), intensity 2.2 + cap 256 (`FlareField::kCap`).

@@ -41,6 +41,7 @@ See the project [`README.md`](../README.md). In short: Visual Studio 2022 + the 
 | Toggle fullscreen | `F11` | — |
 | Toggle ray tracing | `F2` | — |
 | Toggle flashlight (ray tracing only) | `F` | — |
+| Drop a green flare / breadcrumb (ray tracing only) | `R` | — |
 | Quit | Quit from the menu, or close the window | — |
 
 Mouse-look is captured while you walk and released in menus. Mouse sensitivity is a

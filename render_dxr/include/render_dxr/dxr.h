@@ -87,6 +87,13 @@ public:
     // ever uses) keeps the PT output bit-identical: the shader's flashlight branch is skipped.
     void set_flashlight(bool on);
 
+    // Interactive green flares (default NONE): up to `count` analytic point lights, packed as float4
+    // {x,y,z,intensity}, that the PT shader adds as emissive green "chemlight" breadcrumbs — they light
+    // nearby surfaces (shadow-rayed) and show as glowing points. Presentation only; `count==0` (the default,
+    // and the only state the offline/golden path ever uses) keeps the PT output bit-identical (the shader's
+    // flare branches are skipped). The caller pre-culls to the nearest few; this uploads them for the next render.
+    void set_flares(const float* xyzi, uint32_t count);
+
     // Samples accumulated into the current (un-reset) image — 0 right after a reset.
     uint32_t accum_samples() const;
 

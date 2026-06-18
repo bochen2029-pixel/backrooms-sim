@@ -62,6 +62,7 @@
 #include "shoggoth_brain_host.h"
 #include "shoggoth_vision.h"
 #include "shoggoth_vision_host.h"
+#include "flares.h"
 #include "director_vision.h"
 #include "mic_capture.h"
 #include "director_chat.h"
@@ -117,6 +118,7 @@ struct Options {
     bool caption_shot = false;              // render the Director subtitle over a gray bg -> PNG (visibility proof)
     bool flashlight = false;                // --dxr-pt QC: render with the eye-torch ON (off by default)
     bool game_shot = false;                 // --game-shot: walk the Stroller into the maze, then render one framed shot (--rt for PT)
+    bool drop_flares = false;               // --game-shot QC: drop a line of green flares ahead of the camera (RT A/B)
     bool mic_test = false;                  // ADR-074: capture mic + VAD + whisper, print transcripts (verify voice input)
     bool chat_test = false;                 // ADR-074: TTS->whisper->Director reply (verify the conversation glue, no mic)
     bool shoggoth_pa_record = false;       // M24: PA voice spoken into the soundscape -> heard as words
@@ -256,6 +258,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--flashlight") == 0) o.flashlight = true;
         else if (std::strcmp(a, "--game-shot") == 0) o.game_shot = true;
+        else if (std::strcmp(a, "--flares") == 0) o.drop_flares = true;
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
         else if (std::strcmp(a, "--version") == 0) o.version = true;
         else if (std::strcmp(a, "--frames") == 0) { if (!u32(o.frames)) return false; }
@@ -1464,6 +1467,7 @@ int run_game(const Options& o) {
     bool cursorHidden = false, firstPlayLook = true;
     bool prevF11 = false, prevPadStart = false, prevF2 = false, prevF = false;
     bool flashOn = false, dxrFlashApplied = false;   // F: ray-traced eye-torch flashlight (RT only, off by default)
+    app::FlareField flares; bool prevR = false, flaresChanged = false;   // R: green flare breadcrumbs (RT-lit, ring-recycled)
 
     // M19: lazy DXR renderer for the ray-tracing toggle. Rendered at a reduced internal
     // resolution (perf) + upscaled to the window by present_overlay_windowed. Scene rebuilt
@@ -1612,6 +1616,13 @@ int run_game(const Options& o) {
         const bool fkey = focused && (GetAsyncKeyState('F') & 0x8000) != 0;  // F: toggle the RT flashlight (eye-torch)
         if (fkey && !prevF) flashOn = !flashOn;
         prevF = fkey;
+        const bool rkey = focused && (GetAsyncKeyState('R') & 0x8000) != 0;  // R: drop a green flare breadcrumb at your feet (RT-lit)
+        if (rkey && !prevR && model.screen == app::Screen::Play) {
+            const int32_t flvl = contracts::level_from_y(s.wanderer.pos.y);
+            flares.drop(Vec3{ s.wanderer.pos.x, contracts::level_base_y(flvl) + 0.15f, s.wanderer.pos.z });  // on the floor
+            flaresChanged = true;   // lighting changed -> the PT accumulator must re-converge (see the RT block)
+        }
+        prevR = rkey;
         g_modelTier.store(model.settings.model_tier);  // a Settings change applies at the next sidecar launch (so a pre-Play menu pick takes effect this session)
 
         // Gamepad (M16): Start pauses from play / activates in a menu (movement below).
@@ -1892,7 +1903,11 @@ int run_game(const Options& o) {
                     dxr->set_flashlight(flashOn);                       // F-toggled eye-torch (RT only)
                     const bool flashChanged = (flashOn != dxrFlashApplied);   // lighting changed -> must re-converge
                     dxrFlashApplied = flashOn;
-                    const bool ptReset = !dxrHaveCam || sceneRebuilt || flashChanged || pt_view_moved(cam, dxrPrevCam);
+                    float flareGpu[256];   // up to 64 flares x float4 {x,y,z,intensity}
+                    const uint32_t nFlares = flares.pack_nearest(Vec3{ cam.pos[0], cam.pos[1], cam.pos[2] }, 2.2f, 64u, flareGpu);
+                    dxr->set_flares(flareGpu, nFlares);                 // green breadcrumbs near the eye (RT)
+                    const bool ptReset = !dxrHaveCam || sceneRebuilt || flashChanged || flaresChanged || pt_view_moved(cam, dxrPrevCam);
+                    flaresChanged = false;
                     dxr->render_pt_frame(cam, ptReset ? 4u : 1u, static_cast<uint32_t>(texSeed) + static_cast<uint32_t>(frames),
                                          ptReset, true, static_cast<uint32_t>(frames));
                     dxrPrevCam = cam; dxrHaveCam = true;
@@ -4647,6 +4662,14 @@ int run_game_shot(const Options& o) {
         br::render_dxr::DxrRenderer r;
         if (!r.init(o.width, o.height)) { std::fprintf(stderr, "dxr init: %s\n", r.last_error().c_str()); return 1; }
         if (!r.build_scene(sm.resident())) { std::fprintf(stderr, "dxr scene: %s\n", r.last_error().c_str()); return 1; }
+        if (o.drop_flares) {   // QC A/B: a short line of green flares receding ahead along the view, on the floor
+            app::FlareField ff;
+            const float cy = cam.pos[1] - kEyeHeight + 0.15f;
+            const float dx = std::sin(cam.yaw), dz = std::cos(cam.yaw);
+            for (int k = 1; k <= 6; ++k) ff.drop(Vec3{ cam.pos[0] + dx * static_cast<float>(k) * 1.8f, cy, cam.pos[2] + dz * static_cast<float>(k) * 1.8f });
+            float fg[256]; const uint32_t nf = ff.pack_nearest(Vec3{ cam.pos[0], cam.pos[1], cam.pos[2] }, 2.4f, 64u, fg);
+            r.set_flares(fg, nf);
+        }
         const uint32_t spp = (o.spp > 0) ? o.spp : 320u;
         if (!r.render_pt(cam, spp, static_cast<uint32_t>(o.seed))) { std::fprintf(stderr, "dxr pt: %s\n", r.last_error().c_str()); return 1; }
         std::vector<uint8_t> rgba;
