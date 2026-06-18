@@ -107,3 +107,22 @@ job is audit + fast, unambiguous rollback.
   hook build+ctest green. NOTE: the *rest* of `Invoke-GateM29` still needs KEEL :7071 for its other
   cases' `valid_intents>=1` (pre-existing); this new case does not require `valid_intents`, so it
   greens regardless of KEEL.
+
+## E6 — 2026-06-17 — Phase C (core): pure LLM-request arbitration scheduler + property tests
+- **What:** `app/src/keel_scheduler.h` — the THREAD-FREE decision core for the single llama-server
+  backend: priority admission (player-speech > shoggoth-vision > director-vision > director-narration
+  > shoggoth-brain), a single multimodal slot, latest-wins per class, a concurrency cap, FIFO
+  tie-break. `tests/unit/test_keel_scheduler.cpp` — 6 deterministic property tests of those laws (no
+  threads → no flakiness). Registered in `tests/CMakeLists.txt`.
+- **Why:** `SHOGGOTH_PLAN.md` Phase C — arbitration must land BEFORE live vision (Phase D) or the five
+  LLM consumers starve each other on one backend. The pure core is the hard logic; building+testing it
+  in isolation (contract-first) is fully verifiable WITHOUT KEEL.
+- **Files:** `app/src/keel_scheduler.h` (new), `tests/unit/test_keel_scheduler.cpp` (new),
+  `tests/CMakeLists.txt`. **Rollback:** `git revert <commit>` / `git reset --hard phaseC-core` (header
+  used only by its test — self-contained, no integration yet).
+- **Verification:** `audit.ps1` POST — `build ok | ctest 109/109 (was 103; +6 keel) | determ
+  409129a0 | inventory ok | isolation ok`. The 6 scheduler laws each green.
+- **DEFERRED = Phase C.2 (best with KEEL :7071 up to soak):** the threaded `KeelBroker` wrapper
+  (mutex + condvar around `KeelScheduler`, runs each admitted thunk on the host thread) + route the
+  live hosts (DirectorVisionHost / DirectorChatHost / ShoggothBrainHost) through it + the concurrency
+  soak gate (frame p99 < 2× median; vision never delays a queued player-speech turn beyond one slot).
