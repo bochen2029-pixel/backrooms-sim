@@ -29,9 +29,28 @@ enum class ShoggothState { Lurk = 0, Hunt = 1, Chase = 2, Retreat = 3 };
 // behavior, so the brain being off changes nothing).
 enum class ShoggothAction { Hunt = 0, Stalk = 1, Lurk = 2, Flank = 3, Flee = 4 };
 
+// Phase B (SHOGGOTH_PLAN.md §3): the semantic perception the brain PROPOSES; the engine DISPOSES
+// it to a real cell in a later phase. Classifier space, never metric. int32_t-backed for a
+// deterministic ShoggothEvent layout. Every value defaults to "no perception", so the creature
+// behaves EXACTLY as M20 until a later phase reads these (Phase B itself ships no behaviour change).
+enum class TargetKind : int32_t { None = 0, Wanderer = 1, Doorway = 2, Stairs = 3, Shaft = 4, Dark = 5, Light = 6 };
+enum class Sector : int32_t { Ahead = 0, AheadLeft = 1, Left = 2, BehindLeft = 3, Behind = 4, BehindRight = 5, Right = 6, AheadRight = 7 };
+enum class Proximity : int32_t { Near = 0, Mid = 1, Far = 2 };
+enum class Mood : int32_t { Idle = 0, Curious = 1, Fixated = 2, Afraid = 3 };
+
 struct ShoggothIntent {
     ShoggothAction action = ShoggothAction::Hunt;
     float aggression = 0.5f;  // 0..1, scales speed
+    // Phase B — semantic perception (defaulted; unused until a later phase wires the resolver, so
+    // M20 behaviour is unchanged). All five are MOTION-affecting -> serialized into ShoggothEvent
+    // and folded into shoggoth_hash, so the day a phase reads them determinism is already gated.
+    // (The voice `utterance` is intentionally NOT here yet — it is voice-only, never serialized or
+    //  hashed, so Phase E can add it with no log-version bump.)
+    TargetKind target_kind = TargetKind::None;
+    Sector sector = Sector::Ahead;
+    Proximity proximity = Proximity::Far;
+    Mood mood = Mood::Idle;
+    float snap = 0.5f;  // per-mode resolution fidelity: 1 = lock the cell, 0 = head the sector
 };
 
 struct Shoggoth {
@@ -286,6 +305,11 @@ inline uint64_t shoggoth_hash(const Shoggoth& sh) {
     mix(static_cast<uint64_t>(sh.wander_gi)); mix(static_cast<uint64_t>(sh.wander_gj));
     mix(static_cast<uint64_t>(sh.level));  // M29: the floor it patrols
     mix(static_cast<uint64_t>(sh.intent.action)); mixf(sh.intent.aggression);  // M21 intent
+    mix(static_cast<uint64_t>(sh.intent.target_kind)); mix(static_cast<uint64_t>(sh.intent.sector));   // Phase B intent:
+    mix(static_cast<uint64_t>(sh.intent.proximity)); mix(static_cast<uint64_t>(sh.intent.mood));       // folded now (constant
+    mixf(sh.intent.snap);                                                                              // defaults) so a later
+                                                                                                       // phase wiring them is
+                                                                                                       // determinism-gated.
     return h;
 }
 

@@ -3165,7 +3165,7 @@ int run_shoggoth_record(const Options& o) {
                 if (ok) {
                     ++valid;
                     sh.intent = intent;
-                    events.push_back(app::ShoggothEvent{t, static_cast<int32_t>(intent.action), intent.aggression});
+                    events.push_back(app::event_from_intent(t, intent));
                     H = fold_bytes(H, &events.back(), sizeof(app::ShoggothEvent));
                 }
             }
@@ -3243,7 +3243,7 @@ int run_shoggoth_vision_record(const Options& o) {
             if (resp.ok && ok) {
                 ++valid;
                 sh.intent = intent;  // identical apply+log path as --shoggoth-record
-                events.push_back(app::ShoggothEvent{t, static_cast<int32_t>(intent.action), intent.aggression});
+                events.push_back(app::event_from_intent(t, intent));
                 H = fold_bytes(H, &events.back(), sizeof(app::ShoggothEvent));
             }
         }
@@ -3423,7 +3423,7 @@ int run_shoggoth_hearing_record(const Options& o) {
             if (resp.ok && ok) {
                 ++valid;
                 sh.intent = intent;  // identical apply+log path as --shoggoth-record
-                events.push_back(app::ShoggothEvent{t, static_cast<int32_t>(intent.action), intent.aggression});
+                events.push_back(app::event_from_intent(t, intent));
                 H = fold_bytes(H, &events.back(), sizeof(app::ShoggothEvent));
             }
         }
@@ -3536,7 +3536,7 @@ int run_shoggoth_pa_record(const Options& o) {
             if (resp.ok && ok) {
                 ++valid;
                 sh.intent = intent;
-                events.push_back(app::ShoggothEvent{t, static_cast<int32_t>(intent.action), intent.aggression});
+                events.push_back(app::event_from_intent(t, intent));
                 H = fold_bytes(H, &events.back(), sizeof(app::ShoggothEvent));
             }
         }
@@ -3577,8 +3577,7 @@ int run_shoggoth_replay(const Options& o) {
         br::core::Vec3 prey = w.s.wanderer.pos;
         if (o.level != 0 && t >= N / 2) prey.y += contracts::level_base_y(o.level);
         while (ei < events.size() && events[ei].effective_tick == t) {
-            sh.intent.action = static_cast<app::ShoggothAction>(events[ei].action);
-            sh.intent.aggression = events[ei].aggression;
+            app::apply_event_to_intent(events[ei], sh.intent);
             H = fold_bytes(H, &events[ei], sizeof(app::ShoggothEvent));
             ++ei;
         }

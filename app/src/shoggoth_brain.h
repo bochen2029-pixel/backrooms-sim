@@ -94,16 +94,54 @@ inline ShoggothIntent parse_shoggoth_intent(const std::string& content, bool& ok
 
 // --- the intent event log (record == replay; the model lives only here) ---------
 struct ShoggothEvent {
-    uint64_t effective_tick;
-    int32_t action;
-    float aggression;
+    uint64_t effective_tick;   // 8
+    int32_t action;            // 4
+    float aggression;          // 4
+    // Phase B (SHOGLOG2) motion fields. int32_t-backed enums + snap. Laid out PADDING-FREE so the
+    // raw-byte fold (`fold_bytes` over sizeof) stays deterministic across runs; the static_assert
+    // locks the invariant at compile time (a non-LLM oracle). `_reserved` pads to a multiple of 8
+    // AND leaves room for one more field later without another version bump.
+    int32_t target_kind;       // 4
+    int32_t sector;            // 4
+    int32_t proximity;         // 4
+    int32_t mood;              // 4
+    float snap;                // 4
+    int32_t _reserved;         // 4  -> 40 total
 };
+static_assert(sizeof(ShoggothEvent) == 40,
+              "ShoggothEvent must stay padding-free (40 bytes) for the deterministic raw-byte fold");
+
+// Phase B: the SINGLE SOURCE OF TRUTH for the intent<->event mapping. Every record path builds its
+// event via event_from_intent; replay reconstructs the intent via apply_event_to_intent. Adding a
+// motion field later is one edit in each helper, not N across the codebase. Only MOTION fields
+// cross the boundary (the voice utterance is presentation-only and never serialized).
+inline ShoggothEvent event_from_intent(uint64_t tick, const ShoggothIntent& it) {
+    ShoggothEvent e{};  // zero-init (defensive; the layout is padding-free regardless)
+    e.effective_tick = tick;
+    e.action = static_cast<int32_t>(it.action);
+    e.aggression = it.aggression;
+    e.target_kind = static_cast<int32_t>(it.target_kind);
+    e.sector = static_cast<int32_t>(it.sector);
+    e.proximity = static_cast<int32_t>(it.proximity);
+    e.mood = static_cast<int32_t>(it.mood);
+    e.snap = it.snap;
+    return e;
+}
+inline void apply_event_to_intent(const ShoggothEvent& e, ShoggothIntent& it) {
+    it.action = static_cast<ShoggothAction>(e.action);
+    it.aggression = e.aggression;
+    it.target_kind = static_cast<TargetKind>(e.target_kind);
+    it.sector = static_cast<Sector>(e.sector);
+    it.proximity = static_cast<Proximity>(e.proximity);
+    it.mood = static_cast<Mood>(e.mood);
+    it.snap = e.snap;
+}
 
 inline bool write_shoggoth_log(const std::string& path, uint64_t seed, uint64_t ticks,
                                const std::vector<ShoggothEvent>& events) {
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) return false;
-    f.write("SHOGLOG1", 8);
+    f.write("SHOGLOG2", 8);
     f.write(reinterpret_cast<const char*>(&seed), 8);
     f.write(reinterpret_cast<const char*>(&ticks), 8);
     uint64_t n = events.size();
@@ -118,7 +156,7 @@ inline bool read_shoggoth_log(const std::string& path, uint64_t& seed, uint64_t&
     if (!f) return false;
     char magic[8];
     f.read(magic, 8);
-    if (std::memcmp(magic, "SHOGLOG1", 8) != 0) return false;
+    if (std::memcmp(magic, "SHOGLOG2", 8) != 0) return false;
     f.read(reinterpret_cast<char*>(&seed), 8);
     f.read(reinterpret_cast<char*>(&ticks), 8);
     uint64_t n = 0;

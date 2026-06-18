@@ -56,3 +56,26 @@ job is audit + fast, unambiguous rollback.
 - **Verification (pre-audit baseline at this commit):** `AUDIT PASS — build ok | ctest 103 tests,
   0 failed | determ 29310b6befab8895 | inventory ok | isolation ok | tree clean @ phaseA`.
 - **Going forward:** each change-set entry below should carry an `audit.ps1` PASS line (pre + post).
+
+## E3 — 2026-06-17 — Phase B: ShoggothIntent/Event schema bump (SHOGLOG2) — determinism-neutral
+- **What:** extended the schema for later phases (vision / resolver). `ShoggothIntent` +5 MOTION
+  fields (`target_kind, sector, proximity, mood, snap`; all defaulted). `ShoggothEvent` +those 5 +
+  `_reserved` (padding-free 40 B, `static_assert`-locked). `SHOGLOG1`→`SHOGLOG2`. Two helpers
+  (`event_from_intent` / `apply_event_to_intent`) as the single source of truth across the 4 record
+  paths + replay. `shoggoth_hash` folds the 5 new fields. `utterance` deferred to Phase E (voice-only,
+  never serialized → no version bump needed then).
+- **Why:** `SHOGGOTH_PLAN.md` Phase B — do the one determinism-risky log/hash change ONCE for every
+  field the later phases need, behavior-neutral, with the gate re-proven before anything uses them.
+- **Files:** `app/src/shoggoth.h`, `app/src/shoggoth_brain.h`, `app/src/main.cpp`.
+- **Rollback:** `git revert <phaseB commit>`, or `git reset --hard phaseA`.
+- **Verification (Externality Principle — TWO independent oracles + a cold verifier):**
+  - `audit.ps1` POST: `build ok | ctest 103/103 | determ record==replay 409129a0236b3084 (lvl 0) | inventory ok | isolation ok`.
+  - level-7 record==replay `95945b9087214b14` (the M29 prey-offset path + new schema, model offline).
+  - `static_assert(sizeof(ShoggothEvent)==40)` — compile-time padding-free oracle (held → no padding).
+  - cold-context verifier subagent (no pass-1 context): **VERDICT CLEAN** — 5×5 field×location matrix
+    fully populated (no asymmetry), every event site via the helpers, no string hashed, `shoggoth_step`
+    reads no new field (behavior-neutral).
+  - Hash changed `29310b6`→`409129a0` BY DESIGN (5 new fields folded); record==replay still holds → determinism intact.
+- **Note:** `valid_intents=0` (KEEL :7071 down) — Phase B is LLM-free; the determinism oracle is KEEL-independent.
+- **Deferred (tracked, kept Phase B atomic):** a level-7 case added to the `gate.ps1` sacred gate; the
+  M29 *vision*-record prey-offset logic fix (`AUDIT_2026-06-15.md:207`) — both separate increments.
