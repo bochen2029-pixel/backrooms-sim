@@ -866,6 +866,16 @@ static float draft_intensity_near_shaft(uint64_t seed, int32_t level, float px, 
     return (kFar - best) / (kFar - kNear);
 }
 
+// GLM 01 Tier 1 — has the path-tracer view changed enough to need an accumulator reset? When the camera is
+// still (no move/look) the interactive PT path should KEEP accumulating (reset=false) so the image converges
+// to a clean frame at 1 spp/frame instead of 4-spp-from-scratch every frame (the noise+cost root cause). A
+// tiny epsilon absorbs float wobble; head-bob/mouse-look move the pose past it, which correctly resets.
+static inline bool pt_view_moved(const contracts::CameraPose& a, const contracts::CameraPose& b) {
+    const float dp = (a.pos[0] - b.pos[0]) * (a.pos[0] - b.pos[0]) + (a.pos[1] - b.pos[1]) * (a.pos[1] - b.pos[1])
+                   + (a.pos[2] - b.pos[2]) * (a.pos[2] - b.pos[2]);
+    return dp > 1e-8f || std::fabs(a.yaw - b.yaw) > 1e-5f || std::fabs(a.pitch - b.pitch) > 1e-5f;
+}
+
 int run_play(const Options& o) {
     using namespace br::core;
     using namespace std::chrono;
@@ -888,6 +898,7 @@ int run_play(const Options& o) {
     std::unique_ptr<br::render_dxr::DxrRenderer> dxr;
     uint32_t dxrW = 0, dxrH = 0;
     contracts::ChunkKey dxrCenter{0, static_cast<int64_t>(1) << 40, 0};
+    contracts::CameraPose dxrPrevCam{}; bool dxrHaveCam = false;  // GLM 01 Tier 1: PT temporal-accumulation state
     bool rtOn = o.rt;
     uint64_t rtFrames = 0;
     std::vector<uint8_t> lastRt;
@@ -1020,15 +1031,20 @@ int run_play(const Options& o) {
                 else { rtOn = false; dxr.reset(); }  // no DXR -> raster fallback
             }
             if (dxr) {
-                if (center != dxrCenter) { dxr->build_scene(sm.resident()); dxrCenter = center; }
+                const bool sceneRebuilt = (center != dxrCenter);
+                if (sceneRebuilt) { dxr->build_scene(sm.resident()); dxrCenter = center; }
                 // M25: the Shoggoth's body in RT -- a dynamic creature BLAS updated each
                 // frame (the chunk BLASes stay cached, so this stays cheap), material 7 so
                 // the PT shades it salmon. It shows + writhes in the ray-traced path too.
                 app::build_shoggoth_mesh(shogBody, shog.pos, shog.writhe, 1.4f);
                 for (auto& v : shogBody) v.material = 7.0f;
                 dxr->update_creature(shogBody.data(), static_cast<uint32_t>(shogBody.size()));
-                dxr->render_pt_frame(cam, 4u, static_cast<uint32_t>(o.seed) + static_cast<uint32_t>(frames), true,
-                                     true, static_cast<uint32_t>(frames));  // creature animates -> fresh frame; denoise ON
+                // GLM 01 Tier 1: temporal accumulation -- reset only on view-move / scene-rebuild / first frame, so a
+                // static view converges clean at 1 spp/frame instead of 4-spp-from-scratch (see pt_view_moved + run_game).
+                const bool ptReset = !dxrHaveCam || sceneRebuilt || pt_view_moved(cam, dxrPrevCam);
+                dxr->render_pt_frame(cam, ptReset ? 4u : 1u, static_cast<uint32_t>(o.seed) + static_cast<uint32_t>(frames),
+                                     ptReset, true, static_cast<uint32_t>(frames));
+                dxrPrevCam = cam; dxrHaveCam = true;
                 std::vector<uint8_t> rt;
                 if (dxr->readback(rt) && renderer.present_overlay_windowed(rt.data(), dxrW, dxrH)) {
                     ++rtFrames;
@@ -1446,6 +1462,7 @@ int run_game(const Options& o) {
     std::unique_ptr<br::render_dxr::DxrRenderer> dxr;
     uint32_t dxrW = 0, dxrH = 0;
     contracts::ChunkKey dxrCenter{0, static_cast<int64_t>(1) << 40, 0};
+    contracts::CameraPose dxrPrevCam{}; bool dxrHaveCam = false;  // GLM 01 Tier 1: PT temporal-accumulation state
     app::Shoggoth shog;                       // M20b: the hunting creature (spawned on New Game)
     std::vector<contracts::ChunkVertex> shogBody;
 
@@ -1847,14 +1864,22 @@ int run_game(const Options& o) {
                     else { model.settings.rt = 0; dxr.reset(); }  // DXR unavailable -> raster fallback
                 }
                 if (dxr) {
-                    if (center != dxrCenter) { dxr->build_scene(sm->resident()); dxrCenter = center; }
+                    const bool sceneRebuilt = (center != dxrCenter);
+                    if (sceneRebuilt) { dxr->build_scene(sm->resident()); dxrCenter = center; }
                     // M25: the Shoggoth's body in RT -- a dynamic creature BLAS updated each
                     // frame (chunk BLASes stay cached), material 7 so the PT shades it salmon.
                     app::build_shoggoth_mesh(shogBody, shog.pos, shog.writhe, 1.4f);
                     for (auto& v : shogBody) v.material = 7.0f;
                     dxr->update_creature(shogBody.data(), static_cast<uint32_t>(shogBody.size()));
-                    dxr->render_pt_frame(cam, 4u, static_cast<uint32_t>(texSeed) + static_cast<uint32_t>(frames), true,
-                                         true, static_cast<uint32_t>(frames));  // creature animates -> fresh frame; denoise ON
+                    // GLM 01 Tier 1: temporal accumulation. Reset the PT accumulator only when the view actually
+                    // moved (or the chunk scene rebuilt / first frame); a static view then converges clean at 1 spp/
+                    // frame instead of 4-spp-from-scratch every frame (the noise+cost root cause). Motion keeps 4 spp
+                    // (masked by movement) + denoise. The creature ghosts slightly while you stand still and it
+                    // writhes (GLM 1a) -- acceptable for v1; SVGF temporal reproject is the follow-up if it bothers.
+                    const bool ptReset = !dxrHaveCam || sceneRebuilt || pt_view_moved(cam, dxrPrevCam);
+                    dxr->render_pt_frame(cam, ptReset ? 4u : 1u, static_cast<uint32_t>(texSeed) + static_cast<uint32_t>(frames),
+                                         ptReset, true, static_cast<uint32_t>(frames));
+                    dxrPrevCam = cam; dxrHaveCam = true;
                     std::vector<uint8_t> rt;
                     if (dxr->readback(rt)) {
                         // Director VISION: every ~28 s hand the CLEAN player frame (before the caption composite

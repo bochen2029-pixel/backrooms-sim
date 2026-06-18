@@ -264,16 +264,40 @@ void build_caption_overlay(std::vector<uint8_t>& rgba, uint32_t width, uint32_t 
     // Uppercase-fold to the bitmap font's charset (lowercase -> upper; unsupported glyphs render as space).
     std::string t = text;
     for (char& c : t) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
-    // Scale the font with the render width -- a fixed scale was tiny at 4K -- and sit the line well up from
+    // Scale the font with the render width -- a fixed scale was tiny at 4K -- and sit the block well up from
     // the bottom (a fixed ~100 px margin left it nearly off-screen at 4K). A prominent lower-third subtitle.
     int scale = static_cast<int>(width) / 512;
     if (scale < 2) scale = 2;
     if (scale > 8) scale = 8;
     const int cx = static_cast<int>(width) / 2;
-    const int y = static_cast<int>(height) - static_cast<int>(height) / 7;  // ~14% up from the bottom edge
-    const int tw = text_px(t.c_str(), scale);
-    fill_rect(rgba, width, height, cx - tw / 2 - 6 * scale, y - 3 * scale, tw + 12 * scale, 7 * scale + 6 * scale, 6, 8, 7, 175);  // dim backing bar
-    draw_centered(rgba, width, height, cx, y, scale, t.c_str(), 200, 255, 210, 240);  // CRT phosphor green
+    // Word-wrap so a long line never runs off the screen edges (the Director/creature lines used to overflow a
+    // single centered row -- the runoff bug). Wrap at spaces to the widest line that fits maxW; an over-wide
+    // single word is left on its own line (rare). Then stack the lines as a lower-third block.
+    const int maxW = static_cast<int>(width) - 32 * scale;   // symmetric side margins (~16*scale each)
+    std::vector<std::string> lines;
+    for (size_t i = 0; i < t.size();) {
+        while (i < t.size() && t[i] == ' ') ++i;             // skip spaces
+        size_t j = i;
+        while (j < t.size() && t[j] != ' ') ++j;             // take one word
+        if (j == i) break;
+        const std::string word = t.substr(i, j - i);
+        i = j;
+        if (!lines.empty() && text_px((lines.back() + " " + word).c_str(), scale) <= maxW)
+            lines.back() += " " + word;                      // fits -> append to the current line
+        else
+            lines.push_back(word);                           // start a new line
+    }
+    if (lines.empty()) return;
+    const int lineH = 9 * scale;                             // 7 px glyph + 2 px lead, scaled
+    const int nLines = static_cast<int>(lines.size());
+    const int yLast = static_cast<int>(height) - static_cast<int>(height) / 7;  // last line ~14% up from the bottom
+    const int yTop = yLast - (nLines - 1) * lineH;
+    int widest = 0;
+    for (const std::string& ln : lines) { const int w = text_px(ln.c_str(), scale); if (w > widest) widest = w; }
+    fill_rect(rgba, width, height, cx - widest / 2 - 6 * scale, yTop - 3 * scale,
+              widest + 12 * scale, (nLines - 1) * lineH + 7 * scale + 6 * scale, 6, 8, 7, 175);  // dim backing bar
+    for (int k = 0; k < nLines; ++k)
+        draw_centered(rgba, width, height, cx, yTop + k * lineH, scale, lines[k].c_str(), 200, 255, 210, 240);  // CRT green
 }
 
 }  // namespace br::app

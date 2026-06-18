@@ -241,3 +241,39 @@ job is audit + fast, unambiguous rollback.
   cadences; the smoke proved they coexist debug-clean but UNarbitrated). **Verify by SOAK, not flaky threaded unit
   tests**; re-confirm `audit.ps1` record==replay after (host-side only). Then Phase F (cheap-tier hearing), G (Escape
   polish). Public-release Agility SDK.
+
+## E12 — 2026-06-18 — Playtest rendering fixes: RT temporal accumulation (GLM 01 Tier 1) + caption word-wrap
+- **What (two independent fixes the operator hit while playing the RT build):**
+  1. **RTX noise + slowness — temporal accumulation (GLM `_brainstorm/GLM/01` Tier 1).** The interactive PT path
+     passed `reset=true` to `render_pt_frame` EVERY frame → each frame was 4-spp-from-scratch (noisy) and slow
+     (shooting enough spp to look clean in one frame is expensive). Fix: at the two interactive sites (`run_game`
+     ~L1865, `run_play` ~L1041) track the previous camera (`dxrPrevCam`/`dxrHaveCam`) and `reset` ONLY when the
+     view moved / the chunk scene rebuilt / first frame (new `pt_view_moved` epsilon helper + the captured
+     `sceneRebuilt`); when static, accumulate at **1 spp/frame** (`samples = reset ? 4 : 1`). A static view now
+     converges clean instead of re-noising every frame, at ~¼ the rays. Motion keeps 4 spp + denoise (masked by
+     movement). KNOWN tradeoff (GLM 1a): the creature ghosts slightly while you stand still and it writhes —
+     acceptable for v1; SVGF temporal reproject (GLM Tier 3) is the follow-up if it bothers.
+  2. **Caption runoff.** `build_caption_overlay` (hud.cpp) drew the whole line as one centered row with NO width
+     check, so long Director/creature lines overflowed both screen edges (worst at 4K, where the RT path
+     composites at the 2/3 internal res 2560×1440 and an 86-char line at scale 5 = 2580 px > 2560). Fix:
+     word-wrap at spaces to lines that fit `width - 32*scale`, stack them as a lower-third block, size one
+     backing bar to span them.
+- **Why:** operator playtest feedback ("captions run off the sides; RT is slow and noisy as heck") — the first
+  use of the "play it first" pass. GLM doc 01 (previously UNREAD) named the exact root cause + the tiered fix.
+- **Determinism-safe:** the RT change is the INTERACTIVE path only (`render_pt_frame` in `run_game`/`run_play`);
+  the golden/offline path is the SEPARATE `render_pt` (reset=true, denoise=false) — untouched. The caption is a
+  presentation overlay. `audit.ps1` record==replay stayed green (verified).
+- **Files:** `app/src/main.cpp` (pt_view_moved + the 2 call sites + state), `app/src/hud.cpp` (caption wrap),
+  `docs/CHANGE_AUDIT_LOG.md`. **Rollback:** `git revert <commit>` — the two fixes are independent hunks (hud.cpp
+  vs main.cpp); revert one file selectively if needed.
+- **Verified:** `audit.ps1` POST — build ok | **ctest 109/109** | **record==replay** (`747aaea9…`) | inventory |
+  isolation. Caption: headless `--caption-shot` at 2560×1440 with the operator's exact long line → **wraps to 2
+  lines, no edge runoff** (and 1920 fits on one line). RT: live `--game --auto-play --rt --seconds 20` →
+  **rt_frames=2008 (~100 fps), debug_error_count=0** (the static camera exercised the new reset=false 1-spp
+  accumulation path ~2007/2008 frames — debug-clean, no crash), lookcheck PASS. A/B offscreen render
+  (`--dxr-pt`, same pose) — **4 spp grainy vs 64 spp smooth** (what a static view now converges to), both
+  debug-clean. Artifacts in `runs\rt_before_4spp.png` / `rt_after_64spp.png` / `caption_wrap_4k.png`.
+- **Tiny follow-ups (noted, not done):** the bitmap font lacks a 'J' glyph (renders as space — pre-existing,
+  visible as " UST" for "JUST"; unrelated to the runoff). GLM Tiers 2 (frame-pipeline de-sync), 3 (SVGF
+  temporal denoiser — also removes the creature ghost), 4 (cheaper light sampling) remain if more speed/quality
+  is wanted after measuring this.
