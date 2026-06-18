@@ -273,7 +273,9 @@ job is audit + fast, unambiguous rollback.
   accumulation path ~2007/2008 frames — debug-clean, no crash), lookcheck PASS. A/B offscreen render
   (`--dxr-pt`, same pose) — **4 spp grainy vs 64 spp smooth** (what a static view now converges to), both
   debug-clean. Artifacts in `runs\rt_before_4spp.png` / `rt_after_64spp.png` / `caption_wrap_4k.png`.
-- **Tiny follow-ups (noted, not done):** the bitmap font lacks a 'J' glyph (renders as space — pre-existing,
-  visible as " UST" for "JUST"; unrelated to the runoff). GLM Tiers 2 (frame-pipeline de-sync), 3 (SVGF
-  temporal denoiser — also removes the creature ghost), 4 (cheaper light sampling) remain if more speed/quality
-  is wanted after measuring this.
+- **Follow-up DONE (same change-set):** added the missing **'J' glyph** to the 5×7 bitmap font (`hud.cpp`
+  `glyph_for`) — it was absent between 'I' and 'K', so every J-word in a caption rendered with a blank ("JUST"
+  → " UST"). Verified via `--caption-shot "JUST SIX METERS AWAY..."` → renders correctly. (Captions are now
+  fully fixed: word-wrap + the complete glyph set.)
+- **Still deferred (optional, measure first):** GLM Tiers 2 (frame-pipeline de-sync — more raw fps), 3 (SVGF
+  temporal denoiser — also removes the Tier-1 creature-ghost-while-still), 4 (cheaper stochastic light sampling).

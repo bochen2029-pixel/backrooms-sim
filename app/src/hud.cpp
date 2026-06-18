@@ -36,6 +36,7 @@ const Glyph* glyph_for(char ch) {
         case 'G': { static const Glyph g = {{0b01110,0b10001,0b10000,0b10111,0b10001,0b10001,0b01111}}; return &g; }
         case 'H': { static const Glyph g = {{0b10001,0b10001,0b10001,0b11111,0b10001,0b10001,0b10001}}; return &g; }
         case 'I': { static const Glyph g = {{0b01110,0b00100,0b00100,0b00100,0b00100,0b00100,0b01110}}; return &g; }
+        case 'J': { static const Glyph g = {{0b00111,0b00001,0b00001,0b00001,0b00001,0b10001,0b01110}}; return &g; }
         case 'K': { static const Glyph g = {{0b10001,0b10010,0b10100,0b11000,0b10100,0b10010,0b10001}}; return &g; }
         case 'L': { static const Glyph g = {{0b10000,0b10000,0b10000,0b10000,0b10000,0b10000,0b11111}}; return &g; }
         case 'M': { static const Glyph g = {{0b10001,0b11011,0b10101,0b10101,0b10001,0b10001,0b10001}}; return &g; }
