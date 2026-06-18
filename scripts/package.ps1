@@ -7,7 +7,9 @@
 # The bundle ships the exe at the ROOT with runtime\{llama,keel,whisper}\ + models\ beside it; the exe
 # resolves everything exe-relative (ADR-076), so it NEVER looks at C:\models / C:\llama.cpp / C:\whisper.cpp /
 # C:\keel-sidecar-7071. Copy this folder anywhere (or zip / butler-push it) and it plays plug-and-play on a
-# Win10/11 + RTX box. The source installs still live at C:\... on the dev box; this only COPIES from them.
+# Win10/11 + RTX box. ADR-078: the runtime + models + DXC are now PERSISTENT IN-REPO assets under
+# dist\Backrooms; this script refreshes ONLY the exe (which changes per build) + the docs, verifies the
+# rest is present, and NEVER sources from C:\ or the Windows SDK. Nothing outside C:\backrooms is needed.
 [CmdletBinding()]
 param([switch]$StageOnly, [switch]$SkipBuild)
 $ErrorActionPreference = 'Stop'
@@ -15,12 +17,9 @@ $ErrorActionPreference = 'Stop'
 Ensure-Vcpkg
 Enter-VsDevEnv
 
-# --- source installs (dev box) -------------------------------------------------
-$LLAMA   = 'C:\llama.cpp'
-$WHISPER = 'C:\whisper.cpp'
-$KEEL    = 'C:\keel-sidecar-7071'
-$MODELS  = 'C:\models'
-# the ONLY model files the bundle needs (9B+mmproj vision tier, 4B text tier, whisper base.en for voice).
+# the model files the bundle needs (9B+mmproj vision tier, 4B text tier, whisper base.en for voice).
+# These + the runtime\ binaries + DXC are persistent in-repo assets under dist\Backrooms (ADR-078) --
+# never re-sourced from C:\. If a fresh checkout lacks them, restore from C:\backrooms_backups\ or the zip.
 $MODEL_FILES = @('Qwen3.5-9B-Q5_K_M.gguf', 'mmproj-F16.gguf', 'Qwen3.5-4B-Q4_K_M.gguf', 'ggml-base.en.bin')
 
 $rel   = Join-Path $RepoRoot 'build-release'
@@ -28,15 +27,8 @@ $dist  = Join-Path $RepoRoot 'dist'
 $stage = Join-Path $dist 'Backrooms'
 $zip   = Join-Path $dist 'Backrooms-portable.zip'
 
-function Find-SdkDll([string]$name) {
-    $roots = @("${env:ProgramFiles(x86)}\Windows Kits\10\bin", "$env:ProgramFiles\Windows Kits\10\bin")
-    $hits = @()
-    foreach ($r in $roots) {
-        if (Test-Path $r) { $hits += Get-ChildItem -Path $r -Recurse -Filter $name -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match '\\x64\\' } }
-    }
-    if (-not $hits) { throw "could not find $name in the Windows SDK (needed to bundle the DXR compiler)" }
-    ($hits | Sort-Object FullName -Descending | Select-Object -First 1).FullName
-}
+# (Find-SdkDll removed -- ADR-078: dxcompiler.dll/dxil.dll are persistent in-repo assets in dist\Backrooms,
+#  no longer fetched from the Windows SDK.)
 function Need([string]$p) { if (-not (Test-Path $p)) { throw "missing source: $p" }; $p }
 
 # --- 1) build release ----------------------------------------------------------
@@ -52,37 +44,27 @@ if (-not $SkipBuild) {
 }
 $exe = Need (Join-Path $rel 'bin\backrooms.exe')
 
-# --- 2) clean stage tree -------------------------------------------------------
-Write-Step "stage -> $stage"
-if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+# --- 2) refresh the exe in the IN-REPO bundle; preserve the persistent runtime/models/DXC (ADR-078) ---
+# The runtime + models + DXC were staged ONCE (ADR-076) and persist under dist\Backrooms. We do NOT
+# wipe them and do NOT re-source from C:\ / the SDK -- only the exe (which changes per build) is refreshed.
+Write-Step "refresh exe -> $stage (preserving the in-repo runtime + models + DXC)"
 foreach ($d in @('', 'runtime\llama', 'runtime\keel', 'runtime\whisper', 'models', 'licenses', 'logs')) {
     New-Item -ItemType Directory -Force -Path (Join-Path $stage $d) | Out-Null
 }
+Copy-Item $exe (Join-Path $stage 'Backrooms.exe') -Force
 
-# exe at the bundle ROOT (the exe-relative resolver finds runtime\ + models\ beside it).
-Copy-Item $exe (Join-Path $stage 'Backrooms.exe')
-
-# DXR shader compiler (redistributable) next to the exe, so DXR works with no Windows SDK installed.
-Copy-Item (Find-SdkDll 'dxcompiler.dll') (Join-Path $stage 'dxcompiler.dll')
-Copy-Item (Find-SdkDll 'dxil.dll')       (Join-Path $stage 'dxil.dll')
-Write-Note "bundled DXC (dxcompiler.dll + dxil.dll)"
-
-# --- 3) llama runtime: the server stub + ALL its DLLs (guaranteed-complete; the spare ggml-cpu-* are ~1 MB each) ---
-Write-Step "copy llama runtime (~1.1 GB of CUDA DLLs)"
-Copy-Item (Need (Join-Path $LLAMA 'llama-server.exe')) (Join-Path $stage 'runtime\llama')
-Get-ChildItem (Join-Path $LLAMA '*.dll') | Copy-Item -Destination (Join-Path $stage 'runtime\llama')
-
-# --- 4) keel sidecar: the binary + its lock (probe-and-reuse :8080; the C:\ paths in the lock stay vestigial) ---
-Copy-Item (Need (Join-Path $KEEL 'keel-serve.exe')) (Join-Path $stage 'runtime\keel')
-Copy-Item (Need (Join-Path $KEEL 'keel.lock'))      (Join-Path $stage 'runtime\keel')
-
-# --- 5) whisper runtime: the CLI + its DLLs (CPU; the user's speech transcription) ---
-Copy-Item (Need (Join-Path $WHISPER 'whisper-cli.exe')) (Join-Path $stage 'runtime\whisper')
-Get-ChildItem (Join-Path $WHISPER '*.dll') | Copy-Item -Destination (Join-Path $stage 'runtime\whisper')
-
-# --- 6) models (only the needed ones) ------------------------------------------
-Write-Step "copy models (~9.9 GB) -- this is the slow part"
-foreach ($m in $MODEL_FILES) { Copy-Item (Need (Join-Path $MODELS $m)) (Join-Path $stage 'models') }
+# --- 3) verify the persistent in-repo assets are present (NEVER copied from C:\ / SDK) ---
+$required = @('dxcompiler.dll', 'dxil.dll',
+              'runtime\llama\llama-server.exe', 'runtime\keel\keel-serve.exe', 'runtime\keel\keel.lock',
+              'runtime\whisper\whisper-cli.exe') + ($MODEL_FILES | ForEach-Object { "models\$_" })
+$missing = @()
+foreach ($r in $required) { if (-not (Test-Path (Join-Path $stage $r))) { $missing += $r } }
+if ($missing.Count -gt 0) {
+    Write-Fail "the in-repo bundle is missing persistent assets (restore from C:\backrooms_backups\ or the zip; package.ps1 no longer sources C:\ / the SDK):"
+    $missing | ForEach-Object { Write-Host "    $_" }
+    throw "incomplete in-repo runtime under $stage"
+}
+Write-Ok "in-repo runtime + models + DXC verified present (no external C:\ / Windows SDK source)"
 
 # --- 7) credits / licenses / readme / launcher --------------------------------
 & $exe --credits | Out-File -Encoding ASCII (Join-Path $stage 'CREDITS.txt')

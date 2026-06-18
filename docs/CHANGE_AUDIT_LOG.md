@@ -126,3 +126,24 @@ job is audit + fast, unambiguous rollback.
   (mutex + condvar around `KeelScheduler`, runs each admitted thunk on the host thread) + route the
   live hosts (DirectorVisionHost / DirectorChatHost / ShoggothBrainHost) through it + the concurrency
   soak gate (frame p99 < 2× median; vision never delays a queued player-speech turn beyond one slot).
+
+## E7 — 2026-06-17 — Fully self-contained AI runtime: no C:\ dependency, ever [ADR-078]
+- **What:** closed the dev-tree + packaging C:\ leaks (the *bundle* was already self-contained per
+  ADR-076; GLM doc 04 named the rest). `main.cpp` `bundled_w/a` fall back to the in-repo
+  `dist\Backrooms` (`..\..\dist\Backrooms`), never C:\; the hearing-record hardcoded model path now
+  uses `default_whisper_model()`. New `scripts/keel-up.ps1` + `keel-down.ps1` start/stop the bundled
+  sidecar from `dist\Backrooms` (the in-tree replacement for `C:\keel-sidecar-7071\start.cmd`).
+  `gate.ps1`'s 7 stale C:\ hints → `keel-up.ps1`. `package.ps1` treats runtime/models/DXC as
+  persistent in-repo assets (refresh exe only; verify the rest; never C:\/SDK). `keel.lock` C:\ paths
+  → bundle-relative (gitignored artifact).
+- **Why:** operator mandate — never need anything outside `C:\backrooms` again.
+- **Files:** `app/src/main.cpp`, `scripts/package.ps1`, `scripts/gate.ps1`, `scripts/keel-up.ps1`
+  (new), `scripts/keel-down.ps1` (new), `docs/DECISIONS.md` (ADR-078). **Rollback:** `git revert <commit>`.
+- **Verification (entirely from C:\backrooms):** `keel-up.ps1` brought up llama :8080 + keel :7071 from
+  `dist\Backrooms`; sacred record→replay **`valid_intents=5`** + **record==replay `1ade340c4648b041`**
+  (the full sacred-gate assertion, UNBLOCKED, zero external C:\). `audit.ps1` PASS: build ok, ctest
+  **109/109**, determinism (real intents) record==replay, inventory + isolation green; main.cpp
+  resolver C:\ refs = 0.
+- **Deferred (doc 04):** Tier-1 console fix (`WIN32_EXECUTABLE` — must verify it doesn't break the
+  gates' stdout capture); exe-relative DXC probe (the dev exe's DXR still finds `dxcompiler.dll` via
+  the Windows SDK); manifest hash-pinning (Gap D), DLL allowlist (Gap E), end-to-end bundle smoke (Gap J).

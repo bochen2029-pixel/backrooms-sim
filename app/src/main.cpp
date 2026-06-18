@@ -553,9 +553,9 @@ static void speak_pa(const std::string& text, uint32_t sr) {
 
 // ===== ADR-076: self-contained portable bundle ============================================
 // The portable build ships its runtime + models UNDER the exe: runtime\llama\, runtime\keel\,
-// runtime\whisper\, models\. These resolve exe-relative; if absent (this dev tree, where the
-// exe is in build-release\bin), they fall back to the C:\ dev install -- so the repo keeps
-// building/running while the BUNDLE never needs to look at C:\.
+// runtime\whisper\, models\. These resolve exe-relative; if absent (this dev tree, where the exe is
+// in build[-release]\bin), they fall back to the IN-REPO dist\Backrooms bundle (ADR-078) -- so the
+// repo keeps building/running and NOTHING outside C:\backrooms is ever needed (no C:\llama.cpp etc.).
 static std::wstring exe_dir_w() {
     wchar_t buf[MAX_PATH]; const DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
     std::wstring p(buf, (n > 0 && n < MAX_PATH) ? n : 0u);
@@ -572,19 +572,24 @@ static std::wstring parent_dir_w(const std::wstring& path) {
     const size_t s = path.find_last_of(L"\\/");
     return (s == std::wstring::npos) ? std::wstring() : path.substr(0, s + 1);
 }
-// The bundled path under the exe if it exists, else the C:\ dev fallback.
-static std::wstring bundled_w(const wchar_t* rel, const wchar_t* fallback) {
+// The bundled path under the exe if it exists (the portable bundle), else the IN-REPO dev bundle at
+// dist\Backrooms (two levels up from build[-release]\bin). ADR-078: never C:\ -- the repo's own dist\
+// runtime is the dev fallback, so nothing outside C:\backrooms is ever needed. (The 2nd arg is now
+// vestigial; the fallback is computed in-repo. Kept optional so existing call sites still compile.)
+static std::wstring bundled_w(const wchar_t* rel, const wchar_t* = nullptr) {
     const std::wstring cand = exe_dir_w() + rel;
-    return (GetFileAttributesW(cand.c_str()) != INVALID_FILE_ATTRIBUTES) ? cand : std::wstring(fallback);
+    if (GetFileAttributesW(cand.c_str()) != INVALID_FILE_ATTRIBUTES) return cand;
+    return exe_dir_w() + L"..\\..\\dist\\Backrooms\\" + rel;   // dev tree -> <repo>\dist\Backrooms\<rel>
 }
-static std::string bundled_a(const char* rel, const char* fallback) {
+static std::string bundled_a(const char* rel, const char* = nullptr) {
     const std::string cand = exe_dir_a() + rel;
-    return (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) ? cand : std::string(fallback);
+    if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) return cand;
+    return exe_dir_a() + "..\\..\\dist\\Backrooms\\" + rel;
 }
-// whisper-cli + model defaults: the BUNDLE ships whisper-cli + ggml-base.en under the exe; the dev box
-// falls back to its C:\ install (large-v3-turbo there, so the dev/gate behaviour is byte-unchanged).
-static std::string default_whisper_exe()   { return bundled_a("runtime\\whisper\\whisper-cli.exe", "C:\\whisper.cpp\\whisper-cli.exe"); }
-static std::string default_whisper_model() { return bundled_a("models\\ggml-base.en.bin",          "C:\\models\\ggml-large-v3-turbo.bin"); }
+// whisper-cli + model defaults: the bundle ships whisper-cli + ggml-base.en under the exe; the dev
+// tree now falls back to the IN-REPO dist\Backrooms\ copy (ADR-078) -- base.en on the dev box too.
+static std::string default_whisper_exe()   { return bundled_a("runtime\\whisper\\whisper-cli.exe"); }
+static std::string default_whisper_model() { return bundled_a("models\\ggml-base.en.bin"); }
 
 // Largest adapter's dedicated VRAM in MB (DXGI). 0 if unavailable -> treated as unknown (-> default 9B tier).
 static unsigned detect_vram_mb() {
@@ -640,11 +645,11 @@ static void try_start_sidecar() {
     if (tried) return;
     tried = true;
 
-    const std::wstring llamaExe = bundled_w(L"runtime\\llama\\llama-server.exe", L"C:\\llama.cpp\\llama-server.exe");
-    const std::wstring keelExe  = bundled_w(L"runtime\\keel\\keel-serve.exe",    L"C:\\keel-sidecar-7071\\keel-serve.exe");
-    const std::wstring model9b  = bundled_w(L"models\\Qwen3.5-9B-Q5_K_M.gguf",   L"C:\\models\\Qwen3.5-9B-Q5_K_M.gguf");
-    const std::wstring model4b  = bundled_w(L"models\\Qwen3.5-4B-Q4_K_M.gguf",   L"C:\\models\\Qwen3.5-4B-Q4_K_M.gguf");
-    const std::wstring mmproj   = bundled_w(L"models\\mmproj-F16.gguf",          L"C:\\models\\mmproj-F16.gguf");
+    const std::wstring llamaExe = bundled_w(L"runtime\\llama\\llama-server.exe");
+    const std::wstring keelExe  = bundled_w(L"runtime\\keel\\keel-serve.exe");
+    const std::wstring model9b  = bundled_w(L"models\\Qwen3.5-9B-Q5_K_M.gguf");
+    const std::wstring model4b  = bundled_w(L"models\\Qwen3.5-4B-Q4_K_M.gguf");
+    const std::wstring mmproj   = bundled_w(L"models\\mmproj-F16.gguf");
     const std::wstring logDir   = exe_dir_w() + L"logs\\"; CreateDirectoryW(logDir.c_str(), nullptr);
 
     const unsigned vram = detect_vram_mb();
@@ -3404,7 +3409,7 @@ int run_shoggoth_hearing_record(const Options& o) {
     using namespace br::core;
     std::string host; int port; parse_host_port(o.director_url, host, port);
     const std::string wexe = o.whisper_exe.empty() ? default_whisper_exe() : o.whisper_exe;
-    const std::string wmodel = o.whisper_model.empty() ? std::string("C:\\models\\ggml-base.en.bin") : o.whisper_model;
+    const std::string wmodel = o.whisper_model.empty() ? default_whisper_model() : o.whisper_model;
     const uint64_t N = (o.ticks > 0) ? o.ticks : 1800u;
     const uint64_t kBrainEvery = 240u;
     const std::string wav = o.out.empty() ? std::string("runs/shoggoth_hearing.wav") : o.out;

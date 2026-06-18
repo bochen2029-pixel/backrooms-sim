@@ -1154,7 +1154,7 @@ function Invoke-GateM11 {
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
     # The Director routes to the KEEL sidecar (ADR-038). It must be reachable, else
-    # the gate is vacuous. (Relaunch: C:\keel-sidecar-7071\start.cmd.)
+    # the gate is vacuous. (Relaunch: scripts\keel-up.ps1.)
     Assert-Gate 'KEEL sidecar reachable (Director inference endpoint :7071)' {
         $r = Invoke-AppCapture @('--director-probe', '--seed', '1')
         if ($r.Exit -ne 0) { throw "director-probe exited $($r.Exit): $($r.Out)" }
@@ -2033,7 +2033,7 @@ function Invoke-GateM21 {
         $rec = Invoke-AppCapture @('--shoggoth-record', '--director-url', 'http://127.0.0.1:7071', '--director-log', $slog, '--seed', '3', '--ticks', '1200')
         if ($rec.Exit -ne 0) { throw "record exited $($rec.Exit): $($rec.Out)" }
         $valid = Get-Metric $rec.Out 'valid_intents'
-        if ($valid -lt 1) { throw "the brain produced no valid intents -- is the KEEL sidecar up at :7071? (C:\keel-sidecar-7071\start.cmd)" }
+        if ($valid -lt 1) { throw "the brain produced no valid intents -- is the KEEL sidecar up at :7071? (scripts\keel-up.ps1)" }
         $recHash = Get-MetricStr $rec.Out 'combined_hash'
         $rep = Invoke-AppCapture @('--shoggoth-replay', '--director-log', $slog)
         if ($rep.Exit -ne 0) { throw "replay exited $($rep.Exit): $($rep.Out)" }
@@ -2092,11 +2092,11 @@ function Invoke-GateM21b {
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
     # The live brain reuses the Director's KEEL sidecar (:7071). It must be up for the
-    # "it thinks live" assertion, else that check is vacuous. (Relaunch: C:\keel-sidecar-7071\start.cmd.)
+    # "it thinks live" assertion, else that check is vacuous. (Relaunch: scripts\keel-up.ps1.)
     Assert-Gate 'KEEL sidecar reachable (:7071, the brain endpoint)' {
         $r = Invoke-AppCapture @('--director-probe', '--seed', '1')
         if ($r.Exit -ne 0) { throw "director-probe exited $($r.Exit): $($r.Out)" }
-        if ((Get-Metric $r.Out 'keel_ok') -ne 1) { throw "KEEL not reachable at :7071 (C:\keel-sidecar-7071\start.cmd)" }
+        if ((Get-Metric $r.Out 'keel_ok') -ne 1) { throw "KEEL not reachable at :7071 (scripts\keel-up.ps1)" }
     }
 
     # THE M21b GATE: with the brain ON, the creature THINKS LIVE (>=1 KEEL intent applied
@@ -2224,7 +2224,7 @@ function Invoke-GateM22 {
     Assert-Gate 'KEEL sidecar reachable (:7071, the brain/vision endpoint)' {
         $r = Invoke-AppCapture @('--director-probe', '--seed', '1')
         if ($r.Exit -ne 0) { throw "director-probe exited $($r.Exit): $($r.Out)" }
-        if ((Get-Metric $r.Out 'keel_ok') -ne 1) { throw "KEEL not reachable at :7071 (C:\keel-sidecar-7071\start.cmd)" }
+        if ((Get-Metric $r.Out 'keel_ok') -ne 1) { throw "KEEL not reachable at :7071 (scripts\keel-up.ps1)" }
     }
 
     # THE SACRED GATE, NOW WITH EYES: the Shoggoth renders its POV to an offscreen
@@ -2323,7 +2323,7 @@ function Invoke-GateM23 {
     Assert-Gate 'KEEL sidecar reachable (:7071, the brain endpoint)' {
         $r = Invoke-AppCapture @('--director-probe', '--seed', '1')
         if ($r.Exit -ne 0) { throw "director-probe exited $($r.Exit): $($r.Out)" }
-        if ((Get-Metric $r.Out 'keel_ok') -ne 1) { throw "KEEL not reachable at :7071 (C:\keel-sidecar-7071\start.cmd)" }
+        if ((Get-Metric $r.Out 'keel_ok') -ne 1) { throw "KEEL not reachable at :7071 (scripts\keel-up.ps1)" }
     }
 
     # THE SACRED GATE, NOW WITH EARS: the Shoggoth renders the soundscape at its vantage,
@@ -2427,7 +2427,7 @@ function Invoke-GateM24 {
     Assert-Gate 'KEEL sidecar reachable (:7071, the brain endpoint)' {
         $r = Invoke-AppCapture @('--director-probe', '--seed', '1')
         if ($r.Exit -ne 0) { throw "director-probe exited $($r.Exit): $($r.Out)" }
-        if ((Get-Metric $r.Out 'keel_ok') -ne 1) { throw "KEEL not reachable at :7071 (C:\keel-sidecar-7071\start.cmd)" }
+        if ((Get-Metric $r.Out 'keel_ok') -ne 1) { throw "KEEL not reachable at :7071 (scripts\keel-up.ps1)" }
     }
 
     # THE TTS IS INTELLIGIBLE: the procedural formant voice (no assets) speaks a PA line and
