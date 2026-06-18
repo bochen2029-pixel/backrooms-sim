@@ -79,8 +79,20 @@ leaks (GLM doc 04): main.cpp `bundled_w/a` fall back to in-repo `dist\Backrooms`
 persistent in-repo assets (refresh exe only, never C:\/SDK); keel.lock C:\ → bundle-relative. **PROVEN
 from C:\backrooms only:** keel-up brought up llama :8080 + keel :7071 from the bundle → sacred
 record→replay `valid_intents=5` + record==replay `1ade340c4648b041`. To bring KEEL up for any gate /
-Phase C.2 / D: `scripts\keel-up.ps1`. Deferred (doc 04): Tier-1 console fix (release-only
-`WIN32_EXECUTABLE`) + exe-relative DXC probe; GLM doc 01 (RT perf) unread.
+Phase C.2 / D: `scripts\keel-up.ps1`.
+
+**NO DOS WINDOW + IMMERSIVE SHOGGOTH (E8-E10).** (E8, `6f12d56`) the RELEASE exe is now /SUBSYSTEM:WINDOWS
+(`WIN32_EXECUTABLE`, release-only so the debug gates keep stdout) -- no console popup ever; RUN.cmd
+removed. (E9, `ad92984`) Shoggoth Phase D/E core: `resolve_target` (semantic target_kind -> real goal
+cell) wired into `shoggoth_step`; the vision prompt + parser carry the full semantic schema + utterance;
+VISION record==replay `valid_intents=3` (`a91b512d`) -- the eyes steer the creature, deterministically.
+(E10, `2bc9b18`) Phase E LIVE: the creature SPEAKS impressionistic murmurs in the playable game
+(`render_shoggoth_prompt` returns an utterance; `run_game` speaks it via `speak_pa` when near + new +
+cooled-down; presentation-only). **In-game the creature now THINKS + SPEAKS + HUNTS live, and its
+(determinism-proven) vision drives motion.** REMAINING piece for live PIXEL-vision: an in-game
+creature-POV offscreen render needs a 2nd headless D3D12 device (render_chunks/readback are headless-only)
+feeding a live `ShoggothVisionHost` -- a careful dual-device increment (ADR-077 makes it viable), not
+rushed. Also deferred: Phase C.2 broker integration; live cheap-tier hearing; GLM doc 01 (RT perf) unread.
 
 ---
 
