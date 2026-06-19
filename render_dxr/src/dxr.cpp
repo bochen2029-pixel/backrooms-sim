@@ -974,7 +974,7 @@ bool DxrRenderer::build_scene(const std::vector<contracts::ResidentChunk>& chunk
 
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tin{};
     tin.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
-    tin.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    tin.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;   // RT_PERF item B2: rebuilt frequently (per-frame by update_creature) -> fast BUILD
     tin.NumDescs = static_cast<UINT>(instances.size());
     tin.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
     tin.InstanceDescs = instBuf->GetGPUVirtualAddress();
@@ -1143,7 +1143,7 @@ bool DxrRenderer::update_creature(const contracts::ChunkVertex* verts, uint32_t 
     geo.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS bin{};
     bin.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-    bin.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    bin.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;   // RT_PERF item B2: rebuilt every frame -> fast BUILD
     bin.NumDescs = 1; bin.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY; bin.pGeometryDescs = &geo;
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO bpi{};
     d.device->GetRaytracingAccelerationStructurePrebuildInfo(&bin, &bpi);
@@ -1177,7 +1177,7 @@ bool DxrRenderer::update_creature(const contracts::ChunkVertex* verts, uint32_t 
     instBuf->Unmap(0, nullptr);
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tin{};
     tin.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
-    tin.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    tin.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;   // RT_PERF item B2: rebuilt frequently (per-frame by update_creature) -> fast BUILD
     tin.NumDescs = static_cast<UINT>(instances.size());
     tin.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
     tin.InstanceDescs = instBuf->GetGPUVirtualAddress();
@@ -1334,28 +1334,26 @@ bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t sam
             d.list->CopyTextureRegion(&ddst, 0, 0, 0, &dsrc, nullptr);
             const D3D12_RESOURCE_BARRIER dBack = transition(d.depthTex.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             d.list->ResourceBarrier(1, &dBack);
-            if (!denoise) copy_color();   // denoise off: color is final here
+            if (denoise) {
+                // RT_PERF item B1: fold the denoise dispatch into THIS list -> one ExecuteCommandLists + wait_idle
+                // for the frame instead of two. The accumulate pass (uResolve==2) wrote g_accum + g_guide; a UAV
+                // barrier makes those writes visible to the denoise pass (uResolve==3) which reads them and writes
+                // the resolved color. Root sig/PSO/heaps/SRVs stay bound from bind_pt() above; only constants change.
+                D3D12_RESOURCE_BARRIER uavb[2]{};
+                uavb[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; uavb[0].UAV.pResource = d.accumTex.Get();
+                uavb[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; uavb[1].UAV.pResource = d.guideTex.Get();
+                d.list->ResourceBarrier(2, uavb);
+                uint32_t cd[28] = {};
+                cd[18] = total; cd[20] = 3u; setf(cd, 21, kPtExposure);
+                setf(cd, 22, static_cast<float>(d.width)); setf(cd, 23, static_cast<float>(d.height));
+                cd[24] = frame;
+                d.list->SetComputeRoot32BitConstants(0, 28, cd, 0);
+                d.list->DispatchRays(&dr);
+            }
+            copy_color();   // denoise off: the uResolve==1 tonemap is final; denoise on: the fold above made it final
         }
 
         if (FAILED(d.list->Close())) { last_error_ = "pt list close"; return false; }
-        ID3D12CommandList* lists[] = { d.list.Get() };
-        d.queue->ExecuteCommandLists(1, lists);
-        d.wait_idle();
-    }
-
-    if (denoise) {
-        // Edge-aware filter: read the accumulated radiance + the geometry guide, write the resolved color.
-        // The accumulate list already waited, so those writes are complete (no cross-list UAV barrier needed).
-        uint32_t c[28] = {};
-        c[18] = total; c[20] = 3u; setf(c, 21, kPtExposure);
-        setf(c, 22, static_cast<float>(d.width)); setf(c, 23, static_cast<float>(d.height));
-        c[24] = frame;
-        if (FAILED(d.alloc->Reset())) { last_error_ = "pt alloc reset (denoise)"; return false; }
-        if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "pt list reset (denoise)"; return false; }
-        bind_pt(c);
-        d.list->DispatchRays(&dr);
-        copy_color();
-        if (FAILED(d.list->Close())) { last_error_ = "pt denoise list close"; return false; }
         ID3D12CommandList* lists[] = { d.list.Get() };
         d.queue->ExecuteCommandLists(1, lists);
         d.wait_idle();
