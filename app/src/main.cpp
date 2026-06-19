@@ -1980,6 +1980,16 @@ int run_game(const Options& o) {
                     float flareGpu[256];   // up to 64 flares x float4 {x,y,z,intensity}
                     const uint32_t nFlares = flares.pack_nearest(Vec3{ cam.pos[0], cam.pos[1], cam.pos[2] }, 2.2f, 64u, flareGpu);
                     dxr->set_flares(flareGpu, nFlares);                 // green breadcrumbs near the eye (RT)
+                    // Apparition Phase 2b.2: the dread dim on the RT path too. Mirrors the raster computation (same 2a
+                    // window/strength). Applied POST-accumulation in the PT shader -> deliberately NOT part of ptReset
+                    // (changing it needs no accumulator reset -> the dim decays smoothly, no re-noising).
+                    float dreadRt = 1.0f;
+                    if (now < apparitionUntil) {
+                        const float frac = clampf(duration<float>(apparitionUntil - now).count() / apparitionWindowS, 0.0f, 1.0f);
+                        const float maxDim = 0.18f + 0.12f * static_cast<float>(apparitionStrength);  // keep in sync with the raster dread
+                        dreadRt = 1.0f - maxDim * frac;
+                    }
+                    dxr->set_dread(dreadRt);
                     const bool ptReset = !dxrHaveCam || sceneRebuilt || flashChanged || flaresChanged || pt_view_moved(cam, dxrPrevCam);
                     flaresChanged = false;
                     dxr->render_pt_frame(cam, ptReset ? 4u : 1u, static_cast<uint32_t>(texSeed) + static_cast<uint32_t>(frames),

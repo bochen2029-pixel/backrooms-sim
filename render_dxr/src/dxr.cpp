@@ -205,6 +205,7 @@ struct DxrRenderer::Impl {
     ComPtr<ID3D12Resource> ptSbt;          // raygen-only table
     uint32_t accumSamples = 0;             // spp accumulated since the last reset
     float flashIntensity = 0.0f;           // interactive flashlight (0 = off -> goldens bit-identical)
+    float dread = 1.0f;                     // Apparition Phase 2b.2: post-accum PT dim (1.0 = off -> goldens bit-identical)
     ComPtr<ID3D12Resource> flareBuf;       // up to kFlareGpuMax green flares (StructuredBuffer t2); upload heap
     uint32_t flareCount = 0;               // active flares this frame (0 = none -> shader branches skipped)
 
@@ -579,7 +580,7 @@ cbuffer PT : register(b0) {
     float3 uUp;    float uFar;
     uint uSampleStart; uint uSampleCount; uint uTotal; uint uSeed;
     uint uResolve; float uExposure; float uWidth; float uHeight;  // uResolve: 0 accum, 1 accum+tonemap, 2 accum+guide, 3 denoise
-    uint uFrame; float uFlashI; uint uFlareN; uint uPad2;        // uFlashI: flashlight; uFlareN: active green flare count (0=none)
+    uint uFrame; float uFlashI; uint uFlareN; float uDread;      // uFlashI flashlight; uFlareN green flares (0=none); uDread apparition dim (1.0=off)
 };
 RWTexture2D<float4> g_out   : register(u0);
 RWTexture2D<float>  g_depth : register(u1);
@@ -736,7 +737,9 @@ void denoise_resolve(uint2 px, uint2 dim){
     float3 cC = aC.rgb / max(aC.a, 1.0);   // per-pixel count: creature pixels = this frame only -> no ghost
     if (zC <= 0.0){                                   // background / miss: nothing to denoise, tonemap raw
         float3 b = cC * uExposure; b = b / (b + 1.0);
-        g_out[px] = float4(saturate(b), 1.0);
+        float3 ob = saturate(b);
+        [branch] if (uDread < 1.0) ob *= uDread;   // Apparition 2b.2 dread dim (denoised background)
+        g_out[px] = float4(ob, 1.0);
         return;
     }
     float lC = luma(cC);
@@ -761,7 +764,9 @@ void denoise_resolve(uint2 px, uint2 dim){
     }
     float3 outc = sum / max(wsum, 1e-4);
     float3 c = outc * uExposure; c = c / (c + 1.0);   // Reinhard
-    g_out[px] = float4(saturate(c), 1.0);
+    float3 oc = saturate(c);
+    [branch] if (uDread < 1.0) oc *= uDread;   // Apparition 2b.2 dread dim (denoised foreground)
+    g_out[px] = float4(oc, 1.0);
 }
 
 [shader("raygeneration")]
@@ -834,7 +839,9 @@ void RayGen(){
             float3 c = total / max(pixCount, 1.0);   // per-pixel count (== uTotal in the golden path -> bit-identical)
             c *= uExposure;
             c = c / (c + 1.0);          // Reinhard
-            g_out[px] = float4(saturate(c), 1.0);
+            float3 oc = saturate(c);
+            [branch] if (uDread < 1.0) oc *= uDread;   // Apparition 2b.2: post-accum dread dim (off=1.0 -> skipped, goldens bit-identical)
+            g_out[px] = float4(oc, 1.0);
         }
         // uResolve == 2u: denoise ON -> the separate filter pass writes g_out from g_accum + g_guide
     }
@@ -1336,6 +1343,7 @@ bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t sam
         c[24] = frame;  // uFrame: per-frame noise decorrelation (0 for the deterministic offline/golden path)
         setf(c, 25, d.flashIntensity);  // uFlashI: interactive flashlight (0 = off -> shader branch skipped, goldens bit-identical)
         c[26] = d.flareCount;           // uFlareN: active green flares (0 = none -> flare branches skipped, goldens bit-identical)
+        setf(c, 27, d.dread);           // uDread: apparition dim (1.0 = off -> shader branch skipped, goldens bit-identical)
 
         if (FAILED(d.alloc->Reset())) { last_error_ = "pt alloc reset"; return false; }
         if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "pt list reset"; return false; }
@@ -1363,6 +1371,7 @@ bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t sam
                 cd[18] = total; cd[20] = 3u; setf(cd, 21, kPtExposure);
                 setf(cd, 22, static_cast<float>(d.width)); setf(cd, 23, static_cast<float>(d.height));
                 cd[24] = frame;
+                setf(cd, 27, d.dread);   // uDread: the denoise filter pass dims too (1.0=off -> branch skipped, goldens bit-identical; the accumulate cbuffer above sets it separately)
                 d.list->SetComputeRoot32BitConstants(0, 28, cd, 0);
                 d.list->DispatchRays(&dr);
             }
@@ -1384,6 +1393,7 @@ bool DxrRenderer::render_pt(const contracts::CameraPose& cam, uint32_t samples, 
 }
 
 void DxrRenderer::set_flashlight(bool on) { if (impl_) impl_->flashIntensity = on ? kFlashIntensity : 0.0f; }
+void DxrRenderer::set_dread(float dim01) { if (impl_) impl_->dread = dim01 < 0.0f ? 0.0f : (dim01 > 1.0f ? 1.0f : dim01); }  // Apparition 2b.2; 1.0 = off
 
 void DxrRenderer::set_flares(const float* xyzi, uint32_t count) {
     if (!impl_) return;

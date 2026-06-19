@@ -16,6 +16,11 @@ self-contained, ADR-035), `stream`.
   (RGBA) + `readback_depth` (per-pixel NDC depth, same hyperbolic mapping as
   render_d3d12's depth buffer — the cross-renderer depth gate). Exposed via
   `app --dxr` / `--dxr-test` / `--dxr-depth`.
+- `render_dxr/dxr.h` — interactive presentation hooks, each default-OFF so the offline/golden path stays
+  bit-identical (the shader call sites are `[branch]`-guarded): `set_flashlight` (eye-torch), `set_flares`
+  (green chemlight analytic point lights), `set_dread` (Apparition Phase 2b.2: a soft **post-accumulation** dim
+  of the PT output while a verdict lingers — applied at the tonemap, so it never pollutes the radiance accumulator
+  and needs no reset; `1.0`=off → `uDread` branch skipped → goldens exact).
 - `render_dxr/render_dxr.h` — identity stub (module banner).
 - `dxc.*` (internal) — runtime DXC wrapper: loads `dxcompiler.dll`/`dxil.dll`,
   compiles HLSL → signed SM 6.3 DXIL.

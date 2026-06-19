@@ -97,6 +97,13 @@ public:
     // flare branches are skipped). The caller pre-culls to the nearest few; this uploads them for the next render.
     void set_flares(const float* xyzi, uint32_t count);
 
+    // Apparition Phase 2b.2 (default 1.0 = OFF): a soft "dread" dim of the path-traced output while a recent
+    // apparition verdict lingers. Applied POST-accumulation (a display multiply on the final tonemapped color),
+    // so it never pollutes the radiance accumulator and can decay per-frame with no reset / no re-noising.
+    // 1.0 (the default, and the only state the offline/golden path ever uses) keeps the PT output bit-identical:
+    // the shader's `[branch] if (uDread < 1.0)` is skipped. Clamped to [0,1].
+    void set_dread(float dim01);
+
     // Samples accumulated into the current (un-reset) image — 0 right after a reset.
     uint32_t accum_samples() const;
 

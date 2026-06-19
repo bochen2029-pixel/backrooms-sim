@@ -59,8 +59,12 @@ using the same event-log shape. Built after Phase 1 greens.
 > in `render_chunks_windowed` **only**, driven from the same 2a window (depth `1-(0.18+0.12·strength)·frac`, ~0.70×..0.46×).
 > Chosen as a CPU-side global scalar (NOT the light-index `FlickerSector`), injected only on the windowed path → **the
 > golden path `render_chunks` is untouched, goldens bit-identical by construction**; `gate M5` PASSED (lit walk 132 FPS
-> debug-clean), two raster smokes debug-clean. **Phase 2b.2 (remaining): the RT path** — a `uDread` PT cbuffer scalar,
-> `[branch]`-guarded in `dxr.cpp` (the flashlight pattern, golden-bit-identical when off), gate M9.
+> debug-clean), two raster smokes debug-clean.
+> **Phase 2b.2 — DONE (RT)** (ADR-084, ledger E27, tag `phase2b-rt`). `DxrRenderer::set_dread` → a `uDread` PT cbuffer
+> scalar → a `[branch]`-guarded multiply applied **post-accumulation** at all three tonemap writes (so it never pollutes
+> `g_accum`; omitted from `ptReset` → decays with no re-noise). Gate M9 PASSED (converged golden bit-identical, denoiser
+> 0.362 restored after fixing a denoise-cbuffer bug); live `--game --rt` smoke caught a **face** verdict (strength 2 →
+> dread 0.58) that dimmed the PT lights debug-clean. **The apparition atmosphere is now complete on BOTH raster + RT.**
 
 ## 4. Schema changes (minimal, version-stable)
 > **As built (reconciled after a QC, ADR-082/083/083a).** The proposal below sketched a nested `Apparition` struct +

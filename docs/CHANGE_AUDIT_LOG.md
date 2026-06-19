@@ -605,3 +605,27 @@ job is audit + fast, unambiguous rollback.
   `debug_error_count=0`, `lookcheck PASS`, player-reads fired (apparition sparse → no hit landed those runs; activation
   is mechanically certain via the proven 2a `apparitionUntil` path). Tunables: `maxDim` depth + `apparitionWindowS`.
 - **Next:** 2b.2 — the RT path (a `uDread` PT cbuffer scalar, `[branch]`-guarded like the flashlight; gate M9).
+
+## E27 — 2026-06-19 — Apparition Phase 2b.2: the VISUAL dread dim on the RAY-TRACED path [ADR-084]
+- **What:** the dread dim now also dims the path-traced view (RT is playable post-Session-40). `DxrRenderer::set_dread(float)`
+  (1.0=off) → a `uDread` PT cbuffer scalar (repurposed the spare `uPad2`, index 27) → a `[branch] if (uDread < 1.0) oc *= uDread`
+  applied **POST-accumulation** at all three tonemap write points (inline `uResolve==1` + the denoise pass's background
+  and foreground). Post-accum = a display multiply on the final color, so it **never pollutes `g_accum`** and is
+  deliberately omitted from `ptReset` → the dim decays smoothly with no accumulator reset / no re-noising. `run_game`
+  drives it from the same 2a window (mirrors the raster computation).
+- **Bug found + fixed (root cause, not forward-debug):** first M9 run FAILED — the denoiser made the image worse
+  (`err_on 92.976 >> err_off 12.698`). Cause: the denoise pass (`uResolve==3`) builds its **own** zero-init cbuffer
+  `cd[28]` and only sets the fields it used, so `cd[27]` (uDread) was 0.0 → `0.0 < 1.0` → the new branch multiplied the
+  denoised output by **zero** (black). Fix: one line — `setf(cd, 27, d.dread)` in the denoise cbuffer. (The accumulate
+  cbuffer `c[28]` already set index 27; only the separate denoise fill missed the new field.)
+- **Determinism / no breakage:** presentation-only; `uDread` defaults 1.0 → `[branch]` skipped → goldens bit-identical
+  (the offline/golden path never calls `set_dread`). Same guard discipline as the flashlight/flares.
+- **Files:** `render_dxr/include/render_dxr/dxr.h` (+`set_dread`), `render_dxr/src/dxr.cpp` (member + `uDread` cbuffer
+  field + 2 cbuffer fills + setter + 3 shader branches), `render_dxr/MODULE.md` (Iron Rule 7), `app/src/main.cpp` (RT wiring).
+  **Rollback:** tag **`phase2b-raster`** (`c6ac06f`, pushed) resets 2b.2 while keeping 2b.1; or `pre-phase2b` for both;
+  file backup `_staged_phase2b_backup/`.
+- **Verified:** `audit.ps1` green (ctest 110/110). **`gate.ps1 -Milestone M9` PASSED** — converged PT golden
+  bit-identical, **denoiser 12.698→4.596 (ratio 0.362, restored)**, interactive PT 184 FPS, 1 km PT walk debug-clean,
+  M5/M4 regressions bit-match. Live `--game --rt` smoke **caught a real verdict**: `apparition_hits:1 (kind=1 face,
+  where=6, strength=2)` → `dread=0.58` → the PT lights dimmed for ~9 s, `debug_error_count=0` across the accumulate +
+  denoise passes, `rt_frames:16321` (~136 fps), `lookcheck PASS`. The "you saw a face → the lights sag" arc, live in RT.

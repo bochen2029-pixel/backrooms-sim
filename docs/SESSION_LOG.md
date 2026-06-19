@@ -6,6 +6,43 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 41 — Apparition Phase 2b: the VISUAL dread dim — the lights SAG when you see a face (raster + RT) ✅ (tags `phase2b-raster` `c6ac06f`, `phase2b-rt`)
+
+**The visual half of the apparition atmosphere — the back end of the "it sees what isn't there" arc.** Paired with the
+2a soundscape thin: while a recent **player-POV** apparition verdict lingers, the in-game lights **sag** (a soft,
+decaying dim that scales with `app_strength`), then recover. None of it scripted — the VLM decided there was a face.
+Shipped on **both** the raster (default) and ray-traced paths, each gate-green.
+
+**The lever (chosen after a QC of the renderer reality).** A global "dread" scalar (1.0 = off), NOT the light-index
+`FlickerSector` directive (which is parsed-but-unconsumed in run_game and has no clean spatial mapping). `run_game`
+computes the dim from the **existing 2a window** (`apparitionUntil`/`apparitionStrength`/`apparitionWindowS`), depth
+`1 - (0.18 + 0.12·strength)·frac` → fluorescents ease to ~0.70×..0.46×, back to full over 7–11 s.
+
+**2b.1 — raster (ADR-084, E26, tag `phase2b-raster`).** `Renderer::set_dread(float)` multiplies the per-light intensity
+in `render_chunks_windowed` **only** (a CPU-side multiply, **no shader edit**). The headless golden + creature-POV path
+(`render_chunks`) is byte-for-byte untouched → **goldens bit-identical by construction**. `gate M5` PASSED (15 lit shots
+bit-identical, lit walk @1440p 132 FPS debug-clean with the change), two raster smokes debug-clean.
+
+**2b.2 — RT (ADR-084, E27, tag `phase2b-rt`).** `DxrRenderer::set_dread` → a `uDread` PT cbuffer scalar (repurposed the
+spare `uPad2`) → a `[branch]`-guarded multiply applied **POST-accumulation** at all three tonemap writes (inline +
+denoise bg/fg). Post-accum = a display multiply, so it never pollutes `g_accum` and is **omitted from `ptReset`** → the
+dim decays smoothly with no reset / no re-noising. **Caught + fixed a real bug** (root-cause, not forward-debug): the
+first M9 run failed — the denoiser made the image *worse* (`err 92.976`) because the denoise pass builds its **own**
+zero-init cbuffer that didn't set the new index-27 field → `uDread=0` → it multiplied the denoised output by **zero**
+(black). One-line fix: `setf(cd, 27, d.dread)`. **`gate M9` PASSED** (converged golden bit-identical, denoiser 0.362
+restored, 184 FPS). Live `--game --rt` smoke **caught a real face**: `apparition_hits:1 (kind=1, strength=2)` → `dread
+0.58` dimmed the PT lights, `debug_error_count:0` across accumulate + denoise, `rt_frames:16321` (~136 fps).
+
+**Verified / safe.** Presentation-only (INV-1), the flashlight/flares class — driven by the live atmosphere window, not
+sim state, not hashed/logged; record/replay untouched. `audit.ps1` green throughout (ctest 110/110). **Backups:** tag
+`pre-phase2b` (both halves) + `phase2b-raster` (2b.2-only rollback), pushed; full file-copy backup `_staged_phase2b_backup/`.
+
+**Pending / next.** The apparition arc (Phase 1 · 2a · strength · 2b raster+RT) is **complete** — it's now an integrated
+sense with sight, sound, voice, and light. Standing threads unchanged: **playtest** (now compelling — RT is fast AND the
+atmosphere lands), **Phase C.2** (KeelBroker arbitration — five KEEL consumers), the rest of the LLM-mutation palette,
+the itch.io push. Tunables if the dim wants adjusting: `maxDim` depth + `apparitionWindowS` in `main.cpp` (two call sites,
+raster ~L2025 + RT ~L1983 — keep in sync).
+
 ## Session 40 — RT performance: the ghosting fix + the cross-device readback killed + the frame pipelined ✅ (tag `rtperf-green` `e072e8a`)
 
 **The operator's "ray tracing is unplayable — too slow, and the Shoggoth ghosts into a quantum-superposition blend" is
