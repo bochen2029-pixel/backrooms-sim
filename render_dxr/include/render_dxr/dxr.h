@@ -39,7 +39,10 @@ public:
     DxrRenderer(const DxrRenderer&) = delete;
     DxrRenderer& operator=(const DxrRenderer&) = delete;
 
-    bool init(uint32_t width, uint32_t height);
+    // `external_device5` (optional, void* = an ID3D12Device5*, INV-5): when non-null AND DXR-capable, reuse it
+    // instead of creating an own device — so the PT output lives on the caller's device and can be presented
+    // without a CPU readback (RT_PERF item A). Null = create+own a device (the headless/offline path).
+    bool init(uint32_t width, uint32_t height, void* external_device5 = nullptr);
     bool render_gradient();                       // raygen writes a UV gradient
 
     // Build BLAS-per-chunk + a TLAS from the resident streamed geometry (M9
@@ -98,6 +101,11 @@ public:
     uint32_t accum_samples() const;
 
     bool readback(std::vector<uint8_t>& rgba);    // size width*height*4, RGBA
+
+    // The path-traced color output (an ID3D12Resource*, returned as void* per INV-5). Valid after a
+    // render_pt_frame(); left in UNORDERED_ACCESS state. When DxrRenderer was init'd on an external device,
+    // the raster renderer can sample this directly (present_pt_texture) — no CPU readback. Null if not init'd.
+    void* pt_output() const;
 
     // Read back the per-pixel primary-hit depth from the last render_scene() as
     // NDC depth (DirectX [0,1], left-handed; background/miss = 1.0), row-major

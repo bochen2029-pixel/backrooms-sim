@@ -107,6 +107,18 @@ public:
     // Requires init_windowed(). Blocks on the frame fence (GPU idle on return).
     bool present_overlay_windowed(const uint8_t* rgba, uint32_t width, uint32_t height);
 
+    // RT_PERF item A. The raster Device5 (as void* = ID3D12Device5*, INV-5) for the DXR renderer to reuse,
+    // so the path-traced output lives on THIS device and can be presented without a CPU readback. Null if the
+    // device isn't DXR-capable (caller then keeps RT off / raster). Cached after first call.
+    void* native_device5();
+
+    // Present a path-traced frame that is ALREADY a GPU texture on THIS device (pt_texture = void* =
+    // ID3D12Resource*, from DxrRenderer::pt_output(), in UNORDERED_ACCESS state). Fullscreen-blits it to the
+    // swapchain (the linear sampler upscales the 2/3-res source), optionally alpha-blends the caption last
+    // uploaded via upload_caption_overlay() OVER it, then Presents. NO CPU readback / re-upload. Requires
+    // init_windowed() + that DxrRenderer was init'd on native_device5(). Blocks on the frame fence.
+    bool present_pt_texture(void* pt_texture, bool draw_caption);
+
     // Headless: orthographic top-down render of the given chunks over the world
     // region [cx-half, cx+half] x [cz-half, cz+half] (a debug-render golden).
     bool render_topdown(const std::vector<contracts::ResidentChunk>& chunks,

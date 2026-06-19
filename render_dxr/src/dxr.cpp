@@ -227,30 +227,37 @@ DxrRenderer::~DxrRenderer() {
 uint32_t DxrRenderer::width() const { return impl_ ? impl_->width : 0; }
 uint32_t DxrRenderer::height() const { return impl_ ? impl_->height : 0; }
 
-bool DxrRenderer::init(uint32_t w, uint32_t h) {
+bool DxrRenderer::init(uint32_t w, uint32_t h, void* external_device5) {
     Impl& d = *impl_;
     d.width = w;
     d.height = h;
 
-    ComPtr<ID3D12Debug> debug;
-    UINT factoryFlags = 0;
-    if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
-        debug->EnableDebugLayer();
-        factoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
+    // RT_PERF item A: reuse the caller's device (the raster renderer's Device5) when provided, so the PT
+    // output is presentable without a CPU readback. ComPtr assignment AddRefs; the caller owns the original ref
+    // and must outlive this DxrRenderer (it does in run_game: `renderer` is declared before `dxr`).
+    if (external_device5) {
+        d.device = static_cast<ID3D12Device5*>(external_device5);
+    } else {
+        ComPtr<ID3D12Debug> debug;
+        UINT factoryFlags = 0;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
+            debug->EnableDebugLayer();
+            factoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
+        }
+        ComPtr<IDXGIFactory6> factory;
+        if (FAILED(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&factory)))) { last_error_ = "factory"; return false; }
+        ComPtr<ID3D12Device> dev0;
+        ComPtr<IDXGIAdapter1> adapter;
+        for (UINT i = 0; factory->EnumAdapterByGpuPreference(
+                 i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)) != DXGI_ERROR_NOT_FOUND; ++i) {
+            DXGI_ADAPTER_DESC1 desc{};
+            adapter->GetDesc1(&desc);
+            if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0 &&
+                SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&dev0)))) break;
+            adapter.Reset(); dev0.Reset();
+        }
+        if (!dev0 || FAILED(dev0.As(&d.device))) { last_error_ = "no ID3D12Device5"; return false; }
     }
-    ComPtr<IDXGIFactory6> factory;
-    if (FAILED(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&factory)))) { last_error_ = "factory"; return false; }
-    ComPtr<ID3D12Device> dev0;
-    ComPtr<IDXGIAdapter1> adapter;
-    for (UINT i = 0; factory->EnumAdapterByGpuPreference(
-             i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter)) != DXGI_ERROR_NOT_FOUND; ++i) {
-        DXGI_ADAPTER_DESC1 desc{};
-        adapter->GetDesc1(&desc);
-        if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0 &&
-            SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&dev0)))) break;
-        adapter.Reset(); dev0.Reset();
-    }
-    if (!dev0 || FAILED(dev0.As(&d.device))) { last_error_ = "no ID3D12Device5"; return false; }
 
     D3D12_FEATURE_DATA_D3D12_OPTIONS5 opt5{};
     if (FAILED(d.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &opt5, sizeof(opt5))) ||
@@ -1378,5 +1385,6 @@ void DxrRenderer::set_flares(const float* xyzi, uint32_t count) {
 }
 
 uint32_t DxrRenderer::accum_samples() const { return impl_ ? impl_->accumSamples : 0; }
+void* DxrRenderer::pt_output() const { return impl_ ? impl_->uav.Get() : nullptr; }   // RT_PERF item A
 
 }  // namespace br::render_dxr

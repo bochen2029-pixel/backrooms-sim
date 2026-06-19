@@ -1053,7 +1053,7 @@ int run_play(const Options& o) {
             const uint32_t rw = (o.width * 2u) / 3u, rh = (o.height * 2u) / 3u;
             if (!dxr || dxrW != rw || dxrH != rh) {
                 dxr = std::make_unique<br::render_dxr::DxrRenderer>();
-                if (dxr->init(rw, rh)) { dxrW = rw; dxrH = rh; dxrCenter = contracts::ChunkKey{0, static_cast<int64_t>(1) << 40, 0}; }
+                if (renderer.native_device5() && dxr->init(rw, rh, renderer.native_device5())) { dxrW = rw; dxrH = rh; dxrCenter = contracts::ChunkKey{0, static_cast<int64_t>(1) << 40, 0}; }   // RT_PERF item A: share the raster Device5 (else RT off)
                 else { rtOn = false; dxr.reset(); }  // no DXR -> raster fallback
             }
             if (dxr) {
@@ -1071,10 +1071,10 @@ int run_play(const Options& o) {
                 dxr->render_pt_frame(cam, ptReset ? 4u : 1u, static_cast<uint32_t>(o.seed) + static_cast<uint32_t>(frames),
                                      ptReset, true, static_cast<uint32_t>(frames));
                 dxrPrevCam = cam; dxrHaveCam = true;
-                std::vector<uint8_t> rt;
-                if (dxr->readback(rt) && renderer.present_overlay_windowed(rt.data(), dxrW, dxrH)) {
+                // RT_PERF item A: present the PT output as a same-device GPU texture (no per-frame CPU readback).
+                if (renderer.present_pt_texture(dxr->pt_output(), /*draw_caption=*/false)) {
                     ++rtFrames;
-                    if (!o.out.empty()) lastRt = rt;  // keep the last RT frame for an optional capture
+                    if (!o.out.empty()) dxr->readback(lastRt);  // optional --out capture only (rare; readback just then)
                 }
             }
         }
@@ -1584,6 +1584,7 @@ int run_game(const Options& o) {
     std::string capText;                 // the current on-screen subtitle text (Settings -> Subtitles)...
     auto capUntil = t_start;             // ...shown until this time (a few seconds per line)
     std::vector<uint8_t> capOvl;         // its rasterised RGBA, uploaded to the renderer when the line changes
+    std::string lastCapUploaded;         // RT_PERF item A: the caption text last uploaded to the GPU overlay (upload only on change)
 
     // Headless spin guard (--auto-play): drop straight into Play and watch the mouse-look delta with a
     // STILL mouse. Raw input emits nothing when the mouse is idle, so the delta must stay ~0 rad/frame; the
@@ -1957,7 +1958,7 @@ int run_game(const Options& o) {
                 const uint32_t rw = (curW * 2u) / 3u, rh = (curH * 2u) / 3u;
                 if (!dxr || dxrW != rw || dxrH != rh) {
                     dxr = std::make_unique<br::render_dxr::DxrRenderer>();
-                    if (dxr->init(rw, rh)) { dxrW = rw; dxrH = rh; dxrCenter = contracts::ChunkKey{0, static_cast<int64_t>(1) << 40, 0}; }
+                    if (renderer.native_device5() && dxr->init(rw, rh, renderer.native_device5())) { dxrW = rw; dxrH = rh; dxrCenter = contracts::ChunkKey{0, static_cast<int64_t>(1) << 40, 0}; }   // RT_PERF item A: share the raster Device5 (else RT off)
                     else { model.settings.rt = 0; dxr.reset(); }  // DXR unavailable -> raster fallback
                 }
                 if (dxr) {
@@ -1984,33 +1985,28 @@ int run_game(const Options& o) {
                     dxr->render_pt_frame(cam, ptReset ? 4u : 1u, static_cast<uint32_t>(texSeed) + static_cast<uint32_t>(frames),
                                          ptReset, true, static_cast<uint32_t>(frames));
                     dxrPrevCam = cam; dxrHaveCam = true;
+                    // RT_PERF item A: present the PT output as a SAME-DEVICE GPU texture -- no per-frame CPU
+                    // readback. The readback now happens ONLY when the Director VLM / chat needs the player POV.
                     std::vector<uint8_t> rt;
-                    if (dxr->readback(rt)) {
-                        // Director VISION: every ~28 s hand the CLEAN player frame (before the caption composite
-                        // below) to the off-thread Qwen-VL narrator -- it narrates what it SEES. Cheap on-thread
-                        // (a downscale + PNG encode); the vision call itself runs off the frame thread (INV-6).
-                        if (model.settings.director && visionDir && now - last_vision >= vision_interval) {
-                            last_vision = now;
+                    if (model.settings.director && visionDir && now - last_vision >= vision_interval) {
+                        last_vision = now;
+                        if (dxr->readback(rt)) {
                             std::string b64 = encode_pov_b64(rt, dxrW, dxrH);
                             if (!b64.empty()) visionDir->submit(std::move(b64), vision_entity_context(shog, s.wanderer.pos));
                         }
-                        // ADR-074: a waiting voice turn grabs THIS clean POV so the Director answers about what you SEE.
-                        if (model.settings.director && chat && wantChatPov) {
-                            wantChatPov = false;
-                            chat->submit(std::move(pendingChatWav), encode_pov_b64(rt, dxrW, dxrH), std::move(pendingChatCtx));
-                        }
-                        if (showCap) {  // CPU-composite the subtitle INTO the RT frame (same alpha blend as --caption-shot)
-                            app::build_caption_overlay(capOvl, dxrW, dxrH, capText);
-                            const size_t n = static_cast<size_t>(dxrW) * dxrH;
-                            for (size_t p = 0; p < n; ++p) {
-                                const uint8_t* sc = &capOvl[p * 4]; uint8_t* dp = &rt[p * 4];
-                                const float a = static_cast<float>(sc[3]) / 255.0f;
-                                for (int k = 0; k < 3; ++k) dp[k] = static_cast<uint8_t>(static_cast<float>(sc[k]) * a + static_cast<float>(dp[k]) * (1.0f - a));
-                            }
-                        }
-                        renderer.present_overlay_windowed(rt.data(), dxrW, dxrH);
-                        ++rtFrames;  // a live ray-traced frame actually reached the screen
                     }
+                    // ADR-074: a waiting voice turn grabs the player POV so the Director answers about what you SEE.
+                    if (model.settings.director && chat && wantChatPov) {
+                        if (rt.empty()) dxr->readback(rt);   // reuse this frame's readback if vision already grabbed it
+                        if (!rt.empty()) { wantChatPov = false; chat->submit(std::move(pendingChatWav), encode_pov_b64(rt, dxrW, dxrH), std::move(pendingChatCtx)); }
+                    }
+                    // The caption is GPU-blended by present_pt_texture; upload it to the overlay only when it changes.
+                    if (showCap && capText != lastCapUploaded) {
+                        app::build_caption_overlay(capOvl, curW, curH, capText);
+                        renderer.upload_caption_overlay(capOvl.data(), curW, curH);
+                        lastCapUploaded = capText;
+                    }
+                    if (renderer.present_pt_texture(dxr->pt_output(), showCap)) ++rtFrames;  // same-device blit, no readback
                 }
             }
             if (!model.settings.rt) {

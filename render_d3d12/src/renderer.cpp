@@ -168,6 +168,8 @@ struct Renderer::Impl {
     ComPtr<ID3D12Resource> ovlTex;
     ComPtr<ID3D12Resource> ovlUpload;
     ComPtr<ID3D12DescriptorHeap> ovlSrvHeap;          // shader-visible (1 SRV = overlay)
+    ComPtr<ID3D12DescriptorHeap> ptSrvHeap;           // RT_PERF item A: 1 SRV over the DXR PT output texture
+    ComPtr<ID3D12Device5> device5;                    // cached QI of `device` for native_device5() (may be null)
     ComPtr<ID3D12RootSignature> ovlRoot;
     ComPtr<ID3D12PipelineState> ovlPso;
     ComPtr<ID3D12PipelineState> ovlBlendPso;   // alpha-blended variant: paint a transparent overlay OVER the world
@@ -1799,6 +1801,12 @@ bool ensure_overlay_pipeline(Renderer::Impl& d, uint32_t srcW, uint32_t srcH, st
     return true;
 }
 
+void* Renderer::native_device5() {
+    Impl& d = *impl_;
+    if (!d.device5 && d.device) { d.device.As(&d.device5); }   // QI; leaves null if the device isn't a Device5
+    return d.device5.Get();
+}
+
 bool Renderer::present_overlay_windowed(const uint8_t* rgba, uint32_t width, uint32_t height) {
     Impl& d = *impl_;
     if (!d.windowed || !d.swapchain) { last_error_ = "present_overlay_windowed needs a window"; return false; }
@@ -1835,6 +1843,94 @@ bool Renderer::present_overlay_windowed(const uint8_t* rgba, uint32_t width, uin
 
     const D3D12_RESOURCE_BARRIER toPresent = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
     d.list->ResourceBarrier(1, &toPresent);
+    if (FAILED(d.list->Close())) { last_error_ = "command list close failed"; return false; }
+    ID3D12CommandList* wlists[] = { d.list.Get() };
+    d.queue->ExecuteCommandLists(1, wlists);
+    if (FAILED(d.swapchain->Present(1, 0))) { last_error_ = "Present failed"; return false; }
+    const UINT64 wv = ++d.fenceValue;
+    if (FAILED(d.queue->Signal(d.fence.Get(), wv))) { last_error_ = "fence Signal failed"; return false; }
+    if (d.fence->GetCompletedValue() < wv) {
+        if (FAILED(d.fence->SetEventOnCompletion(wv, d.fenceEvent))) { last_error_ = "SetEventOnCompletion failed"; return false; }
+        if (WaitForSingleObject(d.fenceEvent, 5000) != WAIT_OBJECT_0) { last_error_ = "fence wait timed out"; return false; }
+    }
+    return true;
+}
+
+bool Renderer::present_pt_texture(void* pt_texture, bool draw_caption) {
+    Impl& d = *impl_;
+    if (!d.windowed || !d.swapchain) { last_error_ = "present_pt_texture needs a window"; return false; }
+    ID3D12Resource* pt = static_cast<ID3D12Resource*>(pt_texture);
+    if (!pt) { last_error_ = "present_pt_texture: null texture"; return false; }
+
+    // Reuse the overlay blit pipeline (fullscreen triangle + linear-sampler upscale + the caption-blend PSO),
+    // sized to the WINDOW so the caption texture (ovlTex, uploaded at window size by upload_caption_overlay)
+    // stays consistent. This does NOT touch the PT texture — that is sampled via ptSrvHeap below.
+    if (!ensure_overlay_pipeline(d, d.width, d.height, last_error_)) return false;
+
+    // 1-slot shader-visible SRV over the EXTERNAL PT texture. Re-created each call (cheap CPU descriptor write;
+    // the PT resource is recreated when the DXR renderer resizes). Format MUST match DxrRenderer's PT output
+    // (kDxrFormat = R8G8B8A8_UNORM).
+    if (!d.ptSrvHeap) {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = 1;
+        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (FAILED(d.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&d.ptSrvHeap)))) { last_error_ = "pt srv heap"; return false; }
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;   // == kDxrFormat (DxrRenderer PT output)
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Texture2D.MipLevels = 1;
+    d.device->CreateShaderResourceView(pt, &srv, d.ptSrvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    if (FAILED(d.alloc->Reset())) { last_error_ = "allocator reset failed"; return false; }
+    if (FAILED(d.list->Reset(d.alloc.Get(), nullptr))) { last_error_ = "command list reset failed"; return false; }
+
+    // The PT output arrives in UNORDERED_ACCESS (render_pt_frame leaves it there + wait_idle'd, so the GPU is
+    // idle -> a plain barrier is safe across the DXR queue / this queue; no cross-queue fence needed while
+    // render_pt_frame still syncs). Sample it as a pixel SRV.
+    const D3D12_RESOURCE_BARRIER ptToSrv = transition(pt, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    d.list->ResourceBarrier(1, &ptToSrv);
+
+    const UINT bbIndex = d.swapchain->GetCurrentBackBufferIndex();
+    ID3D12Resource* bb = d.backbuffers[bbIndex].Get();
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = d.rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    rtv.ptr += static_cast<SIZE_T>(bbIndex) * d.rtvDescSize;
+    const D3D12_RESOURCE_BARRIER toRT = transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    d.list->ResourceBarrier(1, &toRT);
+    d.list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+
+    D3D12_VIEWPORT vp = { 0.0f, 0.0f, static_cast<float>(d.width), static_cast<float>(d.height), 0.0f, 1.0f };
+    D3D12_RECT scissor = { 0, 0, static_cast<LONG>(d.width), static_cast<LONG>(d.height) };
+    d.list->RSSetViewports(1, &vp);
+    d.list->RSSetScissorRects(1, &scissor);
+    d.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    // (1) Opaque fullscreen blit of the PT texture (ovlPso; the linear sampler upscales 2/3-res -> window).
+    {
+        ID3D12DescriptorHeap* heaps[] = { d.ptSrvHeap.Get() };
+        d.list->SetDescriptorHeaps(1, heaps);
+        d.list->SetGraphicsRootSignature(d.ovlRoot.Get());
+        d.list->SetPipelineState(d.ovlPso.Get());
+        d.list->SetGraphicsRootDescriptorTable(0, d.ptSrvHeap->GetGPUDescriptorHandleForHeapStart());
+        d.list->DrawInstanced(3, 1, 0, 0);
+    }
+    // (2) Optional alpha-blended caption OVER the frame (ovlBlendPso + the caption already in ovlTex, window-sized).
+    if (draw_caption && d.ovlReady) {
+        ID3D12DescriptorHeap* heaps[] = { d.ovlSrvHeap.Get() };
+        d.list->SetDescriptorHeaps(1, heaps);
+        d.list->SetGraphicsRootSignature(d.ovlRoot.Get());
+        d.list->SetPipelineState(d.ovlBlendPso.Get());
+        d.list->SetGraphicsRootDescriptorTable(0, d.ovlSrvHeap->GetGPUDescriptorHandleForHeapStart());
+        d.list->DrawInstanced(3, 1, 0, 0);
+    }
+
+    const D3D12_RESOURCE_BARRIER toPresent = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+    d.list->ResourceBarrier(1, &toPresent);
+    // Restore the PT texture to UNORDERED_ACCESS for the next DxrRenderer render.
+    const D3D12_RESOURCE_BARRIER ptToUav = transition(pt, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    d.list->ResourceBarrier(1, &ptToUav);
+
     if (FAILED(d.list->Close())) { last_error_ = "command list close failed"; return false; }
     ID3D12CommandList* wlists[] = { d.list.Get() };
     d.queue->ExecuteCommandLists(1, wlists);
