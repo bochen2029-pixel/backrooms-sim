@@ -7,28 +7,30 @@
 ## 0. Read order, then VERIFY (do this before any work)
 1. This file.
 2. `docs/SESSION_LOG.md` — newest entry (the auto-rehydration hook also injects it).
-3. `docs/CHANGE_AUDIT_LOG.md` — the per-change ledger **E0–E10** (what changed, why, rollback, verification).
+3. `docs/CHANGE_AUDIT_LOG.md` — the per-change ledger **E0–E20** (what changed, why, rollback, verification).
 4. Memory: `C:\Users\user\.claude\projects\C--backrooms\memory\project-rt-crash-fix.md` (master thread) +
    `feedback-working-mode.md` (how to work here).
 5. As needed: `docs/SHOGGOTH_PLAN.md` (the plan), `docs/DECISIONS.md` ADR-077/078, `docs/ARCHITECTURE.md`.
 
 **VERIFY reality (disk wins over this doc):**
 ```
-git -C C:\backrooms log --oneline -12          # HEAD should be 577eef1 (or later); tag phaseD-live
-git -C C:\backrooms status --short             # clean except ?? _brainstorm/ (+ now _run_state files)
-powershell -NoProfile -ExecutionPolicy Bypass -File C:\backrooms\scripts\audit.ps1   # expect: ctest 109/109, record==replay, inventory+isolation green
+git -C C:\backrooms log --oneline -12          # HEAD should be 9f3f9a3 (or later); newest tag phaseH2a-player
+git -C C:\backrooms status --short             # clean except ?? _brainstorm/ + ?? _staged_rt_perf_A/
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\backrooms\scripts\audit.ps1   # expect: ctest 110/110, record==replay, inventory+isolation green
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\backrooms\scripts\keel-up.ps1 # self-contained sidecar :8080+:7071 BEFORE any LLM-gated work
 ```
 Raw-transcript backstop (grep, don't re-read whole): `C:\Users\user\.claude\projects\C--backrooms\159009d0-ac22-4528-bdb0-53a845d3463b.jsonl` — and the archive viewer `C:\TRANSPORTER\claude_archive_viewer_v4.html` (Ctrl-K concept-search).
 
 ## 1. CORE — where we are + the single next action
 **Project:** C:\backrooms — native Win32 C++20 D3D12+DXR Backrooms sim; local-LLM AI "Shoggoth" creature.
-**State:** all green @ HEAD `577eef1` (tag `phaseD-live`), pushed. ctest **109/109**, determinism record==replay,
+**State:** all green @ HEAD `9f3f9a3` (newest tag `phaseH2a-player`), pushed. ctest **110/110**, determinism record==replay,
 no D3D12 errors, inventory+isolation clean. **No DOS windows** (release exe = /SUBSYSTEM:WINDOWS). **KEEL fully
 self-contained** (runs from `dist\Backrooms` via `scripts\keel-up.ps1`; nothing outside C:\backrooms is ever needed).
-**The Shoggoth's immersive arc is COMPLETE + LIVE in-game:** it THINKS (live LLM brain ~3 s), **SEES (live rendered
-POV, Phase D LIVE — DONE this session)**, SPEAKS (impressionistic murmurs via `speak_pa` when <6 m, Phase E), HUNTS,
-and its VISION drives its MOTION (`target_kind` → `resolve_target`), live in the playable game — not just at record time.
+**The Shoggoth's immersive arc is COMPLETE + LIVE in-game:** it THINKS (live LLM brain ~3 s), SEES (live rendered POV,
+Phase D LIVE), SPEAKS (murmurs via `speak_pa`, Phase E), HUNTS (vision→`resolve_target` motion), and now **SEES WHAT
+ISN'T THERE** — the apparition sense (Phase H): emergent pareidolia (a face/figure/word/arrow in the procedural grime
+that neither player nor engine placed), read by the VLM on the creature's POV (Phase 1, gate-proven) AND on **the
+PLAYER's own POV** (Phase 2a, this session) → the PA murmurs + the soundscape thins when YOU see a face. Live, in-game.
 
 **Phase D LIVE shipped (the prior "single next action" — DONE).** `app/src/shoggoth_vision_host.h` (`ShoggothVisionHost`,
 off-thread qwen-VL eye → validated intent) + a **2nd headless `Renderer` (384×216)** in `run_game` rendering
@@ -37,14 +39,15 @@ off-thread qwen-VL eye → validated intent) + a **2nd headless `Renderer` (384�
 so the 3 s text brain can't clobber the seen target. Verified: `audit.ps1` green + live `--game` smoke svision **2/2/2**,
 **debug_error_count=0 across 3 concurrent D3D12 devices**, 3763 frames/35 s (~107 fps, no stall), lookcheck PASS. Ledger E11.
 
-**THE SINGLE NEXT ACTION → Phase C.2 (KeelBroker arbitration).** Now that FOUR multimodal/LLM consumers share the one
-KEEL backend (creature-brain, creature-vision, director-vision, chat) on best-effort offset cadences (the smoke proved
-they coexist debug-clean but UNarbitrated), wire them through a **threaded `KeelBroker`** (mutex+condvar) wrapping the
-already-built, already-tested `app/src/keel_scheduler.h` (Phase C-core: priority · single multimodal slot · latest-wins ·
-concurrency cap · FIFO; 6 property tests). Route `ShoggothBrainHost` / `ShoggothVisionHost` / `DirectorVisionHost` /
-`DirectorChatHost` through it; add a concurrency soak gate (frame p99 < 2× median; vision never starves a player-speech
-turn). Needs KEEL :7071 up. (Alternatively the operator may pick **Phase F** live hearing, **Phase G** Escape polish, or
-call the immersive arc done.)
+**THE OPEN NEXT PICKS (operator's call).** The apparition arc Phase 1 + 2a just shipped (ADR-082/083, ledger E19/E20,
+tags `phaseH-apparition` / `phaseH2a-player`). Its **Phase 2b** = the *visual* atmosphere dim (a soft lighting flicker
+on a lingering verdict), deferred only because the raster renderer has no brightness lever — needs a new uniform +
+shader (renderer-contract touch). The standing thread is **Phase C.2 (KeelBroker arbitration)** — now FIVE multimodal/
+LLM consumers share the one KEEL backend (creature-brain, creature-vision, **player-POV-apparition**, director-vision,
+chat) on best-effort offset cadences (proven to coexist debug-clean but UNarbitrated); wire them through a **threaded
+`KeelBroker`** (mutex+condvar) wrapping the built+tested `app/src/keel_scheduler.h` (priority · single multimodal slot ·
+latest-wins · cap · FIFO; 6 property tests), + a concurrency soak gate (frame p99 < 2× median; vision never starves a
+player-speech turn). Needs KEEL :7071 up. (Or: the rest of the LLM-mutation palette, live hearing Phase F, or call it done.)
 
 ## 2. RING 1 — DON'T ASSUME (avoid these wrong moves)
 1. **KEEL is self-contained.** `scripts\keel-up.ps1` runs llama :8080 + keel :7071 from `dist\Backrooms`.
