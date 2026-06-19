@@ -129,6 +129,8 @@ struct Options {
     bool caption_shot = false;              // render the Director subtitle over a gray bg -> PNG (visibility proof)
     bool flashlight = false;                // --dxr-pt QC: render with the eye-torch ON (off by default)
     bool game_shot = false;                 // --game-shot: walk the Stroller into the maze, then render one framed shot (--rt for PT)
+    bool ladder_walk = false;               // --ladder-walk: headless probe -- walk the infinite ladder down then up, flag any fall-through
+    bool ladder_shot = false;               // --ladder-shot: QC -- frame the infinite ladder (--pose 0 spawn approach, 1 on-ladder descent)
     bool drop_flares = false;               // --game-shot QC: drop a line of green flares ahead of the camera (RT A/B)
     bool recolor_shot = false;              // --recolor-shot: POC -- the LLM recolours the walls from what you --say
     bool mic_test = false;                  // ADR-074: capture mic + VAD + whisper, print transcripts (verify voice input)
@@ -270,6 +272,8 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--flashlight") == 0) o.flashlight = true;
         else if (std::strcmp(a, "--game-shot") == 0) o.game_shot = true;
+        else if (std::strcmp(a, "--ladder-walk") == 0) o.ladder_walk = true;
+        else if (std::strcmp(a, "--ladder-shot") == 0) o.ladder_shot = true;
         else if (std::strcmp(a, "--recolor-shot") == 0) o.recolor_shot = true;
         else if (std::strcmp(a, "--flares") == 0) o.drop_flares = true;
         else if (std::strcmp(a, "--km") == 0) { if (!u32(o.km)) return false; }
@@ -1491,6 +1495,8 @@ int run_game(const Options& o) {
     contracts::CameraPose dxrPrevCam{}; bool dxrHaveCam = false;  // GLM 01 Tier 1: PT temporal-accumulation state
     app::Shoggoth shog;                       // M20b: the hunting creature (spawned on New Game)
     std::vector<contracts::ChunkVertex> shogBody;
+    std::vector<contracts::ChunkVertex> ladderMesh; int64_t ladderCell = (static_cast<int64_t>(1) << 62);  // the infinite ladder's render mesh (rebuilt only when the player crosses a 24 m cell)
+    std::vector<std::vector<contracts::ChunkVertex>> ladderCarvePool;  // persistent per-frame scratch: band-carved copies of the cz==0 world chunks
 
     struct Keys { bool up=false, down=false, left=false, right=false, enter=false, esc=false; } prev;
     auto edge = [](bool now, bool& p) { const bool e = now && !p; p = now; return e; };
@@ -1881,7 +1887,11 @@ int run_game(const Options& o) {
                                            ? curLevel + 1 : curLevel - 1;  // M28: climbing -> above, else see down
             const contracts::ChunkKey center = contracts::chunk_key_at(curLevel, s.wanderer.pos.x, s.wanderer.pos.z);
             const br::gen::ShaftSpec shaft = br::gen::shaft_at(texSeed, center.cx, center.cz);  // M30: open the abyss band over a shaft
-            if (shaft.present && curLevel > shaft.top_level - shaft.depth && curLevel <= shaft.top_level) {
+            const bool onLadder = (s.wanderer.pos.z > app::ladder::kAnchorZ - app::ladder::kHalfW - 2.0f
+                                   && s.wanderer.pos.z < app::ladder::kAnchorZ + app::ladder::kHalfW + 2.0f);
+            if (onLadder) {
+                sm->update(center, curLevel - 2, curLevel + 1);  // infinite ladder: keep a few floors so the stairwell reads through them
+            } else if (shaft.present && curLevel > shaft.top_level - shaft.depth && curLevel <= shaft.top_level) {
                 const int32_t below = curLevel - shaft.top_level + shaft.depth;  // floors of void beneath
                 sm->update(center, curLevel - ((below < 4) ? below : 4), curLevel);
             } else {
@@ -1955,11 +1965,12 @@ int run_game(const Options& o) {
             }
             if (!model.settings.rt) {
                 app::build_shoggoth_mesh(shogBody, shog.pos, shog.writhe, 1.4f);  // M20b in-world body
-                std::vector<contracts::ResidentChunk> withShog = sm->resident();
+                std::vector<contracts::ResidentChunk> withShog;
+                app::ladder::carve_residents(sm->resident(), ladderCarvePool, withShog);  // open the band shaft out of the world mesh
                 withShog.push_back(contracts::ResidentChunk{contracts::ChunkKey{9999, static_cast<int64_t>(frames), 0}, shogBody.data(), static_cast<uint32_t>(shogBody.size())});
-                std::vector<contracts::ChunkVertex> ladderMesh;   // the infinite 45-deg ladder, drawn near the camera (raster)
-                app::ladder::build_mesh(ladderMesh, cam.pos[0], 36.0f);
-                withShog.push_back(contracts::ResidentChunk{contracts::ChunkKey{9998, static_cast<int64_t>(frames), 0}, ladderMesh.data(), static_cast<uint32_t>(ladderMesh.size())});
+                const int64_t lcell = static_cast<int64_t>(std::floor(cam.pos[0] / 24.0f));   // the infinite 45-deg ladder (raster):
+                if (lcell != ladderCell) { app::ladder::build_mesh(ladderMesh, (static_cast<float>(lcell) + 0.5f) * 24.0f, 38.0f); ladderCell = lcell; }  // rebuild + re-upload only on a 24 m cell cross (a STABLE key, so it never starves the 8-upload budget)
+                withShog.push_back(contracts::ResidentChunk{contracts::ChunkKey{9998, lcell, 0}, ladderMesh.data(), static_cast<uint32_t>(ladderMesh.size())});
                 // Director SUBTITLES (raster path): alpha-blended overlay drawn over the world inside
                 // render_chunks_windowed (same frame, no HUD/post pass) while the line is fresh (~6 s).
                 uint32_t drawn = 0;
@@ -4747,6 +4758,76 @@ int run_recolor_shot(const Options& o) {
     return 0;
 }
 
+// Headless walkability probe for the infinite ladder: stand on the crossing, walk +X (down) then back -X (up)
+// using the REAL game collision (build_walk_collision + the band carve in apply_to_collision, rebuilt on every
+// chunk/level key change exactly like run_game). Directly tests the operator's "mysteriously drop between floors"
+// report -- any single tick that plunges more than one step proves a seam between the deep slabs across a level
+// rebuild. Deterministic; no render, no logging.
+int run_ladder_walk(const Options& o) {
+    using namespace br::core;
+    WorldState s(o.seed);
+    s.wanderer.pos = Vec3{ app::ladder::kAnchorX,
+                           app::ladder::surface_y(app::ladder::kAnchorX) + kWandererHalfHeight + 0.02f,
+                           app::ladder::kAnchorZ };
+    s.wanderer.yaw = 0.0f;   // yaw 0 -> move_x strafes world +X (down the descent), -X back up
+
+    std::vector<Aabb> col;
+    contracts::ChunkKey cached{ 0x7fffffff, 1, 1 };
+    auto rebuild = [&](contracts::ChunkKey c) {
+        build_walk_collision(col, o.seed, c); app::ladder::apply_to_collision(col, c); cached = c; };
+    auto rekey = [&]() {
+        const contracts::ChunkKey here = contracts::chunk_key_at(
+            contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
+        if (here != cached) rebuild(here);
+    };
+    rekey();
+
+    const uint32_t half = (o.ticks > 0) ? o.ticks : 1800u;
+    const float startY = s.wanderer.pos.y;
+    float worstDrop = 0.0f, worstAtX = 0.0f;
+    uint32_t air = 0, maxAir = 0;
+
+    contracts::InputCommand down{}; down.move_x = 1.0f;   // descend +X
+    for (uint32_t t = 0; t < half; ++t) {
+        const float y0 = s.wanderer.pos.y;
+        rekey();
+        tick(s, down, col);
+        const float drop = y0 - s.wanderer.pos.y;          // +ve == descended this tick
+        if (drop > worstDrop) { worstDrop = drop; worstAtX = s.wanderer.pos.x; }
+        if (!s.wanderer.on_ground) { ++air; if (air > maxAir) maxAir = air; } else air = 0;
+    }
+    const float lowY = s.wanderer.pos.y, lowX = s.wanderer.pos.x;
+
+    float worstRise = 0.0f;
+    contracts::InputCommand up{}; up.move_x = -1.0f;       // ascend -X
+    for (uint32_t t = 0; t < half; ++t) {
+        const float y0 = s.wanderer.pos.y;
+        rekey();
+        tick(s, up, col);
+        const float rise = s.wanderer.pos.y - y0;
+        if (rise > worstRise) worstRise = rise;
+    }
+    const float endY = s.wanderer.pos.y;
+    const float descended = startY - lowY, climbed = endY - lowY;
+
+    const bool noFall = worstDrop <= 0.70f;                // a step is 0.5 m; > 0.7 in one tick == a slab seam
+    const bool wentDown = descended > 6.0f;                // got down at least ~1.5 levels
+    const bool cameBack = climbed > 4.0f;                  // and climbed back up at least ~1 level
+    const bool pass = noFall && wentDown && cameBack;
+
+    std::printf("ladder_walk seed=%llu\n", static_cast<unsigned long long>(o.seed));
+    std::printf("start_y: %.2f  low_y: %.2f (x=%.1f)  end_y: %.2f\n",
+                (double)startY, (double)lowY, (double)lowX, (double)endY);
+    std::printf("descended: %.2f m (%.1f levels)  climbed_back: %.2f m\n",
+                (double)descended, (double)descended / 4.0, (double)climbed);
+    std::printf("worst_single_tick_drop: %.3f m (at x=%.1f)   [fall-through if > 0.70]\n",
+                (double)worstDrop, (double)worstAtX);
+    std::printf("worst_single_tick_rise: %.3f m   max_consecutive_airborne_ticks: %u\n",
+                (double)worstRise, maxAir);
+    std::printf("VERDICT: %s\n", pass ? "PASS (walkable both ways, no fall-through)" : "FAIL");
+    return pass ? 0 : 3;
+}
+
 int run_game_shot(const Options& o) {
     using namespace br::core;
     WorldState s(o.seed);
@@ -4756,7 +4837,7 @@ int run_game_shot(const Options& o) {
     contracts::ChunkKey cached{ 0x7fffffff, 0, 0 };
     auto rebuild = [&](contracts::ChunkKey c) { build_walk_collision(col, o.seed, c); cached = c; };
     rebuild(contracts::chunk_key_at(0, s.wanderer.pos.x, s.wanderer.pos.z));
-    const uint64_t steps = (o.ticks > 0) ? o.ticks : 1800u;   // ~15 s of walking -> well into the maze
+    const uint64_t steps = o.ladder_shot ? 0u : ((o.ticks > 0) ? o.ticks : 1800u);   // ladder QC stays at spawn; else ~15 s into the maze
     for (uint64_t t = 0; t < steps; ++t) {
         const contracts::ChunkKey here = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
         if (here != cached) rebuild(here);
@@ -4766,16 +4847,24 @@ int run_game_shot(const Options& o) {
     cam.pos[0] = s.wanderer.pos.x; cam.pos[1] = s.wanderer.pos.y + kEyeHeight; cam.pos[2] = s.wanderer.pos.z;
     cam.yaw = s.wanderer.yaw; cam.pitch = 0.0f;
     cam.fov_y = 1.2217305f; cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
-    if (o.ticks == 0) {   // ladder QC: stand ON the ascended steps, look DOWN the 45-deg descent
-        cam.pos[0] = app::ladder::kAnchorX - 8.0f;                              // ascended side (X=-6 -> Y=8)
-        cam.pos[2] = app::ladder::kAnchorZ;                                     // band centre
-        cam.pos[1] = app::ladder::surface_y(cam.pos[0]) + kEyeHeight + 0.2f;    // eye just above the step
-        cam.yaw = 1.5707963f; cam.pitch = -0.55f;                              // +X (down the slope)
+    if (o.ladder_shot && o.pose == 1u) {   // ladder QC: stand up-ramp on the stair, look DOWN the descent through the floor-holes
+        cam.pos[0] = app::ladder::kAnchorX - 2.0f;                   // up-ramp (X=0 -> Y=2, a level up)
+        cam.pos[2] = app::ladder::kAnchorZ;                          // band centre
+        cam.pos[1] = app::ladder::surface_y(cam.pos[0]) + kEyeHeight; // eye height above the step
+        cam.yaw = 1.5707963f; cam.pitch = -0.48f;                   // +X, look down the stairwell
+    } else if (o.ladder_shot) {            // ladder QC: from the SPAWN, look +Z toward the ladder (a short walk away, glowing)
+        cam.pos[0] = 2.0f; cam.pos[1] = 1.0f + kEyeHeight; cam.pos[2] = 2.0f;   // spawn, eye height
+        cam.yaw = 0.0f; cam.pitch = -0.04f;                                     // +Z toward the band Z[6,10]
     }
 
     br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
     const contracts::ChunkKey center = contracts::chunk_key_at(contracts::level_from_y(s.wanderer.pos.y), s.wanderer.pos.x, s.wanderer.pos.z);
-    sm.update(center); sm.wait_idle(); sm.update(center);
+    if (o.ladder_shot) {   // keep several floors resident so the QC shot shows the stairwell through them (like the real game)
+        sm.update(center, center.level - 3, center.level + 1); sm.wait_idle();
+        sm.update(center, center.level - 3, center.level + 1);
+    } else {
+        sm.update(center); sm.wait_idle(); sm.update(center);
+    }
     const std::string out = o.out.empty() ? std::string("runs/game_shot.png") : o.out;
     uint32_t dbg = 0;
 
@@ -4801,7 +4890,9 @@ int run_game_shot(const Options& o) {
         Renderer renderer;
         if (!renderer.init_headless(o.width, o.height)) { std::fprintf(stderr, "init: %s\n", renderer.last_error().c_str()); return 1; }
         renderer.set_texture_seed(o.seed);
-        std::vector<contracts::ResidentChunk> withLadder = sm.resident();
+        std::vector<std::vector<contracts::ChunkVertex>> carvePool;
+        std::vector<contracts::ResidentChunk> withLadder;
+        app::ladder::carve_residents(sm.resident(), carvePool, withLadder);  // open the band shaft out of the world mesh
         std::vector<contracts::ChunkVertex> ladderMesh;
         app::ladder::build_mesh(ladderMesh, cam.pos[0], 40.0f);
         withLadder.push_back(contracts::ResidentChunk{contracts::ChunkKey{9998, 0, 0}, ladderMesh.data(), static_cast<uint32_t>(ladderMesh.size())});
@@ -5621,6 +5712,7 @@ int main(int argc, char** argv) {
     if (o.dxr_test)   return run_dxr_test(o);
     if (o.dxr_depth)  return run_dxr_depth(o);
     if (o.game_shot)  return run_game_shot(o);
+    if (o.ladder_walk) return run_ladder_walk(o);
     if (o.recolor_shot) return run_recolor_shot(o);
     if (o.dxr_pt)     return run_dxr_pt(o);
     if (o.dxr_fps)    return run_dxr_fps(o);
