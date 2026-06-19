@@ -73,6 +73,12 @@ public:
     // scene (no grain/aberration/scanlines). Used for the Director subtitle path.
     void set_post(bool enabled, uint32_t seed, float time, bool hud, bool clean = false);
 
+    // Apparition Phase 2b: a soft "dread" dim of the WINDOWED forward lighting. 1.0 = off (default, full
+    // brightness); lower values darken the fluorescents while a recent apparition verdict lingers. Affects
+    // ONLY render_chunks_windowed (the live in-game frame) -- the headless golden + creature-POV path
+    // (render_chunks) is untouched, so goldens stay bit-identical. Presentation-only; clamped to [0,1].
+    void set_dread(float dim01);
+
     // Upload an RGBA HUD overlay (width*height, must match the render size) that
     // the post pass composites on top (M8). Builds the post pipeline if needed.
     bool upload_hud_overlay(const uint8_t* rgba, uint32_t width, uint32_t height);

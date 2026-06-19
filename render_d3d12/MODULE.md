@@ -52,6 +52,12 @@ renderer (INV-6).
   aberration, barrel distortion, scanline/interlace flicker, and vignette, then
   compositing a CPU-rasterised HUD overlay (undistorted). Off by default (so
   prior goldens are byte-unchanged); ~0.6 ms at 1440p (ADR-034).
+- `set_dread` (Apparition Phase 2b, ADR-084) — a soft "dread" dim of the **windowed**
+  forward lighting (1.0 = off/default; lower darkens the fluorescents while a recent
+  apparition verdict lingers). Multiplies the per-light intensity in
+  `render_chunks_windowed` **only**; the headless golden + creature-POV path
+  (`render_chunks`) is byte-for-byte untouched, so goldens stay bit-identical.
+  Presentation-only; driven by `app`'s live atmosphere window.
 - `render_d3d12/texgen.h` (M5) — D3D12-free procedural material textures:
   `generate_texture(kind, seed, rgba)` for `TexKind`
   {Wallpaper, Carpet, CeilingTile, Fluorescent, Baseboard} + `texture_hash`.

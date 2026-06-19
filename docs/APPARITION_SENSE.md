@@ -53,9 +53,14 @@ using the same event-log shape. Built after Phase 1 greens.
 > takes ONLY the apparition verdict (never motion) → the **PA murmurs** about it + the **soundscape thins** (a decaying
 > dip that **scales with `app_strength`** — 0.33×→0.59× deep, 7→11 s; the murmur fires only for a clear/vivid one ≥2).
 > Live smoke fired it end-to-end: `apparition_hits:1 (kind=figure)` on the player's own view, `debug_error_count:0`,
-> gate M29 still bit-identical (now with the live VLM emitting `app_strength`). **Phase 2b (remaining):** the *visual*
-> lighting dim — wire the parsed-but-unconsumed `FlickerSector` directive (or a new brightness uniform) into the raster
-> lighting path (renderer contract + shader), so it's a separate, more invasive increment.
+> gate M29 still bit-identical (now with the live VLM emitting `app_strength`).
+> **Phase 2b.1 — DONE (raster)** (ADR-084, ledger E26, tag `pre-phase2b` rollback). The visual half: while a verdict
+> lingers the **windowed fluorescents SAG** — `Renderer::set_dread(float)` (1.0=off) multiplies the per-light intensity
+> in `render_chunks_windowed` **only**, driven from the same 2a window (depth `1-(0.18+0.12·strength)·frac`, ~0.70×..0.46×).
+> Chosen as a CPU-side global scalar (NOT the light-index `FlickerSector`), injected only on the windowed path → **the
+> golden path `render_chunks` is untouched, goldens bit-identical by construction**; `gate M5` PASSED (lit walk 132 FPS
+> debug-clean), two raster smokes debug-clean. **Phase 2b.2 (remaining): the RT path** — a `uDread` PT cbuffer scalar,
+> `[branch]`-guarded in `dxr.cpp` (the flashlight pattern, golden-bit-identical when off), gate M9.
 
 ## 4. Schema changes (minimal, version-stable)
 > **As built (reconciled after a QC, ADR-082/083/083a).** The proposal below sketched a nested `Apparition` struct +

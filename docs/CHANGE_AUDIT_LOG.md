@@ -581,3 +581,27 @@ job is audit + fast, unambiguous rollback.
 - **Recommendation:** ship ghost+A+B+C; have the operator confirm smoothness at their real settings (fullscreen res +
   open room + flares). If open rooms are still heavy, the scoped next lever is **interactive-only stochastic direct
   lighting (RIS)** with a high-spp stochastic-vs-full-NEE convergence test as its oracle. Not done speculatively here.
+
+## E26 — 2026-06-19 — Apparition Phase 2b.1: the VISUAL dread dim (raster) [ADR-084]
+- **What:** the visual half of the apparition atmosphere — while a recent PLAYER-POV verdict lingers, the windowed
+  fluorescents SAG (a soft, decaying dim that scales with `app_strength`), paired with the 2a soundscape thin. A new
+  `Renderer::set_dread(float)` (1.0=off, default) multiplies the per-light intensity in **`render_chunks_windowed` ONLY**
+  (`renderer.cpp:1992`, `fl * d.dread`); the headless golden + creature-POV path (`render_chunks`) is byte-for-byte
+  untouched. `run_game` computes the dim from the existing 2a window (`apparitionUntil`/`apparitionStrength`/
+  `apparitionWindowS`) and calls `set_dread` before the raster present. Depth `1 - (0.18+0.12*strength)*frac` →
+  fluorescents ease to ~0.70×..0.46× at a vivid verdict, back to full over the 7–11 s window.
+- **Why:** operator-cleared Phase 2b. Audio dim (2a) + light dim (2b) = the coordinated atmosphere spec §6 describes —
+  "when YOU see a face, the PA murmurs, the room-tone thins, and the lights sag." None of it scripted (the VLM decided).
+- **Lever choice:** Option B (a global dread scalar), NOT Option A (`FlickerSector` — light-index, fuzzy). CPU-side, **no
+  shader edit**; goldens bit-identical by construction (the golden path `render_chunks` is never touched).
+- **Determinism / no breakage:** presentation-only (INV-1); driven by run_game's live atmosphere window, not sim state,
+  not hashed/logged. `dread` defaults 1.0 → identity; `goldgen` never calls `set_dread`.
+- **Files:** `render_d3d12/include/render_d3d12/renderer.h` (+`set_dread`), `render_d3d12/src/renderer.cpp` (dread member
+  + setter + windowed multiply), `render_d3d12/MODULE.md` (Iron Rule 7), `app/src/main.cpp` (drive it).
+  **Rollback:** tag **`pre-phase2b`** (pushed) + file backup `_staged_phase2b_backup/` → `git reset --hard pre-phase2b`.
+- **Verified:** `audit.ps1` green (build /WX, ctest 110/110, record==replay equality, inventory, isolation). **`gate.ps1
+  -Milestone M5` PASSED** — 15 lit shots bit-identical + golden-matched, **lit walk @1440p 132 FPS debug-clean (the
+  windowed path WITH the change)**, M1/M2/M4 regressions bit-match. Two raster smokes (`--config <fresh>`, `rt_frames:0`):
+  `debug_error_count=0`, `lookcheck PASS`, player-reads fired (apparition sparse → no hit landed those runs; activation
+  is mechanically certain via the proven 2a `apparitionUntil` path). Tunables: `maxDim` depth + `apparitionWindowS`.
+- **Next:** 2b.2 — the RT path (a `uDread` PT cbuffer scalar, `[branch]`-guarded like the flashlight; gate M9).

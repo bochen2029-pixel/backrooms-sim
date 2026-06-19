@@ -2020,6 +2020,16 @@ int run_game(const Options& o) {
                 // Director SUBTITLES (raster path): alpha-blended overlay drawn over the world inside
                 // render_chunks_windowed (same frame, no HUD/post pass) while the line is fresh (~6 s).
                 uint32_t drawn = 0;
+                // Apparition Phase 2b: while a recent PLAYER-POV verdict lingers, the fluorescents SAG -- a soft,
+                // decaying dim that scales with app_strength (the visual half, paired with the 2a soundscape thin).
+                // Presentation-only; windowed raster path only -> goldens untouched. Reuses the 2a window/strength.
+                float dread = 1.0f;
+                if (now < apparitionUntil) {
+                    const float frac = clampf(duration<float>(apparitionUntil - now).count() / apparitionWindowS, 0.0f, 1.0f);
+                    const float maxDim = 0.18f + 0.12f * static_cast<float>(apparitionStrength);  // strength 1->0.30 .. 3->0.54 deep
+                    dread = 1.0f - maxDim * frac;   // fluorescents ease to ~0.7x..0.46x at the verdict, back to full
+                }
+                renderer.set_dread(dread);
                 if (!renderer.render_chunks_windowed(cam, withShog, 8u, s.tick, &drawn, showCap)) {
                     std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); ShowCursor(TRUE); return 1;
                 }

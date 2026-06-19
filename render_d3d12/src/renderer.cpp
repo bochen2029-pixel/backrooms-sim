@@ -149,6 +149,7 @@ struct Renderer::Impl {
     bool texUploaded = false;
     ComPtr<ID3D12Resource> lightCb;                  // per-frame forward-light CBV
     void* lightCbMapped = nullptr;
+    float dread = 1.0f;                               // Apparition Phase 2b: windowed forward-light dim (1.0=off); render_chunks_windowed only
 
     // VHS post-process pass (M8): scene RT -> fullscreen effects -> post RT.
     ComPtr<ID3D12Resource> postRt;                   // final composited target
@@ -1617,6 +1618,11 @@ void Renderer::set_texture_seed(uint64_t seed) {
     if (impl_) impl_->pendingTexSeed = seed;
 }
 
+void Renderer::set_dread(float dim01) {
+    if (!impl_) return;
+    impl_->dread = dim01 < 0.0f ? 0.0f : (dim01 > 1.0f ? 1.0f : dim01);  // Apparition Phase 2b; 1.0 = off (default)
+}
+
 void Renderer::set_post(bool enabled, uint32_t seed, float time, bool hud, bool clean) {
     if (!impl_) return;
     impl_->postEnabled = enabled;
@@ -1989,7 +1995,7 @@ bool Renderer::render_chunks_windowed(const contracts::CameraPose& camera,
                 float p[3]; contracts::fluorescent_light_pos(gi, gj, p); p[1] += contracts::level_base_y(contracts::level_from_y(camera.pos[1]));  // M26: lights at the wanderer's current floor
                 const uint64_t lid = static_cast<uint64_t>(gi) * 0x9e3779b97f4a7c15ULL ^ static_cast<uint64_t>(gj) * 0xc2b2ae3d27d4eb4fULL;
                 const float fl = br::core::light_flicker(d.pendingTexSeed, lid, tick);
-                lc.lights[n][0] = p[0]; lc.lights[n][1] = p[1]; lc.lights[n][2] = p[2]; lc.lights[n][3] = fl;
+                lc.lights[n][0] = p[0]; lc.lights[n][1] = p[1]; lc.lights[n][2] = p[2]; lc.lights[n][3] = fl * d.dread;  // Apparition Phase 2b: windowed dread dim (d.dread=1.0 -> identity)
                 ++n;
             }
         lc.ambientCount[3] = static_cast<float>(n);
