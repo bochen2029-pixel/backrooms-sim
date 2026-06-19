@@ -59,6 +59,7 @@
 #include "shoggoth.h"
 #include "shoggoth_body.h"
 #include "shoggoth_brain.h"
+#include "keel_broker.h"
 #include "shoggoth_brain_host.h"
 #include "shoggoth_vision.h"
 #include "shoggoth_vision_host.h"
@@ -1513,11 +1514,16 @@ int run_game(const Options& o) {
     // M21b: the LIVE async brain — KEEL inference off the frame thread so the creature
     // thinks while you actually play (mirrors the Director's async host). On by default;
     // --no-shoggoth-brain kills it; graceful no-op if KEEL is down. Only fed while in Play.
+    // Phase C.2: ONE shared KeelBroker arbitrates the single llama-server backend across all live hosts
+    // (priority: player-speech > shoggoth-vision > director-vision > shoggoth-brain; single multimodal slot;
+    // concurrency cap). Declared FIRST so it outlives every host (destroyed last); shut down explicitly at
+    // cleanup before the hosts join. Each host below takes broker.get() (nullptr would be the legacy direct path).
+    auto broker = std::make_unique<app::KeelBroker>();
     std::unique_ptr<app::ShoggothBrainHost> brain;
     if (!o.no_shoggoth_brain) {
         try_start_sidecar();   // best-effort: bring the LLM up so the creature can think (graceful if it can't)
         std::string bh; int bp; parse_host_port(o.director_url, bh, bp);
-        brain = std::make_unique<app::ShoggothBrainHost>(bh, bp);
+        brain = std::make_unique<app::ShoggothBrainHost>(bh, bp, 8000u, broker.get());
     }
     const auto brain_interval = milliseconds(3000);
     auto last_brain = t_start - brain_interval;
@@ -1779,7 +1785,7 @@ int run_game(const Options& o) {
             if (brain && g_visionAvailable.load()) {
                 if (!shogVision) {
                     std::string vh; int vp; parse_host_port(o.director_url, vh, vp);
-                    shogVision = std::make_unique<app::ShoggothVisionHost>(vh, vp);
+                    shogVision = std::make_unique<app::ShoggothVisionHost>(vh, vp, 30000u, broker.get());
                     shogPov = std::make_unique<Renderer>();
                     if (!shogPov->init_headless(384u, 216u)) shogPov.reset();   // no 2nd device -> graceful no-op
                     else shogPov->set_texture_seed(texSeed);
@@ -1875,7 +1881,7 @@ int run_game(const Options& o) {
                 if (!visionDir) {
                     try_start_sidecar();
                     std::string dh; int dp; parse_host_port(o.director_url, dh, dp);
-                    visionDir = std::make_unique<app::DirectorVisionHost>(dh, dp);
+                    visionDir = std::make_unique<app::DirectorVisionHost>(dh, dp, 30000u, broker.get());
                 }
                 for (const std::string& line : visionDir->poll()) {
                     if (!line.empty() && last_pa_line != line) {
@@ -1898,7 +1904,7 @@ int run_game(const Options& o) {
                     mic = std::make_unique<app::MicCapture>();
                     if (!mic->start()) mic.reset();   // no capture device -> no voice (graceful)
                     chat = std::make_unique<app::DirectorChatHost>(dh, dp,
-                        [wexe, wmodel](const std::string& w) { return whisper_transcribe(w, wexe, wmodel); });
+                        [wexe, wmodel](const std::string& w) { return whisper_transcribe(w, wexe, wmodel); }, 30000u, broker.get());
                 }
                 if (mic) {
                     mic->suspend_until(g_paSuspendUntilMs.load());   // half-duplex: don't re-hear the Director
@@ -2075,6 +2081,7 @@ int run_game(const Options& o) {
     std::printf("final_screen: %d\n", static_cast<int>(model.screen));
     std::printf("audio_underruns: %llu\n", underruns);
     const unsigned long long brain_req = brain ? brain->requests() : 0ull;
+    if (broker) broker->shutdown();  // Phase C.2: wake every host worker blocked in acquire() so the resets/joins below cannot deadlock
     brain.reset();  // M21b: join the worker thread before exit
     const unsigned long long dir_req = director ? director->requests() : 0ull;
     const unsigned long long dir_prod = director ? director->produced() : 0ull;

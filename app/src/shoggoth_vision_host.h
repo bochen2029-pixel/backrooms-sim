@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "director/keel_client.h"
+#include "keel_broker.h"
 #include "shoggoth_brain.h"
 #include "shoggoth_vision.h"
 
@@ -39,8 +40,8 @@ namespace br::app {
 // no-op (no intent yielded, the live text brain keeps driving).
 class ShoggothVisionHost {
 public:
-    ShoggothVisionHost(std::string host, int port, uint32_t timeout_ms = 30000)
-        : host_(std::move(host)), port_(port), timeout_ms_(timeout_ms) {
+    ShoggothVisionHost(std::string host, int port, uint32_t timeout_ms = 30000, KeelBroker* broker = nullptr)
+        : host_(std::move(host)), port_(port), timeout_ms_(timeout_ms), broker_(broker) {
         thread_ = std::thread(&ShoggothVisionHost::worker_loop, this);
     }
     ~ShoggothVisionHost() {
@@ -94,8 +95,12 @@ private:
             requests_.fetch_add(1);
             // The blocking VLM call runs OUTSIDE the lock, on this worker — never the
             // frame thread. KEEL down / error -> ok=false -> a graceful no-op.
-            const br::director::KeelResponse resp =
-                br::director::keel_complete_vision(host_, port_, render_shoggoth_vision_prompt(sum), b64, timeout_ms_);
+            // Phase C.2: gated by the shared KeelBroker -- this multimodal call competes for the single
+            // vision slot (it can be outranked by a player-speech turn). broker drop / KEEL down -> ok=false.
+            const br::director::KeelResponse resp = broker_gated<br::director::KeelResponse>(
+                broker_, static_cast<int>(KeelPriority::ShoggothVision),
+                static_cast<uint32_t>(KeelPriority::ShoggothVision), /*multimodal=*/true,
+                [&] { return br::director::keel_complete_vision(host_, port_, render_shoggoth_vision_prompt(sum), b64, timeout_ms_); });
             if (!resp.ok) continue;
             bool ok = false;
             const ShoggothIntent intent = parse_shoggoth_intent(resp.content, ok);
@@ -109,6 +114,7 @@ private:
     std::string host_;
     int port_;
     uint32_t timeout_ms_;
+    KeelBroker* broker_ = nullptr;   // Phase C.2: shared arbiter (nullptr -> legacy direct call)
     std::thread thread_;
     std::mutex mtx_;
     std::condition_variable cv_;

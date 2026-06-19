@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "director/keel_client.h"
+#include "keel_broker.h"
 
 namespace br::app {
 
@@ -88,8 +89,8 @@ inline std::string clean_vision_line(const std::string& raw) {
 // the exact pipeline the M22 Shoggoth proved -- so a KEEL/VLM outage is a graceful no-op.
 class DirectorVisionHost {
 public:
-    DirectorVisionHost(std::string host, int port, uint32_t timeout_ms = 30000)
-        : host_(std::move(host)), port_(port), timeout_ms_(timeout_ms) {
+    DirectorVisionHost(std::string host, int port, uint32_t timeout_ms = 30000, KeelBroker* broker = nullptr)
+        : host_(std::move(host)), port_(port), timeout_ms_(timeout_ms), broker_(broker) {
         thread_ = std::thread(&DirectorVisionHost::worker_loop, this);
     }
     ~DirectorVisionHost() {
@@ -141,8 +142,12 @@ private:
             requests_.fetch_add(1);
             // The blocking VLM call runs OUTSIDE the lock, on this worker -- never the
             // frame thread. KEEL down / error -> ok=false -> a graceful no-op.
-            const br::director::KeelResponse resp =
-                br::director::keel_complete_vision(host_, port_, render_director_vision_prompt(ctx), b64, timeout_ms_);
+            // Phase C.2: gated by the shared KeelBroker -- this multimodal narration competes for the single
+            // vision slot below shoggoth-vision and player-speech. broker drop / KEEL down -> ok=false.
+            const br::director::KeelResponse resp = broker_gated<br::director::KeelResponse>(
+                broker_, static_cast<int>(KeelPriority::DirectorVision),
+                static_cast<uint32_t>(KeelPriority::DirectorVision), /*multimodal=*/true,
+                [&] { return br::director::keel_complete_vision(host_, port_, render_director_vision_prompt(ctx), b64, timeout_ms_); });
             if (!resp.ok) continue;
             const std::string line = clean_vision_line(resp.content);
             if (line.empty()) continue;
@@ -155,6 +160,7 @@ private:
     std::string host_;
     int port_;
     uint32_t timeout_ms_;
+    KeelBroker* broker_ = nullptr;   // Phase C.2: shared arbiter (nullptr -> legacy direct call)
     std::thread thread_;
     std::mutex mtx_;
     std::condition_variable cv_;

@@ -654,3 +654,28 @@ job is audit + fast, unambiguous rollback.
 - **Next:** C.2b — route the 4 app-level hosts (brain/shogVision/directorVision/chat) through the broker + a concurrency
   soak (KEEL up). The director-module text `DirectorHost` (lowest-priority raster narration) stays unarbitrated: it lives
   in `br::director`, so routing it would invert the module dependency — a clean follow-up (abstract the broker as a gate).
+
+## E29 — 2026-06-19 — Phase C.2b: route the 4 app-level hosts through the KeelBroker + live soak [ADR-085]
+- **What:** the integration. The 4 `app`-level live hosts now bracket their KEEL call with `broker_gated<KeelResponse>`
+  (acquire→run→release): `ShoggothBrainHost` (text, prio 10), `ShoggothVisionHost` (mm, 40), `DirectorVisionHost` (mm,
+  30), `DirectorChatHost` (PlayerSpeech 50; mm only when an RT POV came). Each gained an optional `KeelBroker*` ctor
+  param (default nullptr → legacy direct call → the lifecycle test + brain-only loops are unchanged). `run_game` creates
+  ONE broker (declared first → destroyed last), passes `broker.get()` to all four, and calls `broker->shutdown()` at
+  cleanup before the host joins (so no worker stranded in `acquire()` → no join deadlock).
+- **Why:** the five consumers shared one backend unarbitrated; the broker enforces priority (player-speech jumps the
+  queue) + the single multimodal slot + the cap, across hosts. Real value: a waiting human no longer queues behind a
+  creature/director vision call, and two vision calls never overlap on the one GPU slot.
+- **Scope note:** the text `DirectorHost` (br::director) is NOT routed — it would invert the module dependency
+  (app→director). Lowest-priority cheap text; deferred (abstract the broker as a dependency-free gate). [ADR-085]
+- **Determinism / no breakage:** live-game-only; changes WHEN calls happen, not WHAT enters the sim. Record/replay path
+  doesn't use these hosts. `audit.ps1` determinism (record==replay) green throughout.
+- **Files:** `app/src/keel_broker.h` (+`broker_gated` helper), `shoggoth_brain_host.h`, `shoggoth_vision_host.h`,
+  `director_vision.h`, `director_chat.h`, `app/src/main.cpp` (broker create + wire + shutdown), `app/MODULE.md`.
+  **Rollback:** tag **`phaseC2a-broker`** resets C.2b while keeping the broker core; `pre-phaseC2` for both; file backup.
+- **Verified:** `audit.ps1` green — build /WX, ctest 116/116, record==replay, inventory, isolation. **150 s live soak**
+  (`--game --auto-play --rt --director`, KEEL up, 3 hosts contending): **none starved** — `brain_intents:50` (~150/3 s),
+  `vision_produced:6` (director-vision), `svision_produced:6` (shoggoth-vision), both multimodal hosts got the single
+  slot; `debug_error_count:0`; **19094 frames / 150 s (~127 fps — no frame hitch, broker off-thread)**; `lookcheck:PASS`;
+  clean exit (broker shutdown woke the workers → joined → no deadlock).
+- **Next (deferred):** route the text `DirectorHost` via a dependency-free gate; a `KeelBroker` telemetry counter;
+  `max_concurrency` tuning if backend contention shows on the operator's hardware.

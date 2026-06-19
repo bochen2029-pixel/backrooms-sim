@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "director/keel_client.h"
+#include "keel_broker.h"
 #include "director_vision.h"   // clean_vision_line
 
 namespace br::app {
@@ -85,8 +86,8 @@ struct DirectorExchange { std::string user; std::string reply; };
 class DirectorChatHost {
 public:
     using TranscribeFn = std::function<std::string(const std::string&)>;
-    DirectorChatHost(std::string host, int port, TranscribeFn transcribe, uint32_t timeout_ms = 30000)
-        : host_(std::move(host)), port_(port), timeout_ms_(timeout_ms), transcribe_(std::move(transcribe)) {
+    DirectorChatHost(std::string host, int port, TranscribeFn transcribe, uint32_t timeout_ms = 30000, KeelBroker* broker = nullptr)
+        : host_(std::move(host)), port_(port), timeout_ms_(timeout_ms), transcribe_(std::move(transcribe)), broker_(broker) {
         thread_ = std::thread(&DirectorChatHost::worker_loop, this);
     }
     ~DirectorChatHost() {
@@ -137,9 +138,14 @@ private:
             if (!plausible_utterance(heard)) continue;   // silence / noise / junk -> drop, no reply
             requests_.fetch_add(1);
             const std::string prompt = render_director_chat_prompt(heard, ctx, !b64.empty());
-            const br::director::KeelResponse resp =
-                b64.empty() ? br::director::keel_complete(host_, port_, prompt, timeout_ms_)
-                            : br::director::keel_complete_vision(host_, port_, prompt, b64, timeout_ms_);
+            // Phase C.2: PlayerSpeech is the HIGHEST priority -- a waiting human jumps the queue ahead of the
+            // creature/director vision calls. Multimodal only when an RT POV came with the turn. drop -> ok=false.
+            const bool mm = !b64.empty();
+            const br::director::KeelResponse resp = broker_gated<br::director::KeelResponse>(
+                broker_, static_cast<int>(KeelPriority::PlayerSpeech),
+                static_cast<uint32_t>(KeelPriority::PlayerSpeech), mm,
+                [&] { return mm ? br::director::keel_complete_vision(host_, port_, prompt, b64, timeout_ms_)
+                                : br::director::keel_complete(host_, port_, prompt, timeout_ms_); });
             if (!resp.ok) continue;
             const std::string reply = clean_vision_line(resp.content);
             if (reply.empty()) continue;
@@ -153,6 +159,7 @@ private:
     int port_;
     uint32_t timeout_ms_;
     TranscribeFn transcribe_;
+    KeelBroker* broker_ = nullptr;   // Phase C.2: shared arbiter (nullptr -> legacy direct call)
     std::thread thread_;
     std::mutex mtx_;
     std::condition_variable cv_;

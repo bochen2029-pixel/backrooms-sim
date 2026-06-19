@@ -84,4 +84,19 @@ private:
     bool stop_ = false;
 };
 
+// Convenience for a host worker: bracket a blocking KEEL call with acquire()/release(). Runs `call()` only
+// once the broker admits this request, then releases the slot; if the broker supersedes or is shutting down
+// it returns a default-constructed R (for KeelResponse that means ok=false, so the host's existing
+// `if (!resp.ok) continue;` drops it). With broker==nullptr it just runs `call()` (the legacy direct path,
+// e.g. the lifecycle test / any non-game caller). Keeps the five worker loops to a single call site.
+template <typename R, typename Fn>
+R broker_gated(KeelBroker* broker, int priority, uint32_t class_id, bool multimodal, Fn&& call) {
+    if (!broker) return call();
+    KeelTicket tk = 0;
+    if (broker->acquire(tk, priority, class_id, multimodal) != KeelBroker::Grant::Admitted) return R{};
+    R r = call();
+    broker->release(tk);
+    return r;
+}
+
 }  // namespace br::app

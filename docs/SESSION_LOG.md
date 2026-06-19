@@ -6,6 +6,43 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 42 — Phase C.2: the threaded KeelBroker — arbitrate the one backend across the live hosts ✅ (tags `phaseC2a-broker` `0b54474`, `phaseC2b-hosts`)
+
+**Five consumers, one llama-server, now ARBITRATED.** The live LLM/VLM hosts shared the single backend on best-effort
+offset cadences — no priority, no client-side single-multimodal-slot, no guarantee a waiting human queues ahead of a
+creature-vision call. The `KeelBroker` (the threaded wrapper the pure `keel_scheduler.h` Phase C-core was built for)
+fixes that. Built + verified in two rollback-safe commits.
+
+**C.2a — the broker core (ADR-085, E28, tag `phaseC2a-broker`).** New header-only `app/src/keel_broker.h`: `KeelBroker`
+wraps `KeelScheduler` with a `mutex`+`condvar`. `acquire(prio, class_id, multimodal)` registers a request (latest-wins
+per class) and BLOCKS until admitted (`Admitted` → run the call on the caller's own thread + `release()`; `Superseded`
+→ drop; `Shutdown` → exit). Added `KeelScheduler::try_admit(mine)` — admits ONLY the caller's ticket iff it's the
+highest-priority admissible — so the acquire loop is trivially correct (no cross-thread admission). Pure additive, NO
+hosts touched (zero live risk). **ctest 110→116:** 2 pure `try_admit` tests + 4 threaded broker tests (acquire/release
++ post-shutdown; a held mm-slot blocks a 2nd vision across threads, freed on release; shutdown wakes a blocked waiter;
+text runs alongside a held mm — robust must-happen assertions, a deadlock would surface as a ctest timeout).
+
+**C.2b — route the 4 app hosts (ADR-085, E29, tag `phaseC2b-hosts`).** `ShoggothBrainHost` (text, prio 10),
+`ShoggothVisionHost` (mm, 40), `DirectorVisionHost` (mm, 30), `DirectorChatHost` (PlayerSpeech 50; mm only with an RT
+POV) each bracket their KEEL call with `broker_gated<KeelResponse>` (a 1-line helper; broker drop → `ok=false` → the
+existing `if(!resp.ok) continue` drops it; `broker==nullptr` → legacy direct path, keeping the lifecycle test + the
+brain-only loops unchanged). `run_game` creates ONE broker (declared first → destroyed last), passes `broker.get()` to
+all four, and `shutdown()`s it at cleanup before the hosts join (so no worker stranded in `acquire()` → no join
+deadlock). **The text `DirectorHost` (br::director) is NOT routed** — that would invert the module dependency
+(app→director); it's the lowest-priority cheap text, deferred to a dependency-free gate.
+
+**Verified — the 150 s live soak (`--game --auto-play --rt --director`, KEEL up, 3 hosts contending).** **None starved:**
+`brain_intents:50` (~150/3 s), `vision_produced:6` (director-vision), `svision_produced:6` (shoggoth-vision) — the two
+multimodal hosts BOTH got the single slot, arbitrated by priority. `debug_error_count:0`; **19094 frames / 150 s
+(~127 fps — no frame hitch, the broker is off-thread)**; `lookcheck:PASS`; **clean exit (no deadlock — shutdown woke the
+workers → joined).** `audit.ps1` green throughout (ctest 116/116); determinism untouched (live-game-only; the broker
+orders WHEN calls happen, never WHAT enters the sim; the record/replay path doesn't use these hosts).
+
+**Pending / next.** Deferred follow-ups: route the text `DirectorHost` (dependency-free gate), a `KeelBroker` telemetry
+counter, `max_concurrency` tuning (currently 2) if backend contention shows. Bigger open threads unchanged: a **playtest**
+(RT fast + the full immersive arc — apparition sight/sound/voice/light + arbitrated LLM), the LLM-mutation palette, the
+itch.io push. **Rollback:** tags `pre-phaseC2` / `phaseC2a-broker` (both pushed); file backup `_staged_phaseC2_backup/`.
+
 ## Session 41 — Apparition Phase 2b: the VISUAL dread dim — the lights SAG when you see a face (raster + RT) ✅ (tags `phase2b-raster` `c6ac06f`, `phase2b-rt`)
 
 **The visual half of the apparition atmosphere — the back end of the "it sees what isn't there" arc.** Paired with the

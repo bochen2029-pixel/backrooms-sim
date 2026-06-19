@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "director/keel_client.h"
+#include "keel_broker.h"
 #include "shoggoth_brain.h"
 
 namespace br::app {
@@ -36,8 +37,8 @@ namespace br::app {
 // worker. Reuses the exact KEEL client + prompt + validator the M21 brain uses.
 class ShoggothBrainHost {
 public:
-    ShoggothBrainHost(std::string host, int port, uint32_t timeout_ms = 8000)
-        : host_(std::move(host)), port_(port), timeout_ms_(timeout_ms) {
+    ShoggothBrainHost(std::string host, int port, uint32_t timeout_ms = 8000, KeelBroker* broker = nullptr)
+        : host_(std::move(host)), port_(port), timeout_ms_(timeout_ms), broker_(broker) {
         thread_ = std::thread(&ShoggothBrainHost::worker_loop, this);
     }
     ~ShoggothBrainHost() {
@@ -87,10 +88,13 @@ private:
                 have_pending_ = false;
             }
             requests_.fetch_add(1);
-            // The blocking KEEL call runs OUTSIDE the lock, on this worker — never the
-            // frame thread. KEEL down / error -> ok=false -> a graceful no-op.
-            const br::director::KeelResponse resp =
-                br::director::keel_complete(host_, port_, render_shoggoth_prompt(s), timeout_ms_);
+            // The blocking KEEL call runs OUTSIDE the lock, on this worker — never the frame thread.
+            // Phase C.2: gated by the shared KeelBroker (priority + single-multimodal-slot arbitration across
+            // all hosts) when one is wired; broker drop / KEEL down / error -> ok=false -> a graceful no-op.
+            const br::director::KeelResponse resp = broker_gated<br::director::KeelResponse>(
+                broker_, static_cast<int>(KeelPriority::ShoggothBrain),
+                static_cast<uint32_t>(KeelPriority::ShoggothBrain), /*multimodal=*/false,
+                [&] { return br::director::keel_complete(host_, port_, render_shoggoth_prompt(s), timeout_ms_); });
             if (!resp.ok) continue;
             bool ok = false;
             const ShoggothIntent intent = parse_shoggoth_intent(resp.content, ok);
@@ -104,6 +108,7 @@ private:
     std::string host_;
     int port_;
     uint32_t timeout_ms_;
+    KeelBroker* broker_ = nullptr;   // Phase C.2: shared arbiter (nullptr -> legacy direct call)
     std::thread thread_;
     std::mutex mtx_;
     std::condition_variable cv_;

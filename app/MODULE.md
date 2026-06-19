@@ -147,6 +147,17 @@ prompt → `director::keel_complete` → a validated `ShoggothIntent` that biase
 cascade). The LLM runs at record time only; intents enter via an event log → `--shoggoth-record` /
 `--shoggoth-replay` are **bit-identical with the model offline** (the sacred gate).
 
+**The live LLM host layer + the KeelBroker (Phase C / C.2).** In the playable game the LLM/VLM consumers run as **async
+hosts** off the frame thread (INV-6): `ShoggothBrainHost` (text), `ShoggothVisionHost` + `DirectorVisionHost`
+(multimodal POV → qwen-VL), `DirectorChatHost` (player voice). Each is a latest-wins submit / non-blocking poll /
+graceful-no-op-when-KEEL-down worker. They share ONE llama-server backend, arbitrated by `app/keel_scheduler.h` — the
+PURE, thread-free decision core (priority order: player-speech > shoggoth-vision > director-vision > shoggoth-brain;
+the single multimodal slot; latest-wins-per-class; the concurrency cap; `try_admit`; unit-tested without threads) —
+wrapped by `app/keel_broker.h`, the threaded `KeelBroker` (a `mutex`+`condvar` whose `acquire()`/`release()` gate each
+host's call, run on the host's own thread). Live-game only: the broker orders WHEN calls happen, never WHAT enters the
+sim, so the record/replay sacred gate is untouched. The text `DirectorHost` (`br::director`) stays on the direct path
+(routing it would invert the module dependency).
+
 **Settings & photo mode (M12).** Configuration is the **CLI flag surface** above
 (the de-facto settings interface; `scripts/run.ps1` is the one-command entry).
 **Photo mode** = the deterministic framed-capture modes already shipped: `--shot`
