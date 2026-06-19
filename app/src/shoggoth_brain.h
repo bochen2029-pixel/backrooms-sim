@@ -134,6 +134,31 @@ inline ShoggothIntent parse_shoggoth_intent(const std::string& content, bool& ok
         intent.utterance = ut->str;
         if (intent.utterance.size() > 120u) intent.utterance.resize(120u);  // structural cage: hard length cap
     }
+    // Phase H (APPARITION_SENSE.md): the optional pareidolia read -- a flat string kind + optional "where".
+    // Conservative; absent/unknown -> "nothing seen" (byte-unchanged). The reaction is emergent (the brain's
+    // own action/mood/utterance); this is the logged perception, packed into ShoggothEvent::_reserved.
+    if (const auto* ap = v.find("apparition"); ap && ap->is_string()) {
+        const std::string& k = ap->str;
+        if (k == "face") intent.app_kind = 1;
+        else if (k == "figure") intent.app_kind = 2;
+        else if (k == "word") intent.app_kind = 3;
+        else if (k == "arrow") intent.app_kind = 4;
+        else intent.app_kind = 0;
+        intent.apparition = (intent.app_kind != 0);
+    }
+    if (intent.apparition) {
+        if (const auto* aw = v.find("app_where"); aw && aw->is_string()) {
+            const std::string& k = aw->str;
+            if (k == "ahead") intent.app_sector = 0;
+            else if (k == "ahead_left") intent.app_sector = 1;
+            else if (k == "left") intent.app_sector = 2;
+            else if (k == "behind_left") intent.app_sector = 3;
+            else if (k == "behind") intent.app_sector = 4;
+            else if (k == "behind_right") intent.app_sector = 5;
+            else if (k == "right") intent.app_sector = 6;
+            else if (k == "ahead_right") intent.app_sector = 7;
+        }
+    }
     ok = true;
     return intent;
 }
@@ -171,6 +196,9 @@ inline ShoggothEvent event_from_intent(uint64_t tick, const ShoggothIntent& it) 
     e.proximity = static_cast<int32_t>(it.proximity);
     e.mood = static_cast<int32_t>(it.mood);
     e.snap = it.snap;
+    // Phase H: pack the coarse apparition perception into the reserved slot (sizeof stays 40 -> no SHOGLOG bump,
+    // and it's folded into the record/replay hash via fold_bytes over the event).
+    e._reserved = (it.apparition ? 1 : 0) | (static_cast<int32_t>(it.app_kind) << 8) | (static_cast<int32_t>(it.app_sector) << 16);
     return e;
 }
 inline void apply_event_to_intent(const ShoggothEvent& e, ShoggothIntent& it) {
@@ -181,6 +209,10 @@ inline void apply_event_to_intent(const ShoggothEvent& e, ShoggothIntent& it) {
     it.proximity = static_cast<Proximity>(e.proximity);
     it.mood = static_cast<Mood>(e.mood);
     it.snap = e.snap;
+    // Phase H: unpack the apparition perception from the reserved slot.
+    it.apparition = (e._reserved & 0xFF) != 0;
+    it.app_kind = static_cast<uint8_t>((e._reserved >> 8) & 0xFF);
+    it.app_sector = static_cast<uint8_t>((e._reserved >> 16) & 0xFF);
 }
 
 inline bool write_shoggoth_log(const std::string& path, uint64_t seed, uint64_t ticks,

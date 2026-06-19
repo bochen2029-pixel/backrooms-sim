@@ -157,6 +157,27 @@ TEST_CASE("shoggoth intent parsing: valid, clamp, and reject (defense in depth)"
     REQUIRE(!ok); REQUIRE(d.action == ShoggothAction::Hunt);            // safe default, never throws
 }
 
+TEST_CASE("Phase H apparition: parse + event-log round-trip via the reserved slot", "[apparition][shoggoth][brain]") {
+    static_assert(sizeof(ShoggothEvent) == 40, "apparition must NOT grow ShoggothEvent (no SHOGLOG bump)");
+    bool ok = false;
+    // A present apparition parses into the coarse fields.
+    const auto a = parse_shoggoth_intent(
+        R"({"action":"lurk","mood":"afraid","apparition":"face","app_where":"left","utterance":"something in the wall"})", ok);
+    REQUIRE(ok);
+    REQUIRE(a.apparition); REQUIRE(a.app_kind == 1u); REQUIRE(a.app_sector == 2u);  // face / left
+    // It round-trips through the event log (the reserved slot) -> determinism path.
+    const ShoggothEvent ev = event_from_intent(123u, a);
+    ShoggothIntent back{};
+    apply_event_to_intent(ev, back);
+    REQUIRE(back.apparition); REQUIRE(back.app_kind == 1u); REQUIRE(back.app_sector == 2u);
+    // Absent / unknown -> "nothing seen" (byte-unchanged from M20): event reserved slot stays 0.
+    const auto b = parse_shoggoth_intent(R"({"action":"hunt","apparition":"none"})", ok);
+    REQUIRE(ok); REQUIRE(!b.apparition); REQUIRE(b.app_kind == 0u);
+    REQUIRE(event_from_intent(7u, b)._reserved == 0);
+    const auto c = parse_shoggoth_intent(R"({"action":"hunt"})", ok);  // no apparition key at all
+    REQUIRE(ok); REQUIRE(!c.apparition);
+}
+
 TEST_CASE("the intent steers the shoggoth: Flee retreats, Hunt closes in", "[m21][shoggoth][brain]") {
     const uint64_t seed = 3u;
     const br::core::Vec3 wanderer{16.0f, 1.0f, 16.0f};

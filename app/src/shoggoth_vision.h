@@ -40,7 +40,7 @@ inline contracts::CameraPose shoggoth_pov_camera(const Shoggoth& sh, float aspec
 // same schema parse_shoggoth_intent validates, so a bad reply still degrades to Hunt.
 inline std::string render_shoggoth_vision_prompt(const ShoggothSummary& s) {
     static const char* kStates[4] = {"lurking", "hunting", "chasing", "retreating"};
-    char buf[2048];
+    char buf[2600];
     std::snprintf(buf, sizeof(buf),
         "You are a SHOGGOTH - a vast, amorphous, dim, patient horror loose in the infinite Backrooms, "
         "hunting a lone wanderer. Your single eye SEES the attached image: the corridor ahead (yellowed "
@@ -50,11 +50,17 @@ inline std::string render_shoggoth_vision_prompt(const ShoggothSummary& s) {
         "{\"action\":\"hunt|stalk|lurk|flank|flee\",\"aggression\":<0.0-1.0>,"
         "\"target_kind\":\"wanderer|doorway|stairs|shaft|dark|light|none\","
         "\"sector\":\"ahead|ahead_left|left|right|ahead_right|behind\",\"proximity\":\"near|mid|far\","
-        "\"mood\":\"curious|fixated|afraid|idle\",\"utterance\":\"\"}\n"
+        "\"mood\":\"curious|fixated|afraid|idle\",\"utterance\":\"\","
+        "\"apparition\":\"none|face|figure|word|arrow\",\"app_where\":\"ahead|left|right|behind\"}\n"
         "  target_kind = what in the image pulls you (a doorway? the dark? the wanderer?); sector + "
         "proximity = where it sits in your view. utterance = at most a dozen words you MURMUR if it is "
         "near - impressionistic, sensory, NEVER naming objects (e.g. \"something soft... closer\"), or "
-        "\"\" for silence. action: hunt=close in; stalk=creep; lurk=wait; flank=circle; flee=retreat. "
+        "\"\" for silence. action: hunt=close in; stalk=creep; lurk=wait; flank=circle; flee=retreat.\n"
+        "  apparition: ignoring the obvious walls, doors, lights and floor, does any patch of STAIN, "
+        "watermark, mould, grime or SHADOW happen to read as a FACE, a human FIGURE, a readable WORD or an "
+        "ARROW - the way an eye finds shapes in noise? Be CONSERVATIVE: only if it genuinely reads that way; "
+        "MOST frames have none (\"none\"). If you DO see one, let it unsettle even you (mood:\"afraid\", a "
+        "hushed utterance about it). app_where = roughly where it sits.\n"
         "Output ONLY the JSON.",
         kStates[(s.state >= 0 && s.state < 4) ? s.state : 0], static_cast<double>(s.distance_m),
         static_cast<long long>(s.sgi), static_cast<long long>(s.sgj),

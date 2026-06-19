@@ -415,3 +415,28 @@ job is audit + fast, unambiguous rollback.
 - **Next (the real thing):** wire it LIVE into `run_game`'s voice loop (mic → whisper → this colour call → a GPU
   wall-tint uniform in the raster shader) so speaking recolours the world in-game. Then the rest of the mutation
   palette (lighting, spawn, doors, rearrange-behind-you). Raster-first (RT too slow — see `docs/RT_PERF_PLAN.md`).
+
+## E19 — 2026-06-18 — Phase H step 1: the apparition sense ("it sees what isn't there"), gate-able [ADR-082]
+- **What:** the flagship impossible-before-VLMs mechanic (spec: `docs/APPARITION_SENSE.md`), Phase 1. The creature's
+  existing vision call now ALSO reports a **coarse apparition** — emergent pareidolia in the rendered frame
+  (a face/figure/word/arrow in the procedural grime that neither the player nor the engine placed). `ShoggothIntent`
+  gains `apparition`/`app_kind`/`app_sector`; `parse_shoggoth_intent` reads `"apparition"`/`"app_where"`;
+  `event_from_intent`/`apply_event_to_intent` pack/unpack into the spare **`ShoggothEvent::_reserved`** slot;
+  `render_shoggoth_vision_prompt` asks for it (conservative — most frames none) and lets it unsettle the creature.
+  Reaction is EMERGENT (the brain picks a fearful action/mood/utterance) — no behaviour code, coarse→soft only.
+- **Why:** operator — execute the spec'd "it sees what isn't there." The perceiver's fallibility = the horror
+  (honest shared uncertainty). Step 1 of `docs/DYNAMIC_DIRECTOR.md`'s VLM-native direction.
+- **Determinism / no breakage:** the verdict rides `_reserved` → **`sizeof(ShoggothEvent)` stays 40** (static_assert
+  held), **no `SHOGLOG` version bump**, old logs read as "no apparition", defaults "nothing seen" → byte-unchanged
+  from M20/M29. The VLM runs at RECORD time; the verdict enters as a logged event → replay model-off reproduces it
+  (M22 pattern). `utterance` stays presentation-only.
+- **Files:** `app/src/shoggoth.h`, `app/src/shoggoth_brain.h`, `app/src/shoggoth_vision.h`,
+  `tests/unit/test_shoggoth.cpp`, `docs/DECISIONS.md` (ADR-082), `docs/CHANGE_AUDIT_LOG.md`.
+  **Rollback:** tag **`pre-apparition`** (pushed) → `git reset --hard pre-apparition`, zero debug; or `git revert`.
+- **Verified:** `audit.ps1` green — build /WX, ctest **110/110** (new `[apparition]` round-trip + sizeof==40),
+  text record==replay, inventory, isolation. **`gate.ps1 -Milestone M29` PASSED** — VISION record→replay
+  **bit-identical** (`a560f43…`) with the **live VLM emitting the apparition** (`valid_intents=5`), creature escaped
+  (`final_state=0`); descent + M21 + M20 + M5 regressions green. (Manual mismatch was a `--level 2`-omitted-on-replay
+  command error — the log stores seed/ticks/events, not level — NOT a determinism bug.)
+- **Next (Phase 2):** the apparition read on the PLAYER's POV (not the creature's) + a soft atmosphere gate, so the
+  creature reacts to the face the PLAYER is looking at. Live-only, same event-log shape.

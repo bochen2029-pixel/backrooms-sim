@@ -56,6 +56,15 @@ struct ShoggothIntent {
     // NEVER hashed or serialized into ShoggothEvent (so it can live here with no log-version bump and
     // never perturbs determinism). Empty = silent.
     std::string utterance;
+    // Phase H (APPARITION_SENSE.md) -- the "it sees what isn't there" sense: a COARSE VLM read of EMERGENT
+    // pareidolia in the rendered frame (a face/figure/word/arrow that arises only in the projected pixels,
+    // which neither the player nor the engine placed). Packs into ShoggothEvent::_reserved, so it rides the
+    // record/replay hash via the event fold with NO SHOGLOG version bump. Defaults "nothing seen" ->
+    // byte-unchanged from M20/M29. The creature's REACTION is emergent (the brain picks a fearful
+    // action/mood/utterance when it notices one); these fields are the logged perception.
+    bool apparition = false;   // an emergent shape reads in the frame
+    uint8_t app_kind = 0;      // 0 none / 1 face / 2 figure / 3 word / 4 arrow
+    uint8_t app_sector = 0;    // 0..7 (Sector code) -- roughly where in the frame
 };
 
 struct Shoggoth {
