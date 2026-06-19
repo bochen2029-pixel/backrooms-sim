@@ -51,7 +51,7 @@ inline std::string render_shoggoth_vision_prompt(const ShoggothSummary& s) {
         "\"target_kind\":\"wanderer|doorway|stairs|shaft|dark|light|none\","
         "\"sector\":\"ahead|ahead_left|left|right|ahead_right|behind\",\"proximity\":\"near|mid|far\","
         "\"mood\":\"curious|fixated|afraid|idle\",\"utterance\":\"\","
-        "\"apparition\":\"none|face|figure|word|arrow\",\"app_where\":\"ahead|left|right|behind\"}\n"
+        "\"apparition\":\"none|face|figure|word|arrow\",\"app_where\":\"ahead|left|right|behind\",\"app_strength\":<1-3>}\n"
         "  target_kind = what in the image pulls you (a doorway? the dark? the wanderer?); sector + "
         "proximity = where it sits in your view. utterance = at most a dozen words you MURMUR if it is "
         "near - impressionistic, sensory, NEVER naming objects (e.g. \"something soft... closer\"), or "
@@ -60,7 +60,8 @@ inline std::string render_shoggoth_vision_prompt(const ShoggothSummary& s) {
         "watermark, mould, grime or SHADOW happen to read as a FACE, a human FIGURE, a readable WORD or an "
         "ARROW - the way an eye finds shapes in noise? Be CONSERVATIVE: only if it genuinely reads that way; "
         "MOST frames have none (\"none\"). If you DO see one, let it unsettle even you (mood:\"afraid\", a "
-        "hushed utterance about it). app_where = roughly where it sits.\n"
+        "hushed utterance about it). app_where = roughly where it sits; app_strength = how strongly it reads "
+        "(1 a faint hint, 2 clearly there, 3 vivid and unmistakable) - be honest, most are faint.\n"
         "Output ONLY the JSON.",
         kStates[(s.state >= 0 && s.state < 4) ? s.state : 0], static_cast<double>(s.distance_m),
         static_cast<long long>(s.sgi), static_cast<long long>(s.sgj),

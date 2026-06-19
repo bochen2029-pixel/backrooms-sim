@@ -48,15 +48,24 @@ replay) PROVES the apparition is deterministic on replay.** This is the foundati
 headless device the live vision host already owns, run the apparition read on **what the player sees**, and have the
 creature + atmosphere react to *that* ("it reacted to the face I was looking at"). Live-only (like the live brain),
 using the same event-log shape. Built after Phase 1 greens.
-> **Phase 2a — DONE** (ADR-083, ledger E20, tag `phaseH2a-player`). `run_game` renders `br::core::wanderer_camera`
-> every 3rd vision cycle (`svInFlightPlayer`, on the same 2nd device); a player cycle's poll takes ONLY the apparition
-> verdict (never motion) → the **PA murmurs** about it + the **soundscape thins** (a decaying dip on master/sfx). Live
-> smoke fired it end-to-end: `apparition_hits:1 (kind=figure)` on the player's own view, `debug_error_count:0`, gate
-> M29 still bit-identical. **Phase 2b (remaining):** the *visual* lighting dim — needs a new raster brightness uniform
-> (renderer contract + shader), so it's a separate, more invasive increment.
+> **Phase 2a — DONE** (ADR-083 + ADR-083a, ledger E20/E21, tags `phaseH2a-player` + `pre-strength`). `run_game` renders
+> `br::core::wanderer_camera` every 3rd vision cycle (`svInFlightPlayer`, on the same 2nd device); a player cycle's poll
+> takes ONLY the apparition verdict (never motion) → the **PA murmurs** about it + the **soundscape thins** (a decaying
+> dip that **scales with `app_strength`** — 0.33×→0.59× deep, 7→11 s; the murmur fires only for a clear/vivid one ≥2).
+> Live smoke fired it end-to-end: `apparition_hits:1 (kind=figure)` on the player's own view, `debug_error_count:0`,
+> gate M29 still bit-identical (now with the live VLM emitting `app_strength`). **Phase 2b (remaining):** the *visual*
+> lighting dim — wire the parsed-but-unconsumed `FlickerSector` directive (or a new brightness uniform) into the raster
+> lighting path (renderer contract + shader), so it's a separate, more invasive increment.
 
 ## 4. Schema changes (minimal, version-stable)
-`app/src/shoggoth_brain.h`:
+> **As built (reconciled after a QC, ADR-082/083/083a).** The proposal below sketched a nested `Apparition` struct +
+> object JSON; the shipped form is **flattened** (easier for the VLM to emit reliably): `ShoggothIntent` carries flat
+> fields `bool apparition; uint8_t app_kind; uint8_t app_sector; uint8_t app_strength;`, and `parse_shoggoth_intent`
+> reads a **string** `"apparition":"none|face|figure|word|arrow"` + optional `"app_where"` + `"app_strength":<1-3>`
+> (present-but-unspecified → 2 "clear"; clamp 1..3). All four pack into `ShoggothEvent::_reserved` (bit0 present /
+> bits8–15 kind / bits16–23 sector / bits24–31 strength) → `sizeof` stays 40, no SHOGLOG bump. `strength` was the one
+> field originally dropped; the QC caught it and it was added in **ADR-083a / E21**.
+`app/src/shoggoth_brain.h` (the original proposal):
 - `struct ShoggothIntent` gains a presentation+motion field group: `Apparition apparition{}` where
   `struct Apparition { bool present; uint8_t kind; uint8_t strength; uint8_t sector; }` (kind ∈ none/face/figure/
   word/arrow; strength 0–3; sector reuses the existing `Sector` codes). Packs into one `int32_t`.

@@ -1563,7 +1563,8 @@ int run_game(const Options& o) {
     uint64_t svCycle = 0; bool svInFlightPlayer = false;                 // cadence parity + the in-flight read's mode
     auto apparitionUntil = t_start;                                      // soundscape stays thinned until here (decaying)
     auto lastApparitionSpoke = t_start - milliseconds(60000);            // murmur cooldown so it never chatters
-    uint8_t apparitionKind = 0, apparitionSector = 0;                    // last player-POV verdict (telemetry / Phase 2b)
+    uint8_t apparitionKind = 0, apparitionSector = 0, apparitionStrength = 0;  // last player-POV verdict (telemetry / Phase 2b)
+    float apparitionWindowS = 9.0f;                                      // active dip window length (strength-scaled), the decay normalizer
     uint64_t svision_player_reads = 0, apparition_hits = 0;             // telemetry: player reads done / apparitions seen
     // ADR-074: two-way voice. A live mic + VAD (mic_capture.h) feeds an off-thread whisper+VLM
     // conversation host (director_chat.h); the reply is spoken back through the PA voice. Created
@@ -1688,8 +1689,9 @@ int run_game(const Options& o) {
             float atmoDip = 1.0f;
             const auto tnow = steady_clock::now();
             if (tnow < apparitionUntil) {
-                const float frac = clampf(duration<float>(apparitionUntil - tnow).count() / 9.0f, 0.0f, 1.0f);
-                atmoDip = 1.0f - 0.4f * frac;   // 0.6x at the verdict, easing back to 1.0x over ~9 s
+                const float frac = clampf(duration<float>(apparitionUntil - tnow).count() / apparitionWindowS, 0.0f, 1.0f);
+                const float maxDip = 0.20f + 0.13f * static_cast<float>(apparitionStrength);  // strength 1->0.33 .. 3->0.59 deep
+                atmoDip = 1.0f - maxDip * frac;   // deeper + longer for a vivid apparition, easing back to 1.0x
             }
             eng.set_master_volume(atmoDip * static_cast<float>(model.settings.master_pct) / 100.0f);
             eng.set_sfx_volume(atmoDip * static_cast<float>(model.settings.sfx_pct) / 100.0f);
@@ -1815,9 +1817,12 @@ int run_game(const Options& o) {
                         if (it.apparition) {
                             ++apparition_hits;
                             apparitionKind = it.app_kind; apparitionSector = it.app_sector;
-                            apparitionUntil = now + milliseconds(9000);   // soft, decaying atmosphere window
-                            // The PA murmurs about it (facility-wide voice, on a cooldown so it never chatters).
-                            if (audioOn && !it.utterance.empty() && it.utterance != lastShogUtter
+                            apparitionStrength = it.app_strength ? it.app_strength : 2;   // 1..3 (defensive default)
+                            apparitionWindowS = 5.0f + 2.0f * static_cast<float>(apparitionStrength);   // 7..11 s, longer for a vivid one
+                            apparitionUntil = now + milliseconds(static_cast<long long>(apparitionWindowS * 1000.0f));
+                            // The PA murmurs only for a CLEAR/VIVID one (strength>=2) -- a faint hint shifts the
+                            // atmosphere alone -- on a cooldown so it never chatters (facility-wide voice).
+                            if (audioOn && apparitionStrength >= 2 && !it.utterance.empty() && it.utterance != lastShogUtter
                                 && now - lastApparitionSpoke > milliseconds(12000)) {
                                 speak_pa(it.utterance, contracts::kAudioSampleRate);
                                 lastShogUtter = it.utterance; lastApparitionSpoke = now;
@@ -2081,8 +2086,9 @@ int run_game(const Options& o) {
     std::printf("svision_produced: %llu\n", svis_prod);   // valid intents the qwen-VL eye yielded
     std::printf("svision_intents: %llu\n", static_cast<unsigned long long>(svision_intents));  // applied to the live creature
     std::printf("svision_player_reads: %llu\n", static_cast<unsigned long long>(svision_player_reads));  // Phase 2a: player-POV apparition reads
-    std::printf("apparition_hits: %llu (last kind=%u where=%u)\n", static_cast<unsigned long long>(apparition_hits),
-                static_cast<unsigned>(apparitionKind), static_cast<unsigned>(apparitionSector));  // present verdicts on the player's view
+    std::printf("apparition_hits: %llu (last kind=%u where=%u strength=%u)\n", static_cast<unsigned long long>(apparition_hits),
+                static_cast<unsigned>(apparitionKind), static_cast<unsigned>(apparitionSector),
+                static_cast<unsigned>(apparitionStrength));  // present verdicts on the player's view
     std::printf("chat_requests: %llu\n", chat_req);
     std::printf("chat_produced: %llu\n", chat_prod);
     std::printf("rt_frames: %llu\n", static_cast<unsigned long long>(rtFrames));   // ADR-077: live RT presents (0 => RT crashed or silently fell back to raster)

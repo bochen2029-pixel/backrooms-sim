@@ -450,9 +450,11 @@ job is audit + fast, unambiguous rollback.
   and **thins the soundscape** (a soft decaying dip to 0.6× on master/sfx volume over ~9 s). Creature cycles unchanged.
 - **Why:** operator — "proceed to implementation, you are cleared." Phase 1 (ADR-082) proved the determinism on the
   creature's own POV; this delivers the actual horror thesis — "it reacted to the face *I* was looking at."
-- **Why audio-only atmosphere:** the raster renderer (in-game default; RT deferred) has no global brightness lever —
-  a visual dim needs a renderer-contract + shader change, split out as **Phase 2b**. The audio levers + `speak_pa`
-  already exist → Phase 2a is **zero renderer changes, additive, live-only**.
+- **Why audio-only atmosphere:** (QC-corrected wording) a `FlickerSector` directive *type* exists in the vocabulary and
+  `core::light_flicker` is the deterministic per-light baseline, but the `FlickerSector` directive is **parsed-and-never-
+  consumed in `run_game`** (only `WandererNote` is acted on) → no *verdict-driven* dim lever today; wiring one is a
+  renderer-contract + shader change, split out as **Phase 2b**. The audio levers + `speak_pa` already exist → Phase 2a is
+  **zero renderer changes, additive, live-only**.
 - **Determinism / no breakage:** `run_game` is presentation-only (INV-1) — same class as the live text brain / flares /
   flashlight. No sim state, nothing hashed/logged; the record/replay path (`run_shoggoth_vision_record`) is untouched.
 - **Files:** `app/src/main.cpp` (run_game only: cycle parity + player camera + poll routing + audio dip + 2 telemetry
@@ -466,3 +468,25 @@ job is audit + fast, unambiguous rollback.
   regressions green.
 - **Next (Phase 2b):** the **visual** atmosphere cue (a soft lighting dim/flicker on a lingering verdict) — needs a new
   raster brightness uniform (renderer contract + shader). Separate increment.
+
+## E21 — 2026-06-18 — Apparition `app_strength`: close the spec §4 gap a QC found [ADR-083a]
+- **What:** an operator QC of `docs/APPARITION_SENSE.md` vs the code caught that the spec's **`strength` 0–3** verdict
+  field ("how strongly it reads") was **dropped** when Phase 1 flattened the schema. This adds it. `ShoggothIntent` gains
+  `uint8_t app_strength` (0 none / 1 faint / 2 clear / 3 vivid); `parse_shoggoth_intent` reads `"app_strength":<1-3>`
+  when a verdict is present (default 2 "clear"; clamp 1..3); it packs into **`ShoggothEvent::_reserved` bits 24–31**
+  (free) → `sizeof` stays 40, no SHOGLOG bump, strength-0 byte-identical. The prompt asks for it. **The reaction now
+  scales with strength** (live `run_game`): the audio dip deepens (0.33×→0.59×) + lengthens (7→11 s), and the PA murmurs
+  **only for clear/vivid (≥2)** — a faint hint shifts the atmosphere alone.
+- **Why:** faithful to the documented ask — the spec listed strength so the dread could scale with how vividly the shape
+  reads; the binary version couldn't. Also fixed two doc-wording points the QC surfaced (the "no brightness lever"
+  overstatement → the `FlickerSector`-parsed-but-unconsumed precise statement, in ADR-083 + E20).
+- **Determinism / no breakage:** same M22 pattern — VLM emits strength at RECORD time, it rides `_reserved` into the
+  combined hash via `fold_bytes`, replay reconstructs it. The no-apparition case stays `_reserved==0` (test-asserted).
+  The determinism hash *value* shifted (a present apparition now carries strength) but **record==replay holds**.
+- **Files:** `app/src/shoggoth.h`, `shoggoth_brain.h` (parse + pack/unpack), `shoggoth_vision.h` (prompt),
+  `app/src/main.cpp` (strength-scaled dip/murmur + telemetry), `tests/unit/test_shoggoth.cpp`, `docs/*`.
+  **Rollback:** tag **`pre-strength`** (pushed) → `git reset --hard pre-strength`.
+- **Verified:** `audit.ps1` green — build /WX, **ctest 110/110** (the `[apparition]` test now covers strength round-trip
+  via bits 24–31, clamp 9→3, default absent→2, sizeof==40). **`gate.ps1 -Milestone M29` PASSED** — VISION record→replay
+  **bit-identical** with the live VLM now emitting `app_strength`; M21 + M20 + M5 regressions green. Live `--game` smoke
+  debug-clean, `strength=%u` wired into telemetry.

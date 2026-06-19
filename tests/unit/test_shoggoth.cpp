@@ -160,19 +160,24 @@ TEST_CASE("shoggoth intent parsing: valid, clamp, and reject (defense in depth)"
 TEST_CASE("Phase H apparition: parse + event-log round-trip via the reserved slot", "[apparition][shoggoth][brain]") {
     static_assert(sizeof(ShoggothEvent) == 40, "apparition must NOT grow ShoggothEvent (no SHOGLOG bump)");
     bool ok = false;
-    // A present apparition parses into the coarse fields.
+    // A present apparition parses into the coarse fields (kind / where / strength).
     const auto a = parse_shoggoth_intent(
-        R"({"action":"lurk","mood":"afraid","apparition":"face","app_where":"left","utterance":"something in the wall"})", ok);
+        R"({"action":"lurk","mood":"afraid","apparition":"face","app_where":"left","app_strength":3,"utterance":"something in the wall"})", ok);
     REQUIRE(ok);
-    REQUIRE(a.apparition); REQUIRE(a.app_kind == 1u); REQUIRE(a.app_sector == 2u);  // face / left
+    REQUIRE(a.apparition); REQUIRE(a.app_kind == 1u); REQUIRE(a.app_sector == 2u); REQUIRE(a.app_strength == 3u);  // face / left / vivid
     // It round-trips through the event log (the reserved slot) -> determinism path.
     const ShoggothEvent ev = event_from_intent(123u, a);
     ShoggothIntent back{};
     apply_event_to_intent(ev, back);
-    REQUIRE(back.apparition); REQUIRE(back.app_kind == 1u); REQUIRE(back.app_sector == 2u);
-    // Absent / unknown -> "nothing seen" (byte-unchanged from M20): event reserved slot stays 0.
+    REQUIRE(back.apparition); REQUIRE(back.app_kind == 1u); REQUIRE(back.app_sector == 2u); REQUIRE(back.app_strength == 3u);
+    // strength clamps to 1..3, and defaults to "clear" (2) when present but unspecified.
+    const auto s0 = parse_shoggoth_intent(R"({"action":"lurk","apparition":"figure","app_strength":9})", ok);
+    REQUIRE(ok); REQUIRE(s0.app_kind == 2u); REQUIRE(s0.app_strength == 3u);   // over-range -> clamp to 3
+    const auto s1 = parse_shoggoth_intent(R"({"action":"lurk","apparition":"word"})", ok);   // no strength given
+    REQUIRE(ok); REQUIRE(s1.app_kind == 3u); REQUIRE(s1.app_strength == 2u);   // default "clear"
+    // Absent / unknown -> "nothing seen" (byte-unchanged from M20): event reserved slot stays 0 (incl. strength bits).
     const auto b = parse_shoggoth_intent(R"({"action":"hunt","apparition":"none"})", ok);
-    REQUIRE(ok); REQUIRE(!b.apparition); REQUIRE(b.app_kind == 0u);
+    REQUIRE(ok); REQUIRE(!b.apparition); REQUIRE(b.app_kind == 0u); REQUIRE(b.app_strength == 0u);
     REQUIRE(event_from_intent(7u, b)._reserved == 0);
     const auto c = parse_shoggoth_intent(R"({"action":"hunt"})", ok);  // no apparition key at all
     REQUIRE(ok); REQUIRE(!c.apparition);

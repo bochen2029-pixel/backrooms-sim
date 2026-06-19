@@ -37,6 +37,16 @@ intact), `debug_error_count:0`, `lookcheck:PASS`. **`gate.ps1 M29` PASSED** — 
 (`955e0f4b…`), descent + M21 + M20 + M5 regressions green. (A lovely accident: the Director narrated *"…no figures
 visible"* the same run the pareidolia read found a figure — the honest shared uncertainty, on screen.)
 
+**QC addendum (operator: "did you misrecall anything? re-hydrate").** Re-grounded in `APPARITION_SENSE.md` + the code
+(not recall). Verdict: the right thing was built + gate-proven, with two honest deviations from the spec's letter, both
+now closed. (1) The spec's **`strength` 0–3** verdict field was dropped when Phase 1 flattened the schema → **added it**
+(ADR-083a, E21, tag `pre-strength`): `app_strength` packs into `_reserved` bits 24–31 (sizeof still 40, no SHOGLOG
+bump), the reaction scales with it (dip 0.33×→0.59×, 7→11 s; murmur only ≥2), `[apparition]` test extended, **gate M29
+re-passed bit-identical** with the live VLM now emitting it. (2) The "no brightness lever" wording was imprecise — a
+`FlickerSector` directive type exists but is **parsed-and-never-consumed in `run_game`** (only `WandererNote` is acted
+on); corrected in ADR-083/E20. The flat-vs-nested schema + string-vs-object parse were a deliberate (and sound)
+simplification, now documented in §4. No wholesale misrecall.
+
 **Pending / next.** **Phase 2b** — the *visual* atmosphere cue (a soft lighting dim/flicker on a lingering verdict),
 needs a new raster brightness uniform. Other open threads unchanged: Phase C.2 `KeelBroker` arbitration (one multimodal
 slot now has 4 consumers), the rest of the LLM-driven mutation palette (wire recolour LIVE into the voice loop), the

@@ -147,6 +147,7 @@ inline ShoggothIntent parse_shoggoth_intent(const std::string& content, bool& ok
         intent.apparition = (intent.app_kind != 0);
     }
     if (intent.apparition) {
+        intent.app_strength = 2;  // present-but-unspecified -> "clear" (the model usually gives app_strength below)
         if (const auto* aw = v.find("app_where"); aw && aw->is_string()) {
             const std::string& k = aw->str;
             if (k == "ahead") intent.app_sector = 0;
@@ -157,6 +158,10 @@ inline ShoggothIntent parse_shoggoth_intent(const std::string& content, bool& ok
             else if (k == "behind_right") intent.app_sector = 5;
             else if (k == "right") intent.app_sector = 6;
             else if (k == "ahead_right") intent.app_sector = 7;
+        }
+        if (const auto* st = v.find("app_strength"); st && st->is_number()) {
+            const long sv = static_cast<long>(st->num);   // how strongly it reads: 1 faint .. 3 vivid
+            intent.app_strength = static_cast<uint8_t>(sv < 1 ? 1 : (sv > 3 ? 3 : sv));
         }
     }
     ok = true;
@@ -197,8 +202,10 @@ inline ShoggothEvent event_from_intent(uint64_t tick, const ShoggothIntent& it) 
     e.mood = static_cast<int32_t>(it.mood);
     e.snap = it.snap;
     // Phase H: pack the coarse apparition perception into the reserved slot (sizeof stays 40 -> no SHOGLOG bump,
-    // and it's folded into the record/replay hash via fold_bytes over the event).
-    e._reserved = (it.apparition ? 1 : 0) | (static_cast<int32_t>(it.app_kind) << 8) | (static_cast<int32_t>(it.app_sector) << 16);
+    // and it's folded into the record/replay hash via fold_bytes over the event). Layout: bit0 present,
+    // bits8-15 kind, bits16-23 sector, bits24-31 strength (APPARITION_SENSE.md §4; bits free above 25).
+    e._reserved = (it.apparition ? 1 : 0) | (static_cast<int32_t>(it.app_kind) << 8)
+                | (static_cast<int32_t>(it.app_sector) << 16) | (static_cast<int32_t>(it.app_strength) << 24);
     return e;
 }
 inline void apply_event_to_intent(const ShoggothEvent& e, ShoggothIntent& it) {
@@ -213,6 +220,7 @@ inline void apply_event_to_intent(const ShoggothEvent& e, ShoggothIntent& it) {
     it.apparition = (e._reserved & 0xFF) != 0;
     it.app_kind = static_cast<uint8_t>((e._reserved >> 8) & 0xFF);
     it.app_sector = static_cast<uint8_t>((e._reserved >> 16) & 0xFF);
+    it.app_strength = static_cast<uint8_t>((e._reserved >> 24) & 0xFF);
 }
 
 inline bool write_shoggoth_log(const std::string& path, uint64_t seed, uint64_t ticks,

@@ -65,6 +65,7 @@ struct ShoggothIntent {
     bool apparition = false;   // an emergent shape reads in the frame
     uint8_t app_kind = 0;      // 0 none / 1 face / 2 figure / 3 word / 4 arrow
     uint8_t app_sector = 0;    // 0..7 (Sector code) -- roughly where in the frame
+    uint8_t app_strength = 0;  // 0 none / 1 faint / 2 clear / 3 vivid -- how strongly it reads (APPARITION_SENSE.md §4)
 };
 
 struct Shoggoth {
