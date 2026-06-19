@@ -1,4 +1,12 @@
-# RT Performance Plan — why the in-game path tracer is slow, and the ranked fixes (NOT YET IMPLEMENTED)
+# RT Performance Plan — why the in-game path tracer is slow, and the ranked fixes
+
+> **STATUS 2026-06-18 (Session 40): the ghosting fix + items A + B are SHIPPED + gate-M9-green + pushed (tag
+> `rtperf-green` `e072e8a`).** Done: the **ghosting** (material-7 history reject, E22 `0c8e0b3`), **A** the cross-device
+> readback eliminated (single-device `present_pt_texture`, E23 `0f3da13`), **B** the frame pipelined (denoise folded
+> into the accumulate list + per-frame AS → `PREFER_FAST_BUILD`, E24 `e072e8a`). Interactive PT 174.1 FPS @ 1440p
+> (gate). The FAST_BUILD half of **C** landed with B; the rest of **C** (AS `ALLOW_UPDATE` + refit), **D** (ReSTIR-lite
+> stochastic light sampling), **E** (no full NEE at the GI bounce + skip-denoise-when-converged), and SVGF remain
+> OPTIONAL future increments — measure in-game first (Step 0) before doing more. Rollback anchor: tag `pre-rtperf`.
 
 > Logged 2026-06-18 at the operator's request ("ray tracing is unplayable, too slow — log the plan, focus on
 > raster for now"). A diagnosis + ranked optimization plan, grounded in a code scan (`render_dxr/src/dxr.cpp`,

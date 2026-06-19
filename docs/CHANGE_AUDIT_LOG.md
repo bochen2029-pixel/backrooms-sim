@@ -490,3 +490,54 @@ job is audit + fast, unambiguous rollback.
   via bits 24–31, clamp 9→3, default absent→2, sizeof==40). **`gate.ps1 -Milestone M29` PASSED** — VISION record→replay
   **bit-identical** with the live VLM now emitting `app_strength`; M21 + M20 + M5 regressions green. Live `--game` smoke
   debug-clean, `strength=%u` wired into telemetry.
+
+### E22 — RT ghosting fix: per-pixel sample count + material-7 history reject (`0c8e0b3`)
+- **What:** the operator reported the Shoggoth smears into a "ghostly quantum-superposition blend" when it moves in RT.
+  Root cause (per `RT_PERF_PLAN.md` "the ghosting"): Tier-1 temporal accumulation blends the *moving* creature's stale
+  pixels against the static background. Fix: store the per-pixel accumulated sample count in the previously-unused
+  `g_accum.a`, and on **material-7** (the creature) primary hits **reject history** each frame (use the fresh sample,
+  don't blend) — 4 shader edits in `kPtShader`: G1 accumulate (resetPix on mat 7), G2 resolve (`/max(pixCount,1)`),
+  G3a/G3b denoise (read `g_accum.a` as the divisor). ~30 LOC, the targeted cheap fix (not full SVGF).
+- **Why:** kills the creature smear without touching background accumulation (the background still converges across
+  frames). The "proper" fix is SVGF (per-object motion vectors) — a future milestone.
+- **Determinism / no breakage:** golden-bit-identical **by construction** — the golden scenes contain no material 7, so
+  `resetPix` is governed only by `uSampleStart==0` exactly as before, and `pixCount` accumulates to `uTotal` in float
+  across batches (G2/G3 divide by the same total). **gate M9 PASSED**, PT goldens diff 0.000004/0.000677/0.000000.
+- **Files:** `render_dxr/src/dxr.cpp` (HLSL string only). **Rollback:** tag `pre-rtperf` (`0644ef8`, pushed).
+- **Verified:** gate M9 PASSED; no-ghost sub-gate clean=0; live `--game --rt` debug-clean.
+
+### E23 — RT item A: kill the per-frame cross-device readback (single-device present) (`0f3da13`)
+- **What:** the #1 in-game RT stall (`RT_PERF_PLAN.md` item A): every frame the DXR device rendered → blocking `Map`
+  readback of ~5 MB → CPU `std::vector` → the **raster** device re-uploaded it as a texture → presented. Two devices
+  talking only through the CPU = total serialization. Fix: `DxrRenderer::init(w,h,external_device5)` reuses the raster
+  `Renderer`'s `Device5` (passed as `void*` per INV-5), so the PT output (`pt_output()`) is a texture on the swapchain's
+  device; new `Renderer::present_pt_texture()` fullscreen-blits it (linear upscale) + GPU-blends the caption + Presents
+  — **no CPU round-trip**. `readback()` stays but is called only when the Director/chat needs the player POV (~28 s).
+- **Why:** removes the per-frame GPU→CPU→GPU round-trip. Correct without a cross-queue fence because `render_pt_frame`
+  still `wait_idle`s (self-contained). Init is gated on `native_device5()!=null` → invariant "dxr exists ⟹ shared
+  device" → `present_pt_texture` is always valid (else RT off / raster fallback, ADR-077 validation preserved).
+- **Determinism / no breakage:** the offline/golden path inits with `external_device5=nullptr` → own device → byte-
+  unchanged. INV-5 held (device/texture cross as `void*`, like `native_window_handle`). Caption now uploaded on-change
+  to the GPU overlay (the old RT path CPU-composited it; that block was removed).
+- **Files:** `render_dxr/{include/render_dxr/dxr.h,src/dxr.cpp}`, `render_d3d12/{include/render_d3d12/renderer.h,
+  src/renderer.cpp}`, `app/src/main.cpp` (run_play + run_game present). **Rollback:** tag `pre-rtperf`.
+- **Verified:** **gate M9 PASSED** (goldens bit-identical 0.000004/0.000677/0.000000, ctest 110/110, 168.9 FPS, 1km TLAS
+  walk clean); live `--game --auto-play --rt --seconds 14`: **rt_frames 1607 (~115 fps), debug_error_count 0, lookcheck
+  PASS** — the new same-device present path is barrier-correct (validation layer clean).
+
+### E24 — RT item B: pipeline the frame — fold denoise + AS fast-build (`e072e8a`, tag `rtperf-green`)
+- **What:** the structural stalls (`RT_PERF_PLAN.md` item B + the FAST_BUILD half of C). **B1:** the interactive denoise
+  pass is folded into the **same** command list as the final accumulate batch (a UAV barrier on `g_accum`/`g_guide`
+  makes the `uResolve==2` writes visible to the `uResolve==3` denoise read; root sig/PSO/heaps/SRVs stay bound, only the
+  constants change) → **one `ExecuteCommandLists` + `wait_idle` per frame instead of two**. **B2:** the creature BLAS +
+  the TLAS (both rebuilt every frame by `update_creature`) → `PREFER_FAST_BUILD` (the right flag for rebuilt-every-frame
+  geometry); the static chunk BLASes keep `FAST_TRACE`.
+- **Why:** removes one of the ~5 `wait_idle` stalls/frame and makes the per-frame AS rebuild cheaper. Build-perf only —
+  the ray output is unchanged.
+- **Determinism / no breakage:** `denoise=false` (the offline/golden path) **skips the folded block entirely** → byte-
+  unchanged; the AS flag is build-perf only (rays hit the same triangles) → goldens bit-identical. The denoiser sub-gate
+  ratio is **0.362 — IDENTICAL to pre-B**: the bitwise proof that the fold + UAV barrier are correct.
+- **Files:** `render_dxr/src/dxr.cpp` (+20 −22). **Rollback:** tag `pre-rtperf` / `git reset --hard 0f3da13` (item A).
+- **Verified:** **gate M9 PASSED** (goldens bit-identical, denoiser 0.362, **interactive PT 174.1 FPS** vs 168.9 pre-B,
+  1km TLAS walk 13 rebuilds debug-clean, ctest 110/110). `audit.ps1` PASS (build /WX, ctest 110, determinism
+  `06aa2db8`, inventory, isolation). RT-perf bundle ghost+A+B pushed, tagged `rtperf-green`.

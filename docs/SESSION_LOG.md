@@ -6,6 +6,42 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 40 — RT performance: the ghosting fix + the cross-device readback killed + the frame pipelined ✅ (tag `rtperf-green` `e072e8a`)
+
+**The operator's "ray tracing is unplayable — too slow, and the Shoggoth ghosts into a quantum-superposition blend" is
+fixed.** Three changes, each gate-M9-green + committed + pushed (rollback anchor: tag `pre-rtperf` `0644ef8`). Staged
+first as drift-robust anchor-based changesets (`_staged_rt_perf_{ghost,A,B}/`) while another instance worked, then
+applied + compiled + gated + committed this session.
+
+**The ghosting [E22, `0c8e0b3`].** Tier-1 temporal accumulation was blending the *moving* creature's stale pixels
+against the static background → the smear. Fix: store the per-pixel sample count in the unused `g_accum.a`, and on
+**material-7** (the creature) primary hits **reject history** each frame. 4 HLSL edits (accumulate/resolve/denoise×2).
+Golden-bit-identical **by construction** (no material 7 in the golden scenes). gate M9 PASSED.
+
+**Item A — kill the cross-device readback [E23, `0f3da13`].** The #1 in-game stall: DXR device renders → blocking
+`Map` readback of ~5 MB → CPU vector → the **raster** device re-uploads + presents (two devices, CPU-only bridge,
+total serialization). Fix: `DxrRenderer::init(...,external_device5)` reuses the raster `Device5` (as `void*`, INV-5) so
+the PT output lives on the swapchain device; new `Renderer::present_pt_texture()` fullscreen-blits it + GPU-blends the
+caption + Presents — **no CPU round-trip**. `readback()` survives only for the ~28 s Director/chat POV. Correct without
+a cross-queue fence because `render_pt_frame` still `wait_idle`s. Offline/golden path (`external_device5=nullptr`) →
+own device → byte-unchanged. gate M9 PASSED + live `--game --rt` rt_frames 1607 (~115 fps), debug_error_count 0.
+
+**Item B — pipeline the frame [E24, `e072e8a`].** B1: the interactive denoise pass is folded into the **same** command
+list as the final accumulate batch (a UAV barrier on `g_accum`/`g_guide` carries the writes; bindings persist, only
+the constants change) → **one ExecuteCommandLists + wait_idle/frame instead of two**. B2: the per-frame creature BLAS +
+TLAS → `PREFER_FAST_BUILD` (static chunk BLASes stay `FAST_TRACE`). Build-perf only; `denoise=false` skips the fold →
+goldens byte-unchanged. **The denoiser sub-gate ratio is 0.362 — IDENTICAL to pre-B**: the bitwise proof the fold +
+barrier are correct. Interactive PT **174.1 FPS** (was 168.9).
+
+**Verified (the QC).** gate M9 PASSED for A and B (goldens bit-identical 0.000004/0.000677/0.000000, denoiser 0.362,
+174.1 FPS, 1km TLAS walk 13 rebuilds debug-clean, ctest 110/110). `audit.ps1` PASS (build /WX, ctest 110, determinism
+`06aa2db8`, inventory, isolation). Live A-smoke 1607 frames debug-clean. **Pending:** a live `--game --rt` smoke of the
+**full A+B+ghost bundle together** (A was smoked solo; B is gate-M9-only) — KEEL up. **Optional next** (RT_PERF_PLAN):
+the rest of C (AS `ALLOW_UPDATE`+refit), D (ReSTIR-lite light sampling), E (GI-NEE cut), SVGF — measure in-game first.
+Untracked staging dirs `_staged_rt_perf_*` + `_brainstorm/` can be cleaned anytime (work is applied + committed).
+
+---
+
 ## Session 39 — Apparition sense "it sees what isn't there": Phase 1 foundation + Phase 2a the PLAYER's-POV uncanny ✅ (tags `phaseH-apparition` `c8261ff`, `phaseH2a-player`)
 
 **The flagship impossible-before-VLMs mechanic — the apparition sense (Well B) — is live.** Emergent pareidolia in the
