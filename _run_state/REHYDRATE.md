@@ -14,7 +14,7 @@
 
 **VERIFY reality (disk wins over this doc):**
 ```
-git -C C:\backrooms log --oneline -12          # HEAD should be 9f3f9a3 (or later); newest tag phaseH2a-player
+git -C C:\backrooms log --oneline -12          # HEAD should be 086a5c7 (or later); newest tag phaseH2a-strength
 git -C C:\backrooms status --short             # clean except ?? _brainstorm/ + ?? _staged_rt_perf_A/
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\backrooms\scripts\audit.ps1   # expect: ctest 110/110, record==replay, inventory+isolation green
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\backrooms\scripts\keel-up.ps1 # self-contained sidecar :8080+:7071 BEFORE any LLM-gated work
@@ -23,7 +23,7 @@ Raw-transcript backstop (grep, don't re-read whole): `C:\Users\user\.claude\proj
 
 ## 1. CORE — where we are + the single next action
 **Project:** C:\backrooms — native Win32 C++20 D3D12+DXR Backrooms sim; local-LLM AI "Shoggoth" creature.
-**State:** all green @ HEAD `9f3f9a3` (newest tag `phaseH2a-player`), pushed. ctest **110/110**, determinism record==replay,
+**State:** all green @ HEAD `086a5c7` (newest tag `phaseH2a-strength`), pushed. ctest **110/110**, determinism record==replay,
 no D3D12 errors, inventory+isolation clean. **No DOS windows** (release exe = /SUBSYSTEM:WINDOWS). **KEEL fully
 self-contained** (runs from `dist\Backrooms` via `scripts\keel-up.ps1`; nothing outside C:\backrooms is ever needed).
 **The Shoggoth's immersive arc is COMPLETE + LIVE in-game:** it THINKS (live LLM brain ~3 s), SEES (live rendered POV,
