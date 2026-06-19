@@ -724,8 +724,8 @@ float luma(float3 c){ return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 void denoise_resolve(uint2 px, uint2 dim){
     float4 gC = g_guide[px];
     float3 nC = gC.xyz; float zC = gC.w;
-    float invT = 1.0 / float(max(uTotal, 1u));
-    float3 cC = g_accum[px].rgb * invT;
+    float4 aC = g_accum[px];
+    float3 cC = aC.rgb / max(aC.a, 1.0);   // per-pixel count: creature pixels = this frame only -> no ghost
     if (zC <= 0.0){                                   // background / miss: nothing to denoise, tonemap raw
         float3 b = cC * uExposure; b = b / (b + 1.0);
         g_out[px] = float4(saturate(b), 1.0);
@@ -743,7 +743,7 @@ void denoise_resolve(uint2 px, uint2 dim){
             if (q.x < 0 || q.y < 0 || q.x >= int(dim.x) || q.y >= int(dim.y)) continue;
             float4 gq = g_guide[uint2(q)];
             if (gq.w <= 0.0) continue;                 // skip background neighbours
-            float3 cq = g_accum[uint2(q)].rgb * invT;
+            float4 aq = g_accum[uint2(q)]; float3 cq = aq.rgb / max(aq.a, 1.0);
             float wz = exp(-abs(zC - gq.w) / (sigZ * max(zC, 1.0)));
             float wn = pow(max(dot(nC, gq.xyz), 0.0), sigN);
             float wl = exp(-abs(lC - luma(cq)) / sigL);
@@ -807,15 +807,23 @@ void RayGen(){
     }
 
     float3 local = deterministic * float(uSampleCount) + indirectSum;
-    float3 total = (uSampleStart == 0u) ? local : (g_accum[px].rgb + local);
-    g_accum[px] = float4(total, 1.0);
+    // Per-pixel accumulated sample count lives in g_accum.a (previously an unused 1.0). The DYNAMIC creature
+    // (material 7) rejects its history every frame -> moving creature pixels show only the current sample (no
+    // ghost smear), while the static background keeps accumulating. Golden-safe: golden scenes have no material
+    // 7 and uSampleStart==0 already resets, so pixCount == uTotal there -> total/pixCount is bit-identical.
+    bool  resetPix  = (uSampleStart == 0u) || (h.hit && h.mat > 6.5 && h.mat < 7.5);
+    float prevCount = resetPix ? 0.0 : g_accum[px].a;
+    float3 prevSum  = resetPix ? float3(0.0, 0.0, 0.0) : g_accum[px].rgb;
+    float3 total    = prevSum + local;
+    float pixCount  = prevCount + float(uSampleCount);
+    g_accum[px] = float4(total, pixCount);
 
     if (uResolve >= 1u){                                  // final batch: depth + denoiser guide
         g_depth[px] = ndc;
         float vz = h.hit ? (h.t * dot(dir, uFwd)) : 0.0;
         g_guide[px] = float4(h.hit ? h.N : float3(0,0,0), vz);
         if (uResolve == 1u){                              // denoise OFF: tonemap now (the M9 golden path)
-            float3 c = total / float(max(uTotal, 1u));
+            float3 c = total / max(pixCount, 1.0);   // per-pixel count (== uTotal in the golden path -> bit-identical)
             c *= uExposure;
             c = c / (c + 1.0);          // Reinhard
             g_out[px] = float4(saturate(c), 1.0);
