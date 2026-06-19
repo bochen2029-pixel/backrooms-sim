@@ -75,6 +75,29 @@ public:
         return best;
     }
 
+    // Broker primitive (Phase C.2): admit `mine` IFF it is the highest-priority admissible request right
+    // now (below the concurrency cap, and — if multimodal — only when no multimodal call is running). On
+    // success marks `mine` Running and returns true; otherwise leaves all state untouched and returns false.
+    // Same selection + FIFO tie-break as admit_next, but it admits ONLY the caller's own ticket — so each
+    // threaded KeelBroker waiter admits only itself and the acquire loop is trivially correct (no
+    // cross-thread admission). mine==0 / unknown / not-Pending / mm-blocked -> false.
+    bool try_admit(KeelTicket mine) {
+        if (mine == 0 || running_count() >= max_concurrency_) return false;
+        const bool mm_busy = multimodal_running();
+        KeelTicket best = 0; int best_prio = 0; size_t mine_i = reqs_.size();
+        for (size_t i = 0; i < reqs_.size(); ++i) {
+            const Req& r = reqs_[i];
+            if (r.ticket == mine && r.state == Pending) mine_i = i;
+            if (r.state != Pending) continue;
+            if (r.multimodal && mm_busy) continue;                 // single multimodal slot
+            const bool better = (best == 0) || (r.priority > best_prio) ||
+                                (r.priority == best_prio && r.ticket < best);  // FIFO tie-break
+            if (better) { best = r.ticket; best_prio = r.priority; }
+        }
+        if (best == mine && mine_i < reqs_.size()) { reqs_[mine_i].state = Running; return true; }
+        return false;
+    }
+
     // A Running request completed — remove it (frees its concurrency + multimodal slot).
     void finish(KeelTicket t) {
         for (size_t i = 0; i < reqs_.size(); ++i)

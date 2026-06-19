@@ -629,3 +629,28 @@ job is audit + fast, unambiguous rollback.
   M5/M4 regressions bit-match. Live `--game --rt` smoke **caught a real verdict**: `apparition_hits:1 (kind=1 face,
   where=6, strength=2)` → `dread=0.58` → the PT lights dimmed for ~9 s, `debug_error_count=0` across the accumulate +
   denoise passes, `rt_frames:16321` (~136 fps), `lookcheck PASS`. The "you saw a face → the lights sag" arc, live in RT.
+
+## E28 — 2026-06-19 — Phase C.2a: the threaded KeelBroker core + try_admit (pure additive, no integration) [ADR-085]
+- **What:** the threaded arbiter that the pure `keel_scheduler.h` (Phase C-core) was built for. New header-only
+  `app/src/keel_broker.h` — `KeelBroker` wraps `KeelScheduler` with a `mutex` + `condition_variable`: `acquire(prio,
+  class_id, multimodal)` registers a request (latest-wins per class) and BLOCKS until the scheduler admits it
+  (→`Admitted`, run the call then `release()`), a newer same-class add supersedes it (→`Superseded`, drop), or the
+  broker shuts down (→`Shutdown`, exit). The admitted call runs on the caller's host thread (no dispatcher thread).
+  Added `KeelScheduler::try_admit(mine)` — admits ONLY the caller's ticket iff it is the highest-priority admissible,
+  so the acquire loop is trivially correct (no cross-thread admission). `shutdown()` wakes every blocked waiter.
+- **Why:** five live consumers share the one llama-server backend; today they coexist on best-effort offset cadences,
+  UNarbitrated. The broker enforces the priority order (player-speech > shoggoth-vision > director-vision >
+  shoggoth-brain), the single multimodal (GPU/VRAM) slot, and the concurrency cap across all hosts. This commit is the
+  CORE only — no hosts routed yet (zero live risk); integration is C.2b.
+- **Determinism / no breakage:** the broker is live-game-only and changes only WHEN calls happen, never WHAT enters the
+  sim (results still flow through each host's poll; the record/replay path doesn't use these hosts). INV-1/INV-4 intact.
+- **Files:** `app/src/keel_broker.h` (new), `app/src/keel_scheduler.h` (+`try_admit`, admit_next untouched),
+  `tests/unit/test_keel_scheduler.cpp` (+6 tests). **Rollback:** tag `pre-phaseC2` (pushed) + `_staged_phaseC2_backup/`.
+- **Verified:** `audit.ps1` green — build /WX, **ctest 110→116** (+2 `try_admit` pure tests; +4 threaded broker tests:
+  single-thread acquire/release + post-shutdown, the held mm-slot blocks a 2nd vision across threads [freed on release],
+  shutdown wakes a blocked waiter, a text request runs alongside a held mm) — 0 failed; determinism, inventory, isolation
+  green. The threaded tests assert MUST-happen outcomes with generous bounded waits (robust, not flaky; a deadlock
+  regression would surface as a ctest timeout).
+- **Next:** C.2b — route the 4 app-level hosts (brain/shogVision/directorVision/chat) through the broker + a concurrency
+  soak (KEEL up). The director-module text `DirectorHost` (lowest-priority raster narration) stays unarbitrated: it lives
+  in `br::director`, so routing it would invert the module dependency — a clean follow-up (abstract the broker as a gate).
