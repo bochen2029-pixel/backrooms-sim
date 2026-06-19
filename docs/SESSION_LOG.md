@@ -6,6 +6,43 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 39 — Apparition sense "it sees what isn't there": Phase 1 foundation + Phase 2a the PLAYER's-POV uncanny ✅ (tags `phaseH-apparition` `c8261ff`, `phaseH2a-player`)
+
+**The flagship impossible-before-VLMs mechanic — the apparition sense (Well B) — is live.** Emergent pareidolia in the
+rendered frame: a face/figure/word/arrow that arises only in the procedural grime, that **neither the player nor the
+engine placed**. There is no `f(scene-graph) → "a face is here"` — only rendering + a human-like perceiver (the VLM)
+can read it, and the perceiver's own fallibility is the feature (honest shared uncertainty: "is it really there?").
+
+**Phase 1 — the gate-able foundation (creature's own POV) [ADR-082, E19, `c8261ff`].** The creature's existing vision
+call now ALSO reports a coarse apparition. `ShoggothIntent` gained `apparition`/`app_kind`/`app_sector`, packed into the
+spare **`ShoggothEvent::_reserved`** slot → `sizeof(ShoggothEvent)` stays **40** (static_assert held), **`SHOGLOG2`
+magic unchanged**, old logs read as "no apparition." The reaction is EMERGENT (the brain picks a fearful action/mood/
+murmur — no behaviour code). Proven deterministic: `gate.ps1 M29` bit-identical with the **live VLM emitting the
+apparition** — the sacred record→replay now certifies the new sense round-trips through the event log.
+
+**Phase 2a — the real uncanny (the PLAYER's POV) [ADR-083, E20, this session].** `run_game` reuses the existing 2nd
+headless device + vision host: **every 3rd vision cycle renders `br::core::wanderer_camera`** (the player's view, not
+the creature's; `svInFlightPlayer`, decided at warm-start). A player cycle's poll takes ONLY the apparition verdict
+(never the seen-target/motion fields — that frame isn't the creature's vantage) → a present verdict makes the **PA
+murmur** about it (`speak_pa`, cooldown-gated) and **thins the soundscape** (a soft decaying dip to 0.6× on master/sfx
+over ~9 s). Creature cycles are byte-unchanged; a player cycle skips one ~25 s motion update (invisible for a slow
+lurker). Audio-only atmosphere on purpose: the raster renderer (in-game default; RT deferred) has no global brightness
+lever, so the *visual* dim is split out as **Phase 2b** (a renderer-contract + shader change). Live + presentation-only
+(INV-1), the same class as the live text brain / flares / flashlight — no sim state, nothing hashed/logged.
+
+**Verified.** `audit.ps1` green — build /WX, **ctest 110/110** (incl. `[apparition]`), record==replay, inventory,
+isolation. Live `--game --auto-play --seconds 100` smoke (KEEL up): `svision_player_reads:1`, **`apparition_hits:1
+(kind=figure)` on the player's own view** — the mechanic fired end-to-end — `svision_intents:3` (creature motion
+intact), `debug_error_count:0`, `lookcheck:PASS`. **`gate.ps1 M29` PASSED** — VISION record→replay **bit-identical**
+(`955e0f4b…`), descent + M21 + M20 + M5 regressions green. (A lovely accident: the Director narrated *"…no figures
+visible"* the same run the pareidolia read found a figure — the honest shared uncertainty, on screen.)
+
+**Pending / next.** **Phase 2b** — the *visual* atmosphere cue (a soft lighting dim/flicker on a lingering verdict),
+needs a new raster brightness uniform. Other open threads unchanged: Phase C.2 `KeelBroker` arbitration (one multimodal
+slot now has 4 consumers), the rest of the LLM-driven mutation palette (wire recolour LIVE into the voice loop), the
+public itch.io push (`butler push dist\Backrooms` FOLDER, confirm the Qwen GGUF HF license), RT perf (`RT_PERF_PLAN.md`).
+**Rollback:** tags `pre-apparition` / `pre-phaseH2` (both pushed). KEEL up via `scripts\keel-up.ps1` (self-contained).
+
 ## Session 38 — Shoggoth Phase D LIVE: the creature SEES live in the playable game ✅ (tag `phaseD-live`, `577eef1`)
 
 **The single next action — done.** The Shoggoth now reasons from a **rendered POV live in `run_game`** (it previously

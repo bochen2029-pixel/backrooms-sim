@@ -440,3 +440,29 @@ job is audit + fast, unambiguous rollback.
   command error — the log stores seed/ticks/events, not level — NOT a determinism bug.)
 - **Next (Phase 2):** the apparition read on the PLAYER's POV (not the creature's) + a soft atmosphere gate, so the
   creature reacts to the face the PLAYER is looking at. Live-only, same event-log shape.
+
+## E20 — 2026-06-18 — Apparition Phase 2a: the read on the PLAYER's POV + an audio atmosphere gate [ADR-083]
+- **What:** the uncanny front half of the deferred Phase 2 — in the live game the creature + atmosphere now react to a
+  face/figure in **what the PLAYER is looking at**, not its own vantage. `run_game` reuses the existing 2nd headless
+  device + vision host: **every 3rd vision cycle renders `br::core::wanderer_camera`** (the player's view) instead of
+  the creature POV (`svInFlightPlayer`, decided at warm-start). A player cycle's poll takes ONLY the apparition verdict
+  (never the seen-target/motion fields) → a present verdict makes the **PA murmur** about it (`speak_pa`, cooldown-gated)
+  and **thins the soundscape** (a soft decaying dip to 0.6× on master/sfx volume over ~9 s). Creature cycles unchanged.
+- **Why:** operator — "proceed to implementation, you are cleared." Phase 1 (ADR-082) proved the determinism on the
+  creature's own POV; this delivers the actual horror thesis — "it reacted to the face *I* was looking at."
+- **Why audio-only atmosphere:** the raster renderer (in-game default; RT deferred) has no global brightness lever —
+  a visual dim needs a renderer-contract + shader change, split out as **Phase 2b**. The audio levers + `speak_pa`
+  already exist → Phase 2a is **zero renderer changes, additive, live-only**.
+- **Determinism / no breakage:** `run_game` is presentation-only (INV-1) — same class as the live text brain / flares /
+  flashlight. No sim state, nothing hashed/logged; the record/replay path (`run_shoggoth_vision_record`) is untouched.
+- **Files:** `app/src/main.cpp` (run_game only: cycle parity + player camera + poll routing + audio dip + 2 telemetry
+  counters), `docs/APPARITION_SENSE.md`, `docs/DECISIONS.md` (ADR-083), `docs/CHANGE_AUDIT_LOG.md`.
+  **Rollback:** tag **`pre-phaseH2`** (pushed) → `git reset --hard pre-phaseH2`; or drop the `svInFlightPlayer` branch
+  (creature path is byte-identical without it).
+- **Verified:** `audit.ps1` green — build /WX, ctest **110/110**, shoggoth record==replay, inventory, isolation. Live
+  `--game --auto-play --seconds 100` smoke (KEEL up): `svision_player_reads:1`, **`apparition_hits:1 (kind=figure)` on
+  the player's own view**, `svision_intents:3` (creature motion intact), `debug_error_count:0`, `lookcheck:PASS`.
+  **`gate.ps1 -Milestone M29` PASSED** — VISION record→replay **bit-identical** (`955e0f4b…`), descent + M21 + M20 + M5
+  regressions green.
+- **Next (Phase 2b):** the **visual** atmosphere cue (a soft lighting dim/flicker on a lingering verdict) — needs a new
+  raster brightness uniform (renderer contract + shader). Separate increment.

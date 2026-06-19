@@ -1556,6 +1556,15 @@ int run_game(const Options& o) {
     constexpr int kSvWarmFrames = 24;                                    // frames to spread the chunk upload over (no hitch)
     constexpr uint32_t kSvBudget = 16u;                                  // chunk meshes uploaded per warm frame
     uint64_t svision_intents = 0;                                        // vision intents applied to the live creature
+    // Phase H / apparition Phase 2a: the PLAYER's-POV apparition read. Every 3rd creature-vision cycle renders the
+    // wanderer's view (not the creature's) on the SAME 2nd device, so the apparition sense runs on WHAT THE PLAYER
+    // SEES; a present verdict makes the PA murmur about it and thins the soundscape for a few decaying seconds --
+    // "it reacted to the face I was looking at". Live + presentation-only (INV-1 untouched), like the flares/voice.
+    uint64_t svCycle = 0; bool svInFlightPlayer = false;                 // cadence parity + the in-flight read's mode
+    auto apparitionUntil = t_start;                                      // soundscape stays thinned until here (decaying)
+    auto lastApparitionSpoke = t_start - milliseconds(60000);            // murmur cooldown so it never chatters
+    uint8_t apparitionKind = 0, apparitionSector = 0;                    // last player-POV verdict (telemetry / Phase 2b)
+    uint64_t svision_player_reads = 0, apparition_hits = 0;             // telemetry: player reads done / apparitions seen
     // ADR-074: two-way voice. A live mic + VAD (mic_capture.h) feeds an off-thread whisper+VLM
     // conversation host (director_chat.h); the reply is spoken back through the PA voice. Created
     // lazily with Director on; graceful no-op if there's no mic / the VLM is down. Echo-gated via
@@ -1674,8 +1683,16 @@ int run_game(const Options& o) {
         micProbe.sync(model);   // reflect the mic-test status into the Settings overlay
         { const std::string spoke = micProbe.take_fresh_reply(); if (!spoke.empty()) speak_pa(spoke, contracts::kAudioSampleRate); }  // speak the reply (diagnostic)
         if (audioOn) {
-            eng.set_master_volume(static_cast<float>(model.settings.master_pct) / 100.0f);
-            eng.set_sfx_volume(static_cast<float>(model.settings.sfx_pct) / 100.0f);
+            // Phase H/2a atmosphere: while a recent PLAYER-POV apparition lingers, thin the soundscape -- a soft
+            // decaying dip to 0.6x, never a hard cut. Presentation-only; touches no sim/replay state.
+            float atmoDip = 1.0f;
+            const auto tnow = steady_clock::now();
+            if (tnow < apparitionUntil) {
+                const float frac = clampf(duration<float>(apparitionUntil - tnow).count() / 9.0f, 0.0f, 1.0f);
+                atmoDip = 1.0f - 0.4f * frac;   // 0.6x at the verdict, easing back to 1.0x over ~9 s
+            }
+            eng.set_master_volume(atmoDip * static_cast<float>(model.settings.master_pct) / 100.0f);
+            eng.set_sfx_volume(atmoDip * static_cast<float>(model.settings.sfx_pct) / 100.0f);
         }
         if (!running) break;
 
@@ -1765,8 +1782,17 @@ int run_game(const Options& o) {
                     else shogPov->set_texture_seed(texSeed);
                 }
                 if (shogPov) {
-                    const contracts::CameraPose svCam = app::shoggoth_pov_camera(shog, 384.0f / 216.0f);
-                    if (!svWarming && now - last_svision >= svision_interval) { svWarming = true; svWarmFrames = kSvWarmFrames; }
+                    // Phase H/2a: decide the cycle's vantage at warm-start and hold it for the window. Most cycles
+                    // are the CREATURE's POV (its sight drives motion); every 3rd is the PLAYER's view, so the
+                    // apparition read runs on what the PLAYER sees. A player cycle skips one ~25 s motion update --
+                    // invisible for a slow lurker -- and the creature path is byte-unchanged on non-player cycles.
+                    if (!svWarming && now - last_svision >= svision_interval) {
+                        svWarming = true; svWarmFrames = kSvWarmFrames;
+                        svInFlightPlayer = (svCycle % 3u) == 2u; ++svCycle;
+                    }
+                    const contracts::CameraPose svCam = svInFlightPlayer
+                        ? br::core::wanderer_camera(s, 384.0f / 216.0f)
+                        : app::shoggoth_pov_camera(shog, 384.0f / 216.0f);
                     if (svWarming) {
                         uint32_t drawn = 0;
                         if (!shogPov->render_chunks(svCam, sm->resident(), kSvBudget, s.tick, &drawn)) {
@@ -1781,7 +1807,26 @@ int run_game(const Options& o) {
                         }
                     }
                 }
-                for (const app::ShoggothIntent& it : shogVision->poll()) { shog.intent = it; ++svision_intents; }
+                for (const app::ShoggothIntent& it : shogVision->poll()) {
+                    if (svInFlightPlayer) {
+                        // PLAYER-POV read: the creature reacts to what the PLAYER sees. Take ONLY the apparition
+                        // verdict -- this frame is not the creature's vantage, so never touch its seen target/motion.
+                        ++svision_player_reads;
+                        if (it.apparition) {
+                            ++apparition_hits;
+                            apparitionKind = it.app_kind; apparitionSector = it.app_sector;
+                            apparitionUntil = now + milliseconds(9000);   // soft, decaying atmosphere window
+                            // The PA murmurs about it (facility-wide voice, on a cooldown so it never chatters).
+                            if (audioOn && !it.utterance.empty() && it.utterance != lastShogUtter
+                                && now - lastApparitionSpoke > milliseconds(12000)) {
+                                speak_pa(it.utterance, contracts::kAudioSampleRate);
+                                lastShogUtter = it.utterance; lastApparitionSpoke = now;
+                            }
+                        }
+                    } else {
+                        shog.intent = it; ++svision_intents;   // creature-POV: full intent drives motion (as before)
+                    }
+                }
             }
             // Director (M11) TEXT narration -- RASTER fallback only. The RT path uses the VLM-vision narrator
             // (below); when RT is off there is no frame readback to send, so raster keeps the text-stats Director.
@@ -2035,6 +2080,9 @@ int run_game(const Options& o) {
     std::printf("svision_requests: %llu\n", svis_req);    // Phase D LIVE: creature-POV vision calls attempted
     std::printf("svision_produced: %llu\n", svis_prod);   // valid intents the qwen-VL eye yielded
     std::printf("svision_intents: %llu\n", static_cast<unsigned long long>(svision_intents));  // applied to the live creature
+    std::printf("svision_player_reads: %llu\n", static_cast<unsigned long long>(svision_player_reads));  // Phase 2a: player-POV apparition reads
+    std::printf("apparition_hits: %llu (last kind=%u where=%u)\n", static_cast<unsigned long long>(apparition_hits),
+                static_cast<unsigned>(apparitionKind), static_cast<unsigned>(apparitionSector));  // present verdicts on the player's view
     std::printf("chat_requests: %llu\n", chat_req);
     std::printf("chat_produced: %llu\n", chat_prod);
     std::printf("rt_frames: %llu\n", static_cast<unsigned long long>(rtFrames));   // ADR-077: live RT presents (0 => RT crashed or silently fell back to raster)

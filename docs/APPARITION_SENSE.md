@@ -1,6 +1,7 @@
 # Spec — "It sees what isn't there": the apparition sense (Well B), execution-ready
 
-> Status: **SPEC / not yet implemented** (operator: "spec it end-to-end, prep for execution when all checks out").
+> Status: **Phase 1 + Phase 2a SHIPPED** (ADR-082 / ADR-083; tags `phaseH-apparition`, `phaseH2a-player`). Phase 2b
+> (the *visual* lighting dim) remains — see Phase 2 below. (Originally: "spec it end-to-end, prep for execution.")
 > The flagship "impossible-before-VLMs" mechanic (see `docs/DYNAMIC_DIRECTOR.md` / the brainstorm): the creature's
 > dread is driven by **emergent apparitions in the rendered frame that neither the player nor the engine placed** —
 > faces/figures/words/arrows that arise only as pareidolia in the 2D projected image. There is no `f(scene-graph) →
@@ -47,6 +48,12 @@ replay) PROVES the apparition is deterministic on replay.** This is the foundati
 headless device the live vision host already owns, run the apparition read on **what the player sees**, and have the
 creature + atmosphere react to *that* ("it reacted to the face I was looking at"). Live-only (like the live brain),
 using the same event-log shape. Built after Phase 1 greens.
+> **Phase 2a — DONE** (ADR-083, ledger E20, tag `phaseH2a-player`). `run_game` renders `br::core::wanderer_camera`
+> every 3rd vision cycle (`svInFlightPlayer`, on the same 2nd device); a player cycle's poll takes ONLY the apparition
+> verdict (never motion) → the **PA murmurs** about it + the **soundscape thins** (a decaying dip on master/sfx). Live
+> smoke fired it end-to-end: `apparition_hits:1 (kind=figure)` on the player's own view, `debug_error_count:0`, gate
+> M29 still bit-identical. **Phase 2b (remaining):** the *visual* lighting dim — needs a new raster brightness uniform
+> (renderer contract + shader), so it's a separate, more invasive increment.
 
 ## 4. Schema changes (minimal, version-stable)
 `app/src/shoggoth_brain.h`:
