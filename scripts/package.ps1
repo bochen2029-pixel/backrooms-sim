@@ -52,6 +52,7 @@ foreach ($d in @('', 'runtime\llama', 'runtime\keel', 'runtime\whisper', 'models
     New-Item -ItemType Directory -Force -Path (Join-Path $stage $d) | Out-Null
 }
 Copy-Item $exe (Join-Path $stage 'Backrooms.exe') -Force
+Copy-Item $exe (Join-Path $stage 'Backrooms.scr') -Force   # screensaver = the same exe renamed (self-detects /s /p /c) -> same RT/AI features
 
 # --- 3) verify the persistent in-repo assets are present (NEVER copied from C:\ / SDK) ---
 $required = @('dxcompiler.dll', 'dxil.dll',
