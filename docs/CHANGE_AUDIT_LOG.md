@@ -541,3 +541,43 @@ job is audit + fast, unambiguous rollback.
 - **Verified:** **gate M9 PASSED** (goldens bit-identical, denoiser 0.362, **interactive PT 174.1 FPS** vs 168.9 pre-B,
   1km TLAS walk 13 rebuilds debug-clean, ctest 110/110). `audit.ps1` PASS (build /WX, ctest 110, determinism
   `06aa2db8`, inventory, isolation). RT-perf bundle ghost+A+B pushed, tagged `rtperf-green`.
+
+### E25 — RT item C: refit the creature BLAS in place instead of rebuilding (`df97807`)
+- **What:** `RT_PERF_PLAN.md` item C (the AS-refit half; B already did the `FAST_BUILD` half). The Shoggoth mesh is
+  **writhe-stable** — fixed topology, only positions animate (asserted by the `[m25][body]` test: `build_shoggoth_mesh`
+  at two writhe phases gives **equal vert counts**). So the per-frame creature BLAS is built `ALLOW_UPDATE` and
+  **refits in place** (`PERFORM_UPDATE`, `SourceAS` = the existing BLAS, the smaller `UpdateScratchDataSizeInBytes`)
+  whenever this frame's vert count matches the last build. A count change, or a scene rebuild (which `Reset`s
+  `creatureBlas` + the new `creatureBlasVerts` tracker), falls back to a full build. New `Impl::creatureBlasVerts`.
+- **Why:** a refit is much cheaper than a full rebuild for a deforming mesh (NVIDIA: "bending not breaking" = the ideal
+  refit case). The traced result is identical to a rebuild (build-cost only).
+- **Determinism / no breakage:** the offline/golden path calls `update_creature` at most once → always a full build,
+  never a refit; and `ALLOW_UPDATE` is output-neutral → **goldens bit-identical**. The refit correctness is validated by
+  the M9 1km TLAS walk (per-frame `update_creature` → the refit path) being **debug-clean** (the validation layer checks
+  `ALLOW_UPDATE` present, source valid, in-place source==dest, `UpdateScratch` sized).
+- **Files:** `render_dxr/src/dxr.cpp` (+21 −5). **Rollback:** `git reset --hard e072e8a` (item B).
+- **Verified:** **gate M9 PASSED** (goldens bit-identical 0.000004/0.000677/0.000000, ctest 110/110, 1km TLAS walk
+  debug-clean, FPS 173.3 ≈ B's 174.1 — the gate's corridor has no creature, so refit doesn't activate there; the win is
+  in-game). Live `--game --rt` smoke: `rt_frames 1854`, **`debug_error_count 0`** (the creature refits every frame in
+  the real game, validation-layer clean), `lookcheck PASS`. *Note:* the FPS gain is marginal — the creature mesh is
+  small, so its BLAS rebuild was already cheap under `FAST_BUILD`; C is the correctness/best-practice completion of the
+  AS thread, not a big win.
+
+### RT-perf — decision to STOP at ghost+A+B+C (items D/E/SVGF deferred as measured-optional)
+- **Context:** `RT_PERF_PLAN.md` Step 0 diagnosed the in-game slowness as **~80% structural stalls, ~20% ray cost.**
+  ghost+A+B+C fixed the structural side in full: the cross-device readback (A), one fewer `wait_idle`/frame via the
+  denoise fold (B), and the per-frame AS now `FAST_BUILD`+refit (B/C). Gate M9 green throughout, live `--game --rt`
+  debug-clean at ~116–123 fps (≈107 baseline → A → A+B), ghosting gone.
+- **Why stop:** the remaining items are **ray-cost** cuts (the ~20% factor) and all change the **converged lighting
+  output**, so each needs either a goldens regen (against "goldens sacred") or interactive-only two-path gating + an
+  **unbiasedness convergence oracle** + a live look-A/B — integrator surgery with real regression risk on the operator's
+  actual gameplay view, for an already-playable scene. Specifically: **D** (stochastic/RIS direct lighting at the
+  primary hit) needs the shader **restructured** — `direct_light` is currently in the *deterministic* term (one call
+  per pixel, ×`uSampleCount`), not per-sample, so making it stochastic moves it into the sample loop. **E** had two
+  parts: *skip-denoise-when-converged* was **prototyped and reverted** — it keys off *camera* convergence, but the ghost
+  fix makes the creature always 1-spp (history-rejected), so a creature writhing in a still-camera view would render
+  noisy (a regression on the exact creature the operator cares about); the *GI-NEE-cut* changes converged output too
+  (interactive-only). **SVGF** is a milestone-sized temporal denoiser.
+- **Recommendation:** ship ghost+A+B+C; have the operator confirm smoothness at their real settings (fullscreen res +
+  open room + flares). If open rooms are still heavy, the scoped next lever is **interactive-only stochastic direct
+  lighting (RIS)** with a high-spp stochastic-vs-full-NEE convergence test as its oracle. Not done speculatively here.

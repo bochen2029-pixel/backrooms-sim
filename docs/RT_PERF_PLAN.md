@@ -1,12 +1,21 @@
 # RT Performance Plan — why the in-game path tracer is slow, and the ranked fixes
 
-> **STATUS 2026-06-18 (Session 40): the ghosting fix + items A + B are SHIPPED + gate-M9-green + pushed (tag
-> `rtperf-green` `e072e8a`).** Done: the **ghosting** (material-7 history reject, E22 `0c8e0b3`), **A** the cross-device
-> readback eliminated (single-device `present_pt_texture`, E23 `0f3da13`), **B** the frame pipelined (denoise folded
-> into the accumulate list + per-frame AS → `PREFER_FAST_BUILD`, E24 `e072e8a`). Interactive PT 174.1 FPS @ 1440p
-> (gate). The FAST_BUILD half of **C** landed with B; the rest of **C** (AS `ALLOW_UPDATE` + refit), **D** (ReSTIR-lite
-> stochastic light sampling), **E** (no full NEE at the GI bounce + skip-denoise-when-converged), and SVGF remain
-> OPTIONAL future increments — measure in-game first (Step 0) before doing more. Rollback anchor: tag `pre-rtperf`.
+> **STATUS 2026-06-18 (Session 40): the ghosting fix + items A + B + C are SHIPPED + gate-M9-green + pushed.** Done:
+> the **ghosting** (material-7 history reject, E22 `0c8e0b3`), **A** the cross-device readback eliminated (single-device
+> `present_pt_texture`, E23 `0f3da13`), **B** the frame pipelined (denoise folded into the accumulate list + per-frame
+> AS → `PREFER_FAST_BUILD`, E24 `e072e8a`, tag `rtperf-green`), **C** the creature BLAS refit in place
+> (`ALLOW_UPDATE`+`PERFORM_UPDATE`, the mesh is writhe-stable, E25 `df97807`). Interactive PT ~173 FPS @ 1440p (gate),
+> live `--game --rt` ~116–123 fps debug-clean, ghosting gone.
+>
+> **DECISION: stop here. D / E / SVGF are deferred as measured-optional.** Step 0 diagnosed the slowness as ~80%
+> structural stalls (fixed by A+B+C) / ~20% ray cost. The remaining items are all **ray-cost cuts that change the
+> converged lighting output** → each needs a goldens regen (against "goldens sacred") OR interactive-only two-path
+> gating + an unbiasedness convergence oracle + a live look-A/B — integrator surgery with real regression risk on the
+> operator's gameplay view, for an already-playable scene. **E's skip-denoise-when-converged was prototyped and reverted**
+> (keys off camera convergence, but the ghost fix makes the creature always 1-spp → a writhing creature in a still view
+> would render noisy). **D** needs the shader restructured (`direct_light` is in the *deterministic* term, not
+> per-sample). Next lever IF open rooms are still heavy at the operator's real settings: **interactive-only stochastic
+> direct lighting (RIS)** with a high-spp convergence test as its oracle. Rollback anchor: tag `pre-rtperf` `0644ef8`.
 
 > Logged 2026-06-18 at the operator's request ("ray tracing is unplayable, too slow — log the plan, focus on
 > raster for now"). A diagnosis + ranked optimization plan, grounded in a code scan (`render_dxr/src/dxr.cpp`,

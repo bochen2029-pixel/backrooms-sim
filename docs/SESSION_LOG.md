@@ -33,12 +33,30 @@ TLAS → `PREFER_FAST_BUILD` (static chunk BLASes stay `FAST_TRACE`). Build-perf
 goldens byte-unchanged. **The denoiser sub-gate ratio is 0.362 — IDENTICAL to pre-B**: the bitwise proof the fold +
 barrier are correct. Interactive PT **174.1 FPS** (was 168.9).
 
-**Verified (the QC).** gate M9 PASSED for A and B (goldens bit-identical 0.000004/0.000677/0.000000, denoiser 0.362,
-174.1 FPS, 1km TLAS walk 13 rebuilds debug-clean, ctest 110/110). `audit.ps1` PASS (build /WX, ctest 110, determinism
-`06aa2db8`, inventory, isolation). Live A-smoke 1607 frames debug-clean. **Pending:** a live `--game --rt` smoke of the
-**full A+B+ghost bundle together** (A was smoked solo; B is gate-M9-only) — KEEL up. **Optional next** (RT_PERF_PLAN):
-the rest of C (AS `ALLOW_UPDATE`+refit), D (ReSTIR-lite light sampling), E (GI-NEE cut), SVGF — measure in-game first.
-Untracked staging dirs `_staged_rt_perf_*` + `_brainstorm/` can be cleaned anytime (work is applied + committed).
+**Item C — refit the creature BLAS [E25, `df97807`].** The Shoggoth mesh is writhe-stable (fixed topology, only
+positions animate — `[m25][body]` test asserts equal vert counts across writhe phases), so the per-frame creature BLAS
+now builds `ALLOW_UPDATE` and **refits in place** (`PERFORM_UPDATE`, in-place source==dest, the smaller `UpdateScratch`)
+instead of rebuilding; a count change or scene rebuild falls back to a full build. Golden-safe (offline builds once,
+never refits; `ALLOW_UPDATE` is output-neutral). gate M9 PASSED (goldens bit-identical, 1km TLAS walk debug-clean = the
+refit is validation-correct); live smoke `rt_frames 1854`, debug_error_count 0. Marginal FPS (small mesh) — the
+correctness/best-practice completion of the AS thread, not a big win.
+
+**Verified (the QC).** gate M9 PASSED for A, B, and C (goldens bit-identical 0.000004/0.000677/0.000000, denoiser 0.362,
+~173 FPS, 1km TLAS walk 13 rebuilds debug-clean, ctest 110/110). `audit.ps1` PASS (build /WX, ctest 110, determinism
+`06aa2db8`, inventory, isolation). **Full A+B+ghost+C live `--game --rt` smokes debug-clean** (`rt_frames` 1607→1729→1854,
+~116–123 fps, debug_error_count 0, lookcheck PASS across the bundle) — the pending full-bundle smoke is now done.
+
+**DECISION — stop the RT-perf effort at ghost+A+B+C; D / E / SVGF deferred as measured-optional.** Step 0 diagnosed
+the slowness as ~80% structural stalls / ~20% ray cost; A+B+C fixed the structural side in full and the scene is
+playable + ghosting-free. The remaining items are ray-cost cuts that all **change the converged lighting output** → each
+needs a goldens regen (against "goldens sacred") or interactive-only two-path gating + an unbiasedness oracle + a live
+look-A/B — integrator surgery with real regression risk on the operator's gameplay view, for an already-playable scene.
+**E's skip-denoise-when-converged was prototyped and reverted** (keys off camera convergence, but the ghost fix makes
+the creature always 1-spp → a writhing creature in a still view would render noisy — a regression on the exact creature
+the operator cares about). **D** needs the shader restructured (`direct_light` is in the deterministic term, not
+per-sample). Next lever IF open rooms are still heavy at the operator's real settings: interactive-only stochastic
+direct lighting (RIS) + a high-spp convergence test as its oracle. Untracked `_staged_rt_perf_*` + `_brainstorm/` are
+removable (work applied + committed). Tags: `pre-rtperf` (rollback) · `rtperf-green` (`e072e8a`, A+B green point).
 
 ---
 

@@ -7,14 +7,14 @@
 ## 0. Read order, then VERIFY (do this before any work)
 1. This file.
 2. `docs/SESSION_LOG.md` — newest entry (the auto-rehydration hook also injects it).
-3. `docs/CHANGE_AUDIT_LOG.md` — the per-change ledger **E0–E24** (what changed, why, rollback, verification). E22–E24 = the RT-perf bundle.
+3. `docs/CHANGE_AUDIT_LOG.md` — the per-change ledger **E0–E25** (what changed, why, rollback, verification). E22–E25 = the RT-perf bundle (ghost/A/B/C) + the stop-here decision.
 4. Memory: `C:\Users\user\.claude\projects\C--backrooms\memory\project-rt-crash-fix.md` (master thread) +
    `feedback-working-mode.md` (how to work here).
 5. As needed: `docs/SHOGGOTH_PLAN.md` (the plan), `docs/DECISIONS.md` ADR-077/078, `docs/ARCHITECTURE.md`.
 
 **VERIFY reality (disk wins over this doc):**
 ```
-git -C C:\backrooms log --oneline -12          # HEAD should be 0c6ee48 (or later); newest tag rtperf-green (e072e8a)
+git -C C:\backrooms log --oneline -12          # HEAD should be df97807 (item C) or later (docs on top); newest tag rtperf-green (e072e8a)
 git -C C:\backrooms status --short             # clean except ?? _brainstorm/ + ?? _staged_rt_perf_{ghost,A,B}/ (applied+committed; removable)
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\backrooms\scripts\audit.ps1   # expect: ctest 110/110, record==replay, inventory+isolation green
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\backrooms\scripts\keel-up.ps1 # self-contained sidecar :8080+:7071 BEFORE any LLM-gated work
@@ -23,16 +23,22 @@ Raw-transcript backstop (grep, don't re-read whole): `C:\Users\user\.claude\proj
 
 ## 1. CORE — where we are + the single next action
 **Project:** C:\backrooms — native Win32 C++20 D3D12+DXR Backrooms sim; local-LLM AI "Shoggoth" creature.
-**State:** all green @ HEAD `0c6ee48` (newest tag `rtperf-green` `e072e8a`), pushed. ctest **110/110**, determinism record==replay,
+**State:** all green @ HEAD `df97807`+docs (newest tag `rtperf-green` `e072e8a`), pushed. ctest **110/110**, determinism record==replay,
 no D3D12 errors, inventory+isolation clean. **No DOS windows** (release exe = /SUBSYSTEM:WINDOWS). **KEEL fully
 self-contained** (runs from `dist\Backrooms` via `scripts\keel-up.ps1`; nothing outside C:\backrooms is ever needed).
 
-**RT PERFORMANCE FIXED (Session 40, tag `rtperf-green`, ledger E22–E24).** The operator's "RT unplayable — too slow +
+**RT PERFORMANCE FIXED (Session 40, tag `rtperf-green`, ledger E22–E25).** The operator's "RT unplayable — too slow +
 the Shoggoth ghosts into a quantum-superposition blend" is resolved: **ghost** (material-7 history reject, `0c8e0b3`) +
 **A** the per-frame cross-device readback killed (single-device `present_pt_texture`, `0f3da13`) + **B** the frame
-pipelined (denoise folded into the accumulate list + per-frame AS → `PREFER_FAST_BUILD`, `e072e8a`). Each gate-M9-green
-(goldens bit-identical, denoiser 0.362, interactive PT **174.1 FPS**), `audit.ps1` PASS, live `--game --rt` ~123 fps
-debug-clean. Plan/remaining: `docs/RT_PERF_PLAN.md` — C-refit, D (ReSTIR-lite), E, SVGF are OPTIONAL (measure first).
+pipelined (denoise folded into the accumulate list + per-frame AS → `PREFER_FAST_BUILD`, `e072e8a`, tag `rtperf-green`) +
+**C** the creature BLAS refit in place (`ALLOW_UPDATE`+`PERFORM_UPDATE`, mesh is writhe-stable, `df97807`). Each
+gate-M9-green (goldens bit-identical, denoiser 0.362, interactive PT ~173 FPS), `audit.ps1` PASS, live `--game --rt`
+~116–123 fps debug-clean, ghosting gone. **DECISION: stopped here — D/E/SVGF deferred as measured-optional** (Step-0
+diagnosis was ~80% stalls [fixed by A+B+C] / ~20% ray cost; the remaining items are ray-cost cuts that change the
+converged lighting → need interactive-only two-path + an unbiasedness oracle, integrator surgery not justified on an
+already-playable scene; E's skip-denoise-when-converged was prototyped + reverted — creature-always-1-spp noise). Next
+lever IF still slow at the operator's real settings: interactive-only stochastic direct lighting (RIS) + convergence
+test. See `docs/RT_PERF_PLAN.md` + ledger E25. Rollback: tag `pre-rtperf` `0644ef8`.
 **The Shoggoth's immersive arc is COMPLETE + LIVE in-game:** it THINKS (live LLM brain ~3 s), SEES (live rendered POV,
 Phase D LIVE), SPEAKS (murmurs via `speak_pa`, Phase E), HUNTS (vision→`resolve_target` motion), and now **SEES WHAT
 ISN'T THERE** — the apparition sense (Phase H): emergent pareidolia (a face/figure/word/arrow in the procedural grime
