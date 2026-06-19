@@ -32,8 +32,10 @@ foreach ($m in $expected) {
 $known = $expected + @('contracts', 'docs', 'scripts', 'tests', 'goldens', 'runs',
                        'build', 'build-release', 'dist', 'extern', 'files', '.git', '.claude',
                        '_run_state', '.brstate', '_brainstorm')
+# `_staged_*` = a session's prepared-changeset staging dir (APPLY_PROMPT + CHANGESET.md review artifacts),
+# the same working-dir class as `_brainstorm`/`runs` -- not a sim module, so it carries no inventory entry.
 Get-ChildItem $RepoRoot -Directory | ForEach-Object {
-    if ($known -notcontains $_.Name) {
+    if (($known -notcontains $_.Name) -and ($_.Name -notlike '_staged_*')) {
         $problems += "unexpected top-level directory (not in inventory): $($_.Name)/"
     }
 }
