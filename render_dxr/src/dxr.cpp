@@ -199,6 +199,7 @@ struct DxrRenderer::Impl {
     std::vector<D3D12_RAYTRACING_INSTANCE_DESC> chunkInstances;
     uint32_t chunkVertCount = 0;
     ComPtr<ID3D12Resource> creatureBlas, creatureVb;
+    uint32_t creatureBlasVerts = 0;   // RT_PERF item C: last creature BLAS vert count -> refit when it matches
     ComPtr<ID3D12RootSignature> ptRS;
     ComPtr<ID3D12StateObject> ptPso;
     ComPtr<ID3D12Resource> ptSbt;          // raygen-only table
@@ -872,6 +873,7 @@ bool DxrRenderer::build_scene(const std::vector<contracts::ResidentChunk>& chunk
     d.blas.clear(); d.vbs.clear(); d.tlas.Reset(); d.sceneReady = false;
     d.shadeVb.Reset(); d.shadeVertCount = 0;
     d.creatureBlas.Reset(); d.creatureVb.Reset(); d.chunkInstances.clear(); d.chunkVertCount = 0;
+    d.creatureBlasVerts = 0;   // C: a scene rebuild drops the BLAS -> next update_creature does a full build, not a refit
 
     // Upload each chunk's vertices to an upload-heap buffer + build a BLAS. The
     // same vertices are also concatenated into one global buffer (shadeVb) the PT
@@ -1141,21 +1143,35 @@ bool DxrRenderer::update_creature(const contracts::ChunkVertex* verts, uint32_t 
     geo.Triangles.VertexBuffer.StrideInBytes = sizeof(contracts::ChunkVertex);
     geo.Triangles.VertexCount = count;
     geo.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+    // RT_PERF item C: ALLOW_UPDATE so the writhe REFITS the BLAS in place (the mesh is writhe-stable -- fixed
+    // topology, only positions animate, asserted by the [m25][body] test) instead of a full rebuild every frame.
+    // Refit when the vert count matches the last build AND a prior BLAS exists; a count change or a scene rebuild
+    // (which Resets creatureBlas + creatureBlasVerts) falls back to a full build. Refit uses the smaller
+    // UpdateScratch size and SourceAS = the existing BLAS (in-place). The traced result is identical to a rebuild
+    // -- this is a build-cost optimization only, so the offline/golden path (one build, never a refit) is unaffected.
+    const bool refit = d.creatureBlas && (count == d.creatureBlasVerts);
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS bin{};
     bin.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-    bin.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;   // RT_PERF item B2: rebuilt every frame -> fast BUILD
+    bin.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD
+              | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;   // ALLOW_UPDATE -> refittable
     bin.NumDescs = 1; bin.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY; bin.pGeometryDescs = &geo;
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO bpi{};
-    d.device->GetRaytracingAccelerationStructurePrebuildInfo(&bin, &bpi);
-    ComPtr<ID3D12Resource> bscratch = make_buffer(d.device.Get(), bpi.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT,
+    d.device->GetRaytracingAccelerationStructurePrebuildInfo(&bin, &bpi);   // query with ALLOW_UPDATE -> UpdateScratch sized
+    const UINT64 bscratchBytes = refit ? bpi.UpdateScratchDataSizeInBytes : bpi.ScratchDataSizeInBytes;
+    ComPtr<ID3D12Resource> bscratch = make_buffer(d.device.Get(), bscratchBytes, D3D12_HEAP_TYPE_DEFAULT,
         D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-    d.creatureBlas = make_buffer(d.device.Get(), bpi.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT,
-        D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    if (!refit) {   // a full build (re)allocates the BLAS; a refit reuses it in place
+        d.creatureBlas = make_buffer(d.device.Get(), bpi.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT,
+            D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    }
     if (!bscratch || !d.creatureBlas) { last_error_ = "creature blas buffers"; return false; }
+    d.creatureBlasVerts = count;
+    if (refit) bin.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;   // build flag (not in the prebuild query)
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bbd{};
     bbd.Inputs = bin;
     bbd.ScratchAccelerationStructureData = bscratch->GetGPUVirtualAddress();
     bbd.DestAccelerationStructureData = d.creatureBlas->GetGPUVirtualAddress();
+    if (refit) bbd.SourceAccelerationStructureData = d.creatureBlas->GetGPUVirtualAddress();   // in-place refit
     d.list->BuildRaytracingAccelerationStructure(&bbd, 0, nullptr);
     D3D12_RESOURCE_BARRIER uavb{}; uavb.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV; uavb.UAV.pResource = d.creatureBlas.Get();
     d.list->ResourceBarrier(1, &uavb);
