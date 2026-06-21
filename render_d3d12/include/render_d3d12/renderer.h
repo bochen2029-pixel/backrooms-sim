@@ -63,6 +63,10 @@ public:
     // chunk render (M5). Cheap; the upload happens lazily on the next draw.
     void set_texture_seed(uint64_t seed);
 
+    // Present sync interval: true = vsync (default; FPS capped to the monitor refresh), false = uncapped
+    // (real/measured FPS, lower input latency, possible tearing). A live gameplay option (run_game toggles it).
+    void set_vsync(bool on);
+
     // Enable/configure the VHS post-process pass (M8): seeded film grain,
     // chromatic aberration, barrel distortion, scanlines, vignette. `time` (sim
     // seconds) drives grain/interlace; `hud` composites the overlay. When enabled,

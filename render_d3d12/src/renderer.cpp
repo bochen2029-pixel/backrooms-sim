@@ -118,6 +118,7 @@ struct Renderer::Impl {
 
     // Windowed swapchain.
     ComPtr<IDXGISwapChain3> swapchain;
+    UINT presentSync = 1;   // Present() sync interval: 1 = vsync (default), 0 = uncapped (set_vsync(false)) -> real FPS, lower latency, tearing
     ComPtr<ID3D12Resource> backbuffers[kBackBufferCount];
 
     // Depth + scene pipeline (M2: draw the test room).
@@ -569,7 +570,7 @@ bool Renderer::render_clear_frame() {
     d.queue->ExecuteCommandLists(1, lists);
 
     if (d.windowed) {
-        if (FAILED(d.swapchain->Present(1, 0))) {
+        if (FAILED(d.swapchain->Present(d.presentSync, 0))) {
             last_error_ = "Present failed";
             return false;
         }
@@ -1618,6 +1619,10 @@ void Renderer::set_texture_seed(uint64_t seed) {
     if (impl_) impl_->pendingTexSeed = seed;
 }
 
+void Renderer::set_vsync(bool on) {
+    if (impl_) impl_->presentSync = on ? 1u : 0u;   // 1 = vsync (FPS capped to refresh), 0 = uncapped (real FPS, lower latency, tearing)
+}
+
 void Renderer::set_dread(float dim01) {
     if (!impl_) return;
     impl_->dread = dim01 < 0.0f ? 0.0f : (dim01 > 1.0f ? 1.0f : dim01);  // Apparition Phase 2b; 1.0 = off (default)
@@ -1852,7 +1857,7 @@ bool Renderer::present_overlay_windowed(const uint8_t* rgba, uint32_t width, uin
     if (FAILED(d.list->Close())) { last_error_ = "command list close failed"; return false; }
     ID3D12CommandList* wlists[] = { d.list.Get() };
     d.queue->ExecuteCommandLists(1, wlists);
-    if (FAILED(d.swapchain->Present(1, 0))) { last_error_ = "Present failed"; return false; }
+    if (FAILED(d.swapchain->Present(d.presentSync, 0))) { last_error_ = "Present failed"; return false; }
     const UINT64 wv = ++d.fenceValue;
     if (FAILED(d.queue->Signal(d.fence.Get(), wv))) { last_error_ = "fence Signal failed"; return false; }
     if (d.fence->GetCompletedValue() < wv) {
@@ -1940,7 +1945,7 @@ bool Renderer::present_pt_texture(void* pt_texture, bool draw_caption) {
     if (FAILED(d.list->Close())) { last_error_ = "command list close failed"; return false; }
     ID3D12CommandList* wlists[] = { d.list.Get() };
     d.queue->ExecuteCommandLists(1, wlists);
-    if (FAILED(d.swapchain->Present(1, 0))) { last_error_ = "Present failed"; return false; }
+    if (FAILED(d.swapchain->Present(d.presentSync, 0))) { last_error_ = "Present failed"; return false; }
     const UINT64 wv = ++d.fenceValue;
     if (FAILED(d.queue->Signal(d.fence.Get(), wv))) { last_error_ = "fence Signal failed"; return false; }
     if (d.fence->GetCompletedValue() < wv) {
@@ -2083,7 +2088,7 @@ bool Renderer::render_chunks_windowed(const contracts::CameraPose& camera,
     if (FAILED(d.list->Close())) { last_error_ = "command list close failed"; return false; }
     ID3D12CommandList* wlists[] = { d.list.Get() };
     d.queue->ExecuteCommandLists(1, wlists);
-    if (FAILED(d.swapchain->Present(1, 0))) { last_error_ = "Present failed"; return false; }
+    if (FAILED(d.swapchain->Present(d.presentSync, 0))) { last_error_ = "Present failed"; return false; }
     const UINT64 wv = ++d.fenceValue;
     if (FAILED(d.queue->Signal(d.fence.Get(), wv))) { last_error_ = "fence Signal failed"; return false; }
     if (d.fence->GetCompletedValue() < wv) {

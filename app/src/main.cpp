@@ -104,6 +104,7 @@ struct Options {
     bool dxr_denoise = false;   // headless: does the spatial denoiser bring a noisy few-spp frame closer to ground truth?
     bool dxr_stoch = false;     // headless oracle: does stochastic single-light NEE (RIS) converge to the full-NEE image? (unbiasedness)
     uint32_t rt_scale = 0;      // run_game initial RT internal-resolution scale index (0 Quality 2/3, 1 Balanced 1/2, 2 Performance 1/3); F3 cycles it live
+    bool no_vsync = false;      // run_game: start with vsync OFF (uncapped FPS, lower latency, tearing); V toggles it live. Default vsync ON.
     bool llm_test = false;      // CLI: exercise the in-game "Test Connection" probe + print the status line
     bool soak = false, crash_test = false, director_probe = false;
     bool director_record = false, director_replay = false;
@@ -275,6 +276,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--rt-scale") == 0) { if (!u32(o.rt_scale)) return false; }
+        else if (std::strcmp(a, "--no-vsync") == 0) o.no_vsync = true;
         else if (std::strcmp(a, "--flashlight") == 0) o.flashlight = true;
         else if (std::strcmp(a, "--game-shot") == 0) o.game_shot = true;
         else if (std::strcmp(a, "--ladder-walk") == 0) o.ladder_walk = true;
@@ -1503,6 +1505,8 @@ int run_game(const Options& o) {
     // accumulation + denoiser carry quality. Default Quality (2/3) = the prior hardcoded behavior.
     static const struct { uint32_t num, den; const char* name; } kRtScales[] = { {2,3,"Quality"}, {1,2,"Balanced"}, {1,3,"Performance"} };
     int rtScaleIdx = (o.rt_scale < 3u) ? static_cast<int>(o.rt_scale) : 0; bool prevF3 = false;
+    bool vsyncOn = !o.no_vsync; bool prevV = false;   // V toggles vsync; OFF = uncapped FPS (real perf, lower latency, tearing)
+    renderer.set_vsync(vsyncOn);
     app::Shoggoth shog;                       // M20b: the hunting creature (spawned on New Game)
     std::vector<contracts::ChunkVertex> shogBody;
     std::vector<contracts::ChunkVertex> ladderMesh; int64_t ladderCell = (static_cast<int64_t>(1) << 62);  // the infinite ladder's render mesh (rebuilt only when the player crosses a 24 m cell)
@@ -1661,6 +1665,9 @@ int run_game(const Options& o) {
         const bool f3 = focused && (GetAsyncKeyState(VK_F3) & 0x8000) != 0;  // F3: cycle RT internal resolution (Quality 2/3 -> Balanced 1/2 -> Performance 1/3)
         if (f3 && !prevF3) { rtScaleIdx = (rtScaleIdx + 1) % 3; dxrHaveCam = false; }  // res change -> the rw/rh below re-inits the DxrRenderer; force a clean accumulator reset
         prevF3 = f3;
+        const bool vkey = focused && (GetAsyncKeyState('V') & 0x8000) != 0;  // V: toggle vsync (OFF = uncapped FPS / lower latency / tearing)
+        if (vkey && !prevV) { vsyncOn = !vsyncOn; renderer.set_vsync(vsyncOn); }
+        prevV = vkey;
         const bool fkey = focused && (GetAsyncKeyState('F') & 0x8000) != 0;  // F: toggle the RT flashlight (eye-torch)
         if (fkey && !prevF) flashOn = !flashOn;
         prevF = fkey;

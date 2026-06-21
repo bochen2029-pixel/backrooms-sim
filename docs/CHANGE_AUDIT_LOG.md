@@ -754,7 +754,27 @@ job is audit + fast, unambiguous rollback.
   `Options::rt_scale` + `--rt-scale` parse). **Rollback:** `git reset --hard 0c03c65` (tag `pre-rt-reproj`).
 - **Verified:** `audit.ps1` PASS (build /WX, **ctest 116/116**, determinism `409129a0` UNCHANGED = live-only, inventory,
   isolation). Live smokes both **debug_error_count 0, lookcheck PASS**: Quality 911 frames vs Performance (1/3 res) 927
-  — **barely faster at the smoke's 720p window**, which CONFIRMS the RT_PERF_PLAN thesis: at low display res the FIXED
-  per-frame costs (sim, present, AS, update_creature syncs) dominate, so cutting PT pixels barely moves it. The knob's
-  win scales with display res — at the operator's **4K** the PT (~4.4M px at 2/3) is the dominant cost so 1/3 res cuts
-  it ~4×. *Next:* instrument the per-frame breakdown to find + cut the fixed costs (which help at ALL resolutions).
+  — **barely faster at the smoke's 720p window** (911 vs 927). *(E33 CORRECTS this: that was a VSYNC cap masking the
+  win, NOT fixed costs — uncapped, the knob is 61% faster.)*
+
+## E33 — 2026-06-21 — vsync toggle (V / --no-vsync) — and the diagnosis: the FPS cap was hiding everything
+- **Context:** the E32 resolution knob looked like it "barely helped" — Quality 911 vs Performance 927 at 720p. That
+  was suspicious (a 4× pixel cut moving the frame ~2%). Root cause: **all `Present()` calls used sync interval 1 =
+  VSYNC ON**, so the smoke (and the operator) were hard-capped at the monitor refresh (~75 Hz here = 13.3 ms); the PT
+  cost difference was entirely hidden under the cap. **This is a large part of the operator's "still slow":** in heavy
+  RT scenes that render slower than the refresh interval, vsync drops FPS to the next divisor (stutter), and the cap
+  hides any optimization headroom.
+- **What:** `Renderer::set_vsync(bool)` sets `Impl::presentSync` (1 vsync / 0 uncapped), used by all 4 windowed
+  `Present()` calls (default 1 = unchanged). `run_game` starts from `--no-vsync` and **V toggles it live**. Uncapped =
+  real/measured FPS, lower input latency, possible tearing.
+- **The measurement (uncapped, same scene/seed):** **Quality 2/3 = 1072 frames (~89 fps); Performance 1/3 = 1727
+  frames (~144 fps) = +61%.** So the resolution knob works great — it was masked by vsync. Decomposed: PT ≈ 5.7 ms @
+  2/3 → ≈ 1.4 ms @ 1/3, fixed ≈ 5.5 ms. At the operator's **4K** the PT scales ~10× (4.4M px) so it dominates → F3→
+  Performance is a much bigger win there, and **vsync was capping them regardless**.
+- **Why safe / no regression:** present-arg only. The headless gates never `Present()` to the swapchain (they readback)
+  → goldens trivially untouched; default `presentSync=1` = prior behavior. `run_game`-only wiring + a renderer setter.
+- **Files:** `render_d3d12/{include/render_d3d12/renderer.h,src/renderer.cpp}` (`set_vsync` + `presentSync` + the 4
+  Present calls), `app/src/main.cpp` (`--no-vsync`, the V toggle). **Rollback:** `git reset --hard 0c03c65`.
+- **Verified:** `audit.ps1` PASS (build /WX, ctest 116/116, determinism unchanged, inventory, isolation); live smokes
+  debug-clean both vsync states. **Operator takeaway: press V (uncap) + F3 (lower RT res) — two keystrokes, ~60%+ FPS
+  at 720p and proportionally more at 4K.**
