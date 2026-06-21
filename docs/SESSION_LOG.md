@@ -6,6 +6,42 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 43 — RT sampling: free temporal AA + NaN guard (step 1), then stochastic single-light NEE / RIS (step 2) ✅ (tag `rt-sampling-green` `ad6683b`)
+
+**Mined 3 Sebastian Lague "Coding Adventure" ray-tracing transcripts (operator-provided, `_brainstorm/TurboScribe
+Export 1483246579/`) for DXR-applicable efficiency wins.** Fanned out 3 agents to extract every technique; most is
+intro-level software-BVH that our hardware DXR already does better. Two landed, done safest-first with a rollback
+anchor (tag `pre-rt-sampling` `cdb28f1` + `_staged_rt_sampling_backup/`) and logged (ledger E30, E31).
+
+**Step 1 — free temporal AA + NaN/Inf accumulator guard [E30, `6eca645`].** (a) The primary ray jitters a sub-pixel
+amount per frame (±0.5 px); temporal accumulation resolves it into anti-aliased edges — no MSAA, no extra rays.
+(b) A single NaN/Inf would permanently poison the PERSISTENT accumulator and `isnan`/`isinf` are compiled away under
+fast-math, so the accumulate now bit-tests the IEEE exponent and drops a bad sample. Both gated by a new
+`render_pt_frame(..., bool aa=false)` arg, transported as `uFrame`'s high bit (no spare cbuffer slot). Golden-safe: the
+offline/golden + every gate path default `aa=false` → primary ray byte-unchanged, NaN guard a no-op. gate M9 PASSED
+(goldens bit-identical, denoiser 0.362 IDENTICAL — the `aa=false` default left the sub-gates unperturbed by design),
+live `--game --rt` debug-clean.
+
+**Step 2 — stochastic single-light NEE (RIS) [E31, `ad6683b`, tag `rt-sampling-green`].** The open-room speedup (the
+"D" deferred in E25). Full NEE shadow-rays every fluorescent cell in the 5x5 grid (~6-9 rays) at the primary hit AND
+the GI bounce. RIS replaces it: a weighted reservoir picks ONE light by unshadowed contribution, shadow-rays only it,
+returns `(ΣW)·visibility(chosen)` — **one shadow ray instead of ~6-9**. Unbiased (`E[W·V_j] = Σ w_i V_i`), converges to
+the identical image via accumulation. INTERACTIVE-ONLY (`uFrame` bit 30; a 2nd `stochastic_lights` param); offline/gate
+paths use full NEE → goldens within epsilon. **The proof = a new `--dxr-stoch` oracle** (full-NEE ref + an independent
+full-NEE noise-floor + the accumulated RIS image) **wired into gate M9 as a permanent sub-gate**: `err_stoch 2.35` vs
+`floor 2.26` → **excess 0.0898 = unbiased**. gate M9 PASSED; live `--game --rt` debug-clean. (`kPtShader` hit MSVC's
+16 KB string-literal cap → split into two adjacent raw literals. Pose-1 golden ticked 4e-6→5e-6: a 1-ULP DXC-recompile
+FP shift, within epsilon, logged honestly.)
+
+**Verified.** gate M9 PASSED both steps (goldens within epsilon, **stochastic oracle unbiased**, denoiser 0.362, ctest
+116/116, no-ghost clean, 1km TLAS walk debug-clean), `audit.ps1` green, live smokes `debug_error_count:0`. **Pending/
+note:** the RIS shadow-ray cut is largest in light-dense OPEN rooms (the operator's pain point) — the auto-play smoke
+(corridor-ish) shows it debug-clean at ~similar FPS, the real win is at the operator's open-room/fullscreen settings;
+the **release exe is now stale again** (rebuild via `scripts\package.ps1 -StageOnly` when ready). Rollback: tag
+`pre-rt-sampling`. Further RT levers (D's GI-cut, SVGF) remain optional in `docs/RT_PERF_PLAN.md`.
+
+---
+
 ## Session 42 — Phase C.2: the threaded KeelBroker — arbitrate the one backend across the live hosts ✅ (tags `phaseC2a-broker` `0b54474`, `phaseC2b-hosts`)
 
 **Five consumers, one llama-server, now ARBITRATED.** The live LLM/VLM hosts shared the single backend on best-effort

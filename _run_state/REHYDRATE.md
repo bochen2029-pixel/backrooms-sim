@@ -14,8 +14,8 @@
 
 **VERIFY reality (disk wins over this doc):**
 ```
-git -C C:\backrooms log --oneline -12          # HEAD should be 456a0c7 (Phase C.2b) or later; newest tag phaseC2b-hosts
-git -C C:\backrooms status --short             # clean except ?? _brainstorm/ + ?? _staged_rt_perf_{ghost,A,B}/ + ?? _staged_phase2b_backup/ + ?? _staged_phaseC2_backup/ (all applied+committed; removable)
+git -C C:\backrooms log --oneline -12          # HEAD should be ad6683b (RT sampling step 2) or later; newest tag rt-sampling-green
+git -C C:\backrooms status --short             # clean except ?? _brainstorm/ + ?? _staged_* backup dirs (all applied+committed; removable)
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\backrooms\scripts\audit.ps1   # expect: ctest 116/116, record==replay, inventory+isolation green
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\backrooms\scripts\keel-up.ps1 # self-contained sidecar :8080+:7071 BEFORE any LLM-gated work
 ```
@@ -23,9 +23,19 @@ Raw-transcript backstop (grep, don't re-read whole): `C:\Users\user\.claude\proj
 
 ## 1. CORE — where we are + the single next action
 **Project:** C:\backrooms — native Win32 C++20 D3D12+DXR Backrooms sim; local-LLM AI "Shoggoth" creature.
-**State:** all green @ HEAD `456a0c7` (newest tag `phaseC2b-hosts`; apparition arc + Phase C.2 KeelBroker complete), pushed. ctest **116/116**, determinism record==replay,
+**State:** all green @ HEAD `ad6683b` (newest tag `rt-sampling-green`; apparition arc + Phase C.2 KeelBroker + RT sampling steps 1-2 complete), pushed. ctest **116/116**, determinism record==replay,
 no D3D12 errors, inventory+isolation clean. **No DOS windows** (release exe = /SUBSYSTEM:WINDOWS). **KEEL fully
 self-contained** (runs from `dist\Backrooms` via `scripts\keel-up.ps1`; nothing outside C:\backrooms is ever needed).
+
+**RT SAMPLING shipped (Session 43, tag `rt-sampling-green`, ledger E30-E31).** From the operator's Coding-Adventure
+brainstorm. **Step 1** (`6eca645`): free temporal AA (sub-pixel primary-ray jitter, accumulation resolves edges) +
+a NaN/Inf accumulator-poison guard; gated by a new `render_pt_frame(aa=false)` arg (uFrame high bit), golden-safe.
+**Step 2** (`ad6683b`): **stochastic single-light NEE (RIS)** — pick ONE ceiling light by a weighted reservoir + one
+shadow ray instead of the full 5x5 grid (~6-9 rays), at the primary hit + GI bounce; **unbiased, proven by the new
+`--dxr-stoch` oracle wired into gate M9** (err excess 0.0898 vs the noise floor). INTERACTIVE-ONLY (uFrame bit 30);
+offline/gate paths use full NEE → goldens within epsilon. The shadow-ray cut is largest in light-dense OPEN rooms (the
+operator's pain point — to feel at their fullscreen settings). Rollback: tag `pre-rt-sampling` `cdb28f1`. Optional next
+RT levers (GI-NEE cut, SVGF) in `docs/RT_PERF_PLAN.md`. **Release exe is stale** — rebuild via `package.ps1 -StageOnly`.
 
 **RT PERFORMANCE FIXED (Session 40, tag `rtperf-green`, ledger E22–E25).** The operator's "RT unplayable — too slow +
 the Shoggoth ghosts into a quantum-superposition blend" is resolved: **ghost** (material-7 history reject, `0c8e0b3`) +
