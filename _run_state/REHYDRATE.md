@@ -14,7 +14,7 @@
 
 **VERIFY reality (disk wins over this doc):**
 ```
-git -C C:\backrooms log --oneline -12          # HEAD should be ad6683b (RT sampling step 2) or later; newest tag rt-sampling-green
+git -C C:\backrooms log --oneline -12          # HEAD should be 508f150 (RT perf knobs) or later; tags rt-sampling-green, anchor pre-rt-reproj
 git -C C:\backrooms status --short             # clean except ?? _brainstorm/ + ?? _staged_* backup dirs (all applied+committed; removable)
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\backrooms\scripts\audit.ps1   # expect: ctest 116/116, record==replay, inventory+isolation green
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\backrooms\scripts\keel-up.ps1 # self-contained sidecar :8080+:7071 BEFORE any LLM-gated work
@@ -35,7 +35,17 @@ shadow ray instead of the full 5x5 grid (~6-9 rays), at the primary hit + GI bou
 `--dxr-stoch` oracle wired into gate M9** (err excess 0.0898 vs the noise floor). INTERACTIVE-ONLY (uFrame bit 30);
 offline/gate paths use full NEE → goldens within epsilon. The shadow-ray cut is largest in light-dense OPEN rooms (the
 operator's pain point — to feel at their fullscreen settings). Rollback: tag `pre-rt-sampling` `cdb28f1`. Optional next
-RT levers (GI-NEE cut, SVGF) in `docs/RT_PERF_PLAN.md`. **Release exe is stale** — rebuild via `package.ps1 -StageOnly`.
+RT levers (GI-NEE cut, SVGF) in `docs/RT_PERF_PLAN.md`.
+
+**RT PERF KNOBS + the vsync diagnosis (Session 44, ledger E32–E33, anchor `pre-rt-reproj` `0c03c65`).** Operator "still
+slow" → 3-agent brainstorm (VXGI is dated → SHaRC/DDGI; both their ideas converge on camera-only depth REPROJECTION,
+cheap for our static scene — scoped, not yet built). Shipped two safe wins: **F3** cycles RT internal res (Quality 2/3
+/ Balanced 1/2 / Performance 1/3; `--rt-scale`), **V** toggles vsync (`--no-vsync`). **KEY FINDING: every `Present()`
+was vsync-ON, hard-capping FPS at the monitor refresh** — a big part of "still slow" AND it was masking the res knob.
+Uncapped: 2/3 = 89 fps, 1/3 = **144 fps (+61%)**, much bigger at the operator's 4K (PT dominates). **Operator: press V +
+F3 for a big speed-up.** Documented in the bundle README; release re-staged (current). Scoped frontier (the elegant,
+careful-pass items): depth-reprojection accumulator, hand-rolled temporal upscaler, Catmull-Rom upscale, blue-noise,
+SHaRC GI. Rollback anchor `pre-rt-reproj` + `_staged_rt_reproj_backup/`.
 
 **RT PERFORMANCE FIXED (Session 40, tag `rtperf-green`, ledger E22–E25).** The operator's "RT unplayable — too slow +
 the Shoggoth ghosts into a quantum-superposition blend" is resolved: **ghost** (material-7 history reject, `0c8e0b3`) +

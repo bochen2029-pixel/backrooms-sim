@@ -6,6 +6,37 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 44 — RT perf knobs (F3 resolution + V vsync) + the diagnosis that vsync was capping everything ✅ (ledger E32–E33, anchor `pre-rt-reproj`)
+
+**The operator: "still slow," + a brainstorm (VXGI? AAA renders 4K-RT at 1080p?).** Fanned out 3 research agents
+(decoupled-res/upscaling, VXGI/modern-GI, PT-efficiency-SOTA). Synthesis: VXGI is dated (leaks through thin walls, the
+worst fail for sealed Backrooms; the modern form is SHaRC/DDGI). Their two ideas converge on ONE keystone — **temporal
+reprojection** — which our **static** scene makes unusually cheap (camera-only depth reprojection, no motion vectors).
+Full roadmap in the brainstorm + `RT_PERF_PLAN.md`. Then, told to "go as far as you can without regression," I did the
+**safe, fully-verifiable** wins and SCOPED the architectural reprojection/upscaler for a careful pass.
+
+**Shipped (each `run_game`/present-only → goldens untouched, audit-green, independently revertable):**
+- **F3 RT internal-resolution knob [E32, `5640e56`]** — the PT renders at Quality 2/3 (default) / Balanced 1/2 /
+  Performance 1/3 of the window; F3 cycles live (reuses the window-resize re-init), `--rt-scale 0|1|2` sets the default.
+- **V vsync toggle [E33, `e0ce06f`]** — all `Present()` were sync-interval-1 (vsync ON), hard-capping FPS at the
+  monitor refresh. `set_vsync(bool)` + V toggle + `--no-vsync`. **This was a big part of "still slow"** (heavy scenes
+  stutter below refresh) AND it was masking the resolution knob.
+
+**The key diagnosis.** E32 first looked like it "barely helped" (911 vs 927 @ 720p) — but that was the **vsync cap**,
+not fixed costs. **Uncapped: Quality 2/3 = 89 fps, Performance 1/3 = 144 fps = +61%.** PT ≈ 5.7 ms @ 2/3 → 1.4 ms @
+1/3, fixed ≈ 5.5 ms. At the operator's **4K** the PT scales ~10× (4.4M px) so it dominates → F3→Performance is a much
+bigger win there, and vsync was capping them regardless. **Operator takeaway: press V (uncap) + F3 (lower RT res) — two
+keystrokes, ~60%+ at 720p, more at 4K.** Documented in the bundle README (`508f150`); release re-staged.
+
+**Verified.** `audit.ps1` green throughout (ctest 116/116, determinism `409129a0` UNCHANGED = all live/present-only),
+live smokes debug-clean in every mode. **Pending / scoped (the elegant frontier, needs a careful pass):** camera-only
+depth-reprojection of the accumulator (deep history under motion — the keystone; ping-pong buffers + root-sig growth,
+hard to fully auto-verify the moving case), a hand-rolled temporal upscaler (render-low/accumulate-display-res), a
+Catmull-Rom present upscale (sharper low-res), procedural blue-noise, SHaRC/DDGI GI cache. Rollback: tag
+`pre-rt-reproj` `0c03c65` (+ `_staged_rt_reproj_backup/`).
+
+---
+
 ## Session 43 — RT sampling: free temporal AA + NaN guard (step 1), then stochastic single-light NEE / RIS (step 2) ✅ (tag `rt-sampling-green` `ad6683b`)
 
 **Mined 3 Sebastian Lague "Coding Adventure" ray-tracing transcripts (operator-provided, `_brainstorm/TurboScribe
