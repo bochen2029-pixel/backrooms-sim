@@ -639,6 +639,35 @@ float3 direct_light(float3 P, float3 N){
     return sum * kLightColor * kLightPower;
 }
 
+// RT sampling step 2: stochastic single-light NEE (RIS). Instead of shadow-raying every fluorescent cell in the
+// 5x5 neighbourhood (~6-9 rays), pick ONE by its unshadowed contribution via a weighted reservoir, shadow-ray only
+// that one, and return (sum of all unshadowed weights) * visibility(chosen). UNBIASED: E[W * V_j] = sum_i w_i V_i,
+// exactly the full-NEE sum direct_light() computes -- so it converges to the identical image via temporal
+// accumulation (one stochastic pick per frame), just with one shadow ray instead of many. INTERACTIVE ONLY (the
+// caller gates on uFrame bit 30); the offline/golden path uses direct_light() so goldens stay bit-identical.
+float3 direct_light_stochastic(float3 P, float3 N, inout uint rng){
+    int ci = (int)floor(P.x / kCell);
+    int cj = (int)floor(P.z / kCell);
+    float W = 0.0;                    // running sum of unshadowed weights (the RIS normalisation)
+    float3 chosenL = float3(0,0,0);
+    [loop] for (int di = -2; di <= 2; ++di)
+    [loop] for (int dj = -2; dj <= 2; ++dj){
+        int gi = ci + di, gj = cj + dj;
+        if (((gi & 1) != 0) || ((gj & 1) != 0)) continue;   // fluorescent cell = both even
+        float3 L = float3((gi + 0.5) * kCell, kCeil, (gj + 0.5) * kCell);
+        float3 toL = L - P; float dist2 = dot(toL, toL); float dist = sqrt(dist2);
+        float3 wl = toL / dist;
+        float ndl = max(dot(N, wl), 0.0);
+        if (ndl <= 0.0) continue;
+        float w = ndl / (1.0 + 0.35 * dist2);   // unshadowed contribution -- the same term direct_light() sums
+        W += w;
+        if (rndf(rng) * W < w) chosenL = L;       // weighted reservoir: P(keep this candidate) = w / running-W
+    }
+    if (W <= 0.0) return float3(0,0,0);
+    float vis = occluded(P + N * 2e-3, chosenL) ? 0.0 : 1.0;   // the ONE shadow ray
+    return (W * vis) * kLightColor * kLightPower;               // RIS estimate of sum_i w_i V_i
+}
+
 // Interactive eye-torch (uFlashI > 0): a soft cone of light from the camera (uPos) along uFwd. Only ever
 // called for PRIMARY hits, which are visible from the eye by construction -> no shadow ray needed. The
 // call site is [branch]-guarded on uFlashI, so when off (every golden) this is never reached.
@@ -704,7 +733,7 @@ float3 cosine_dir(float3 N, float u1, float u2){
     float3 b = cross(N, t);
     return normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + N * sqrt(max(0.0, 1.0 - u1)));
 }
-
+)" R"(
 struct Hit { bool hit; float3 P; float3 N; float mat; float t; };
 Hit trace(float3 origin, float3 dir){
     Hit h; h.hit = false; h.P = 0; h.N = float3(0,1,0); h.mat = 0; h.t = 0;
@@ -776,9 +805,10 @@ void RayGen(){
     if (uResolve == 3u){ denoise_resolve(px, dim); return; }   // filter pass: no tracing
     // Free temporal AA: the high bit of uFrame flags the INTERACTIVE path. Offline/golden/gate paths pass it
     // unset (and uFrame=0) -> no jitter -> bit-identical. frameIdx masks the flag off for the RNG decorrelation.
-    uint frameIdx = uFrame & 0x7FFFFFFFu;
+    uint frameIdx    = uFrame & 0x3FFFFFFFu;            // low 30 bits = frame index (RNG decorrelation)
+    bool stochLights = (uFrame & 0x40000000u) != 0u;    // bit 30 = stochastic single-light NEE (RIS)
     float2 jit = float2(0.0, 0.0);
-    [branch] if ((uFrame & 0x80000000u) != 0u){
+    [branch] if ((uFrame & 0x80000000u) != 0u){          // bit 31 = sub-pixel AA jitter
         uint js = px.x*6971u + px.y*60169u + frameIdx*15485863u + uSeed*19349663u + 1u;
         jit = float2(rndf(js), rndf(js)) - 0.5;   // sub-pixel offset in [-0.5,0.5]^2; accumulation resolves AA, camera motion resets it
     }
@@ -801,7 +831,9 @@ void RayGen(){
             deterministic = kEmit;
         } else {
             baseAlb = albedo_of(h.mat);
-            deterministic = baseAlb * (direct_light(h.P, h.N) + kAmbient);
+            uint plr = px.x*9277u + px.y*1973u + frameIdx*60169u + uSeed*26699u + 13u;
+            float3 dl = stochLights ? direct_light_stochastic(h.P, h.N, plr) : direct_light(h.P, h.N);
+            deterministic = baseAlb * (dl + kAmbient);
             [branch] if (uFlashI > 0.0) deterministic += baseAlb * flashlight(h.P, h.N);  // eye-torch (off -> skipped; goldens bit-identical)
             [branch] if (uFlareN > 0u) deterministic += baseAlb * flare_light(h.P, h.N);  // green flares cast onto this surface
             diffuse = true;
@@ -822,7 +854,8 @@ void RayGen(){
             Hit b = trace(h.P + h.N * 2e-3, wi);
             if (b.hit){
                 if (is_emitter(b.mat)) indirectSum += baseAlb * kEmit;
-                else indirectSum += baseAlb * albedo_of(b.mat) * direct_light(b.P, b.N);
+                else { float3 dlb = stochLights ? direct_light_stochastic(b.P, b.N, st) : direct_light(b.P, b.N);
+                       indirectSum += baseAlb * albedo_of(b.mat) * dlb; }
             }
         }
     }
@@ -1297,7 +1330,7 @@ bool DxrRenderer::render_scene(const contracts::CameraPose& cam) {
 }
 
 bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t samples, uint32_t seed, bool reset,
-                                 bool denoise, uint32_t frame, bool aa) {
+                                 bool denoise, uint32_t frame, bool aa, bool stochastic_lights) {
     Impl& d = *impl_;
     if (!d.sceneReady || !d.ptPso || !d.shadeVb) { last_error_ = "pt scene not built"; return false; }
     if (samples == 0) samples = 1;
@@ -1354,7 +1387,7 @@ bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t sam
         c[16] = base + start; c[17] = count; c[18] = total; c[19] = seed;
         c[20] = resolve ? (denoise ? 2u : 1u) : 0u; setf(c, 21, kPtExposure);
         setf(c, 22, static_cast<float>(d.width)); setf(c, 23, static_cast<float>(d.height));
-        c[24] = frame | (aa ? 0x80000000u : 0u);  // uFrame: low 31 bits = per-frame RNG decorrelation; high bit = interactive AA flag (off offline -> bit-identical)
+        c[24] = frame | (aa ? 0x80000000u : 0u) | (stochastic_lights ? 0x40000000u : 0u);  // uFrame: low 30 bits = RNG decorrelation; bit31 = AA; bit30 = stochastic NEE (both off offline -> bit-identical)
         setf(c, 25, d.flashIntensity);  // uFlashI: interactive flashlight (0 = off -> shader branch skipped, goldens bit-identical)
         c[26] = d.flareCount;           // uFlareN: active green flares (0 = none -> flare branches skipped, goldens bit-identical)
         setf(c, 27, d.dread);           // uDread: apparition dim (1.0 = off -> shader branch skipped, goldens bit-identical)

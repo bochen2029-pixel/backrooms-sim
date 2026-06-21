@@ -989,6 +989,21 @@ function Invoke-GateM9 {
         Write-Note "interactive PT denoiser: 4-spp error vs ground truth $eoff -> $eon (ratio $ratio) -- edge-aware spatial filter, ~$([math]::Round((1.0-$ratio)*100))% noise cut, debug-clean"
     }
 
+    # The interactive stochastic single-light NEE (RIS) must be UNBIASED: accumulating 1-spp RIS frames (one shadow
+    # ray per shading point instead of the full 5x5 grid) has to converge to the SAME image as full-grid NEE, to
+    # within the Monte-Carlo noise floor -- a systematic bias would push the error well above it. --dxr-stoch renders
+    # a full-NEE reference, an independent full-NEE render (the noise floor), and the accumulated RIS image.
+    Assert-Gate 'stochastic single-light NEE (RIS) is unbiased (converges to full-NEE within the noise floor)' {
+        $rs = Invoke-AppCapture @('--dxr-stoch', '--seed', '1', '--spp', '256', '--width', '320', '--height', '180')
+        if ($rs.Exit -ne 0) { throw "--dxr-stoch exited $($rs.Exit): $($rs.Out)" }
+        if ((Get-Metric $rs.Out 'debug_error_count') -ne 0) { throw "stoch run had debug-layer messages: $($rs.Out)" }
+        $es = Get-MetricFloat $rs.Out 'err_stoch_vs_ref'
+        $ef = Get-MetricFloat $rs.Out 'err_noise_floor'
+        $ex = Get-MetricFloat $rs.Out 'err_excess'
+        if ($ex -ge 1.0) { throw "stochastic NEE looks BIASED: err_excess $ex >= 1.0 (RIS-vs-ref error $es well above the $ef noise floor)" }
+        Write-Note "stochastic NEE (RIS): RIS-vs-fullNEE $es vs noise-floor $ef -> excess $ex (unbiased -- one shadow ray/pick replaces the full 5x5 grid)"
+    }
+
     # Exit gate #3: interactive PT. (a) >= 60 FPS while walking (1-spp moving frames
     # at 1440p); (b) accumulation resets on movement (no-ghost) -- a clean reset
     # matches a fresh render, while NOT resetting blends the prior pose in (large

@@ -706,3 +706,35 @@ job is audit + fast, unambiguous rollback.
   116/116, interactive PT **182.1 FPS** (no regression — the jitter is free), 1km TLAS walk debug-clean. Live
   `--game --auto-play --rt` (aa=true path active): `debug_error_count:0`, clean exit, `lookcheck:PASS`. The AA quality
   itself is visible in-game (TAA needs several still frames to resolve) — for the operator to confirm.
+
+## E31 — 2026-06-20 — RT sampling step 2: stochastic single-light NEE (RIS) + unbiasedness oracle [the open-room speedup]
+- **Context:** the highest-value lever from the Coding-Adventure brainstorm (and the "D" deferred back in E25). In a
+  light-dense open room the cost driver is `direct_light` shadow-raying every fluorescent cell in the 5x5 grid (~6-9
+  rays), called at BOTH the primary hit and the GI bounce (~12-18 shadow rays/sample). Continues E30 (same
+  `pre-rt-sampling` rollback anchor).
+- **What:** new `direct_light_stochastic` (RIS): a weighted reservoir picks ONE light by its unshadowed contribution
+  `w = ndl/(1+0.35·dist²)`, shadow-rays only that one, and returns `(ΣW)·visibility(chosen)` — **one shadow ray instead
+  of ~6-9**. Unbiased: `E[W·V_j] = Σ w_i V_i`, exactly the full-NEE sum, so it converges to the identical image via
+  temporal accumulation (one pick/frame). Gated INTERACTIVE-ONLY via a 2nd flag bit (`uFrame` bit 30; bit 31 stays the
+  E30 AA flag, `frameIdx` masks to the low 30); new `render_pt_frame(..., bool stochastic_lights=false)`; only the two
+  game call sites pass it true. The offline/golden + every gate path use full-grid `direct_light` (unchanged).
+- **The oracle (the externality proof):** new headless `--dxr-stoch` mode (`run_dxr_stoch`) renders a full-NEE
+  reference, an independent full-NEE render (the Monte-Carlo NOISE FLOOR), and the SAME scene accumulated over N 1-spp
+  RIS frames; a systematic bias would push the RIS-vs-ref error well above the floor. **Wired into gate M9 as a
+  permanent sub-gate** (fails if `err_excess >= 1.0`). Result: **`err_stoch 2.35` vs `err_floor 2.26` → excess
+  0.0898** = unbiased (the RIS image is the full-NEE image, just one shadow ray/pick).
+- **Why golden-safe:** offline/gate paths pass `stochastic_lights=false` → full NEE → goldens within epsilon. *Honest
+  note:* the converged-golden compare for pose 1 ticked **0.000004 → 0.000005** — a 1-ULP FP shift from DXC recompiling
+  the shader with the new RIS function + the two call-site branches present (FP non-associativity; the executed
+  full-NEE logic is unchanged). Far within the gate epsilon (PASSED); the oracle independently proves the new path
+  correct. Also: `kPtShader` exceeded MSVC's 16 KB string-literal limit → split into two adjacent raw literals (C++
+  concatenates them; byte-identical source).
+- **Files:** `render_dxr/src/dxr.cpp` (RIS fn + primary/GI branches + bit-30 gating + the string split),
+  `render_dxr/include/render_dxr/dxr.h` (the param), `app/src/main.cpp` (`run_dxr_stoch` + `--dxr-stoch` flag +
+  dispatch + `Options::dxr_stoch` + the 2 game call sites), `scripts/gate.ps1` (the oracle sub-gate). **Rollback:** tag
+  `pre-rt-sampling` / `git reset --hard cdb28f1`.
+- **Verified:** **gate M9 PASSED** — stochastic oracle **unbiased (excess 0.0898)**, denoiser 0.362 (unperturbed),
+  ctest 116/116, no-ghost clean, 1km TLAS walk debug-clean. Live `--game --auto-play --rt`: `debug_error_count:0`,
+  clean exit, `lookcheck:PASS`. The shadow-ray cut (~6-9× per `direct_light` call) is largest in light-dense OPEN
+  rooms — the operator's stated pain point; the auto-play smoke (corridor-ish) shows it debug-clean at similar FPS, the
+  real win is at the operator's open-room/fullscreen settings.

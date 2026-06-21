@@ -102,6 +102,7 @@ struct Options {
     std::string scr_preview;                         // /p <hwnd>: parent HWND to render the preview into
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
     bool dxr_denoise = false;   // headless: does the spatial denoiser bring a noisy few-spp frame closer to ground truth?
+    bool dxr_stoch = false;     // headless oracle: does stochastic single-light NEE (RIS) converge to the full-NEE image? (unbiasedness)
     bool llm_test = false;      // CLI: exercise the in-game "Test Connection" probe + print the status line
     bool soak = false, crash_test = false, director_probe = false;
     bool director_record = false, director_replay = false;
@@ -219,6 +220,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--dxr-ghost") == 0) o.dxr_ghost = true;
         else if (std::strcmp(a, "--dxr-walk") == 0) o.dxr_walk = true;
         else if (std::strcmp(a, "--dxr-denoise") == 0) o.dxr_denoise = true;
+        else if (std::strcmp(a, "--dxr-stoch") == 0) o.dxr_stoch = true;
         else if (std::strcmp(a, "--llm-test") == 0) o.llm_test = true;
         else if (std::strcmp(a, "--soak") == 0) o.soak = true;
         else if (std::strcmp(a, "--crash-test") == 0) o.crash_test = true;
@@ -1070,7 +1072,7 @@ int run_play(const Options& o) {
                 // static view converges clean at 1 spp/frame instead of 4-spp-from-scratch (see pt_view_moved + run_game).
                 const bool ptReset = !dxrHaveCam || sceneRebuilt || pt_view_moved(cam, dxrPrevCam);
                 dxr->render_pt_frame(cam, ptReset ? 4u : 1u, static_cast<uint32_t>(o.seed) + static_cast<uint32_t>(frames),
-                                     ptReset, true, static_cast<uint32_t>(frames), /*aa=*/true);
+                                     ptReset, true, static_cast<uint32_t>(frames), /*aa=*/true, /*stochastic_lights=*/true);
                 dxrPrevCam = cam; dxrHaveCam = true;
                 // RT_PERF item A: present the PT output as a same-device GPU texture (no per-frame CPU readback).
                 if (renderer.present_pt_texture(dxr->pt_output(), /*draw_caption=*/false)) {
@@ -1999,7 +2001,7 @@ int run_game(const Options& o) {
                     const bool ptReset = !dxrHaveCam || sceneRebuilt || flashChanged || flaresChanged || pt_view_moved(cam, dxrPrevCam);
                     flaresChanged = false;
                     dxr->render_pt_frame(cam, ptReset ? 4u : 1u, static_cast<uint32_t>(texSeed) + static_cast<uint32_t>(frames),
-                                         ptReset, true, static_cast<uint32_t>(frames), /*aa=*/true);
+                                         ptReset, true, static_cast<uint32_t>(frames), /*aa=*/true, /*stochastic_lights=*/true);
                     dxrPrevCam = cam; dxrHaveCam = true;
                     // RT_PERF item A: present the PT output as a SAME-DEVICE GPU texture -- no per-frame CPU
                     // readback. The readback now happens ONLY when the Director VLM / chat needs the player POV.
@@ -5099,6 +5101,62 @@ int run_dxr_denoise(const Options& o) {
     return dbg == 0 ? 0 : 3;
 }
 
+// ----- Stochastic-NEE unbiasedness oracle (RT sampling step 2) ----------------------
+// RIS single-light NEE must converge to the SAME image as full-grid NEE (it's an unbiased estimator). This renders a
+// full-NEE converged reference, an independent full-NEE render (the Monte-Carlo NOISE FLOOR), and the SAME scene
+// accumulated over `spp` 1-spp stochastic frames (mirroring the interactive accumulate path). If RIS is unbiased the
+// stochastic-vs-ref error sits at ~the noise floor; a systematic bias would push it well above. Same scene as
+// run_dxr_denoise so it shares the harness.
+int run_dxr_stoch(const Options& o) {
+    const uint32_t W = o.width ? o.width : 320u, H = o.height ? o.height : 180u;
+    const float ex = 16.0f, ez = 16.0f;
+    contracts::CameraPose cam{};
+    cam.pos[0] = ex; cam.pos[1] = 1.6f; cam.pos[2] = ez;
+    cam.yaw = 0.7853982f; cam.pitch = 0.0f;
+    cam.fov_y = 1.2217305f; cam.aspect = static_cast<float>(W) / static_cast<float>(H);
+
+    br::stream::StreamManager sm(o.seed, static_cast<int>(o.radius), o.workers);
+    const auto center = contracts::chunk_key_at(0, ex, ez);
+    sm.update(center); sm.wait_idle(); sm.update(center);
+
+    br::render_dxr::DxrRenderer r;
+    if (!r.init(W, H)) { std::fprintf(stderr, "dxr init: %s\n", r.last_error().c_str()); return 1; }
+    if (!r.build_scene(sm.resident())) { std::fprintf(stderr, "dxr scene: %s\n", r.last_error().c_str()); return 1; }
+
+    const uint32_t spp  = o.spp ? o.spp : 512u;
+    const uint32_t seed = static_cast<uint32_t>(o.seed);
+
+    std::vector<uint8_t> ref, stoch, ctrl;
+    // full-NEE reference (converged) ...
+    if (!r.render_pt_frame(cam, spp, seed, true, false, 0u, false, false) || !r.readback(ref)) { std::fprintf(stderr, "ref: %s\n", r.last_error().c_str()); return 1; }
+    // ... an independent full-NEE render (different seed) = the pure Monte-Carlo noise floor ...
+    if (!r.render_pt_frame(cam, spp, seed + 12345u, true, false, 0u, false, false) || !r.readback(ctrl)) { std::fprintf(stderr, "ctrl: %s\n", r.last_error().c_str()); return 1; }
+    // ... stochastic RIS: accumulate `spp` frames of 1-spp (mirrors the interactive accumulate path) -> converges.
+    for (uint32_t i = 0; i < spp; ++i)
+        if (!r.render_pt_frame(cam, 1u, seed + i, i == 0u, false, i, false, /*stochastic_lights=*/true)) { std::fprintf(stderr, "stoch: %s\n", r.last_error().c_str()); return 1; }
+    if (!r.readback(stoch)) { std::fprintf(stderr, "stoch readback: %s\n", r.last_error().c_str()); return 1; }
+
+    auto mad = [&](const std::vector<uint8_t>& a) {
+        double s = 0.0; const size_t n = static_cast<size_t>(W) * H;
+        for (size_t p = 0; p < n; ++p)
+            for (int k = 0; k < 3; ++k) { int dpx = static_cast<int>(a[p*4+k]) - static_cast<int>(ref[p*4+k]); if (dpx < 0) dpx = -dpx; s += dpx; }
+        return s / (static_cast<double>(n) * 3.0);
+    };
+    const double err_stoch = mad(stoch);
+    const double err_floor = mad(ctrl);
+    const uint32_t dbg = r.debug_error_count();
+    std::printf("spp: %u\n", spp);
+    std::printf("err_stoch_vs_ref: %.4f\n", err_stoch);   // mean abs channel error (0..255): accumulated RIS vs full NEE
+    std::printf("err_noise_floor: %.4f\n", err_floor);    // ... two independent full-NEE renders (the noise floor)
+    std::printf("err_excess: %.4f\n", err_stoch - err_floor);  // bias would surface as error ABOVE the floor
+    std::printf("debug_error_count: %u\n", dbg);
+    // Unbiased <=> the stochastic error sits within ~the noise floor (small slack for RIS's higher per-sample variance).
+    const bool unbiased = (err_stoch - err_floor) < 1.5 && dbg == 0u;
+    std::printf("stoch_unbiased: %s\n", unbiased ? "PASS" : "FAIL");
+    if (!o.out.empty()) stbi_write_png(o.out.c_str(), static_cast<int>(W), static_cast<int>(H), 4, stoch.data(), static_cast<int>(W) * 4);
+    return unbiased ? 0 : 3;
+}
+
 // ----- M9 phase 4: interactive PT frame rate (gate #3, ">= 60 FPS while walking") -
 // Times reduced-sample frames (the moving path resets accumulation every frame).
 int run_dxr_fps(const Options& o) {
@@ -5796,6 +5854,7 @@ int main(int argc, char** argv) {
     if (o.dxr_ghost)  return run_dxr_ghost(o);
     if (o.dxr_walk)   return run_dxr_walk(o);
     if (o.dxr_denoise) return run_dxr_denoise(o);
+    if (o.dxr_stoch) return run_dxr_stoch(o);
     if (o.llm_test)   return run_llm_test(o);
     if (o.dxr)        return run_dxr(o);
     if (o.director_probe) return run_director_probe(o);

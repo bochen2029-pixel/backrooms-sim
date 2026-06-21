@@ -85,9 +85,15 @@ public:
     // `aa` (default off): jitter the primary ray a sub-pixel amount per frame so temporal
     // accumulation resolves anti-aliased edges (free temporal AA). INTERACTIVE ONLY — the
     // offline/golden + gate paths leave it off so their output stays bit-identical.
+    //
+    // `stochastic_lights` (default off): sample ONE ceiling light per shading point via a
+    // weighted reservoir (RIS) + a single shadow ray, instead of shadow-raying the whole 5x5
+    // grid — far fewer shadow rays in light-dense rooms. Unbiased (converges to the full-NEE
+    // image via temporal accumulation; proven by run_dxr_stoch). INTERACTIVE ONLY — offline/
+    // golden uses full NEE so goldens stay bit-identical.
     bool render_pt_frame(const contracts::CameraPose& camera, uint32_t samples,
                          uint32_t seed, bool reset, bool denoise = false, uint32_t frame = 0,
-                         bool aa = false);
+                         bool aa = false, bool stochastic_lights = false);
 
     // Interactive flashlight (default OFF): a torch co-located with the eye, aimed along the camera
     // forward, that brightens primary hits inside a soft cone — no 3D model, no shadow rays (a primary
