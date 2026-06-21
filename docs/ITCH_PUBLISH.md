@@ -104,3 +104,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package.ps1 -SkipBui
 
 That's everything. The game is built, current, and self-contained; the page copy is written;
 the only blockers are the two decisions above — both yours to make.
+
+---
+
+## Making the .exe obvious (portable-build findability)
+
+A player who extracts the zip shouldn't have to hunt for what to run. Done + to-do:
+
+- ✅ **`Backrooms.exe` is at the folder root** (not in a `bin\` — that's the dev tree).
+- ✅ **A signpost** — `! Double-click Backrooms.exe to play.txt` sits at the top of the file list
+  (the leading `!` sorts it first) and spells out what to run + the controls.
+- ✅ **The screensaver is clearly named** — `Backrooms (screensaver).scr`, so it isn't mistaken
+  for a second launcher. (`package.ps1` stages both on every build.)
+- ▶ **On itch, set the executable.** When you add the build, itch lets you mark a file as the
+  one to run — point it at **`Backrooms.exe`**. Then the itch.io app shows a big **Launch**
+  button that runs it directly; those players never see the folder at all. (Do this in the
+  upload's file settings, alongside checking the Windows box.)
+- ⏳ **Deferred (after your clean-machine test): a `data\` subfolder.** The cleanest layout is a
+  root with *only* `Backrooms.exe` + README and all the engine guts tucked into `data\`. That
+  needs path changes in code (the exe finds its models/runtime/DXC/Agility-SDK beside itself by
+  design), which carries regression risk — so it's intentionally NOT done before the hardware
+  test. Once the current build is proven to launch clean on the other machine, ask and I'll do
+  the reorg as a careful, re-tested pass.

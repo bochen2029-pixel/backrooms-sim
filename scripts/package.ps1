@@ -52,7 +52,35 @@ foreach ($d in @('', 'runtime\llama', 'runtime\keel', 'runtime\whisper', 'models
     New-Item -ItemType Directory -Force -Path (Join-Path $stage $d) | Out-Null
 }
 Copy-Item $exe (Join-Path $stage 'Backrooms.exe') -Force
-Copy-Item $exe (Join-Path $stage 'Backrooms.scr') -Force   # screensaver = the same exe renamed (self-detects /s /p /c) -> same RT/AI features
+# Screensaver = the same exe renamed (self-detects /s /p /c). Named "(screensaver)" so a player doesn't mistake it
+# for a second game launcher; remove any old plain-named copy from a prior stage.
+Remove-Item (Join-Path $stage 'Backrooms.scr') -Force -ErrorAction SilentlyContinue
+Copy-Item $exe (Join-Path $stage 'Backrooms (screensaver).scr') -Force
+# A prominent "start here" signpost at the root. The leading "!" sorts it to the top of the file list so players
+# immediately see which file to run and that the rest is just the engine -- the portable-build findability fix.
+@'
+================================================================
+  BACKROOMS  --  HOW TO PLAY
+================================================================
+
+      >>>   Double-click   Backrooms.exe   to play.   <<<
+
+That is the only file you need to run. No install, no setup.
+
+Everything else in this folder (the .dll files and the D3D12 /
+models / runtime folders) is the game engine and its built-in
+offline AI -- you do not need to open or touch any of it.
+
+Controls:  WASD/arrows move - mouse look - Shift run - Space jump
+           Esc pause - F11 fullscreen - F2 ray tracing
+           F3 RT quality - V vsync - F flashlight - R flare (in RT)
+
+Slow with ray tracing on? Press V (uncaps the frame rate) and F3
+(lowers the ray-tracing resolution). A big speed-up, esp. at 4K.
+
+See README.txt for requirements, the AI/privacy note, and credits.
+================================================================
+'@ | Out-File -Encoding ASCII (Join-Path $stage '! Double-click Backrooms.exe to play.txt')
 
 # --- 3) verify the persistent in-repo assets are present (NEVER copied from C:\ / SDK) ---
 $required = @('dxcompiler.dll', 'dxil.dll',
