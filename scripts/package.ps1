@@ -87,6 +87,12 @@ Everything else (the world, textures, audio, the PA voice) is generated procedur
 Before public distribution, confirm each component's license text is included as required by its terms.
 "@ | Out-File -Encoding ASCII (Join-Path $stage 'licenses\NOTICE.txt')
 
+# Full third-party license texts (Apache-2.0 for the Qwen models, MIT for the runtimes) -- required for
+# public redistribution. Sourced from the committed repo copy so the bundle is always license-complete.
+$licSrc = Join-Path $RepoRoot 'licenses\THIRD-PARTY-LICENSES.txt'
+if (Test-Path $licSrc) { Copy-Item $licSrc (Join-Path $stage 'licenses\THIRD-PARTY-LICENSES.txt') -Force }
+else { Write-Note "licenses\THIRD-PARTY-LICENSES.txt missing -- add it before a public release" }
+
 @"
 BACKROOMS SIM (portable, self-contained)
 ========================================
