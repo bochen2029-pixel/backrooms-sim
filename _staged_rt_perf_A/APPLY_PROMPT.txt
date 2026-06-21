@@ -1,0 +1,31 @@
+APPLY PROMPT — paste this to a fresh agent once (a) the operator approves and (b) the other
+instance has finished editing. It applies the staged RT-perf item-A changeset against the
+CURRENT code (which may have drifted from when it was staged).
+
+------------------------------------------------------------------------------------------
+Apply the staged changeset in C:\backrooms\_staged_rt_perf_A\CHANGESET.md to the live code.
+
+RULES:
+- Apply each hunk by MATCHING its `FIND:` anchor against the CURRENT file contents and making
+  the `REPLACE:` edit (use the Edit tool). DO NOT overwrite whole files — another instance has
+  been editing in parallel; a file-swap would erase its work.
+- If a hunk's anchor has drifted (no longer matches), DO NOT skip it — read that hunk's INTENT
+  and DRIFT NOTE and re-derive the equivalent edit against the current code.
+- Apply in the listed order (renderer-side first, then run_play, then run_game last — run_game
+  is the highest drift risk).
+- The run_game hunk (6b) is intent-first: preserve whatever the current Director-vision/recolor
+  logic is; only (a) gate the CPU readback to the rare VLM/chat branches, (b) present via
+  present_pt_texture(dxr->pt_output(), showCap), (c) drop the per-frame CPU caption composite.
+- Add the run_game/run_play fallback noted in §5: if renderer.native_device5() is null (non-DXR
+  raster device), keep the OLD readback + present_overlay_windowed path (DxrRenderer then owns
+  its own device and pt_output() is on a different device than the swapchain).
+
+THEN VALIDATE (do not declare done until green): build /WX (debug+release) -> gate.ps1
+-Milestone M9 (PT goldens bit-identical) -> gate.ps1 -Milestone M30 (live RT smoke: rt_frames>=1,
+debug_error_count 0) -> live `--game --rt` smoke (faster + caption shows + Director still narrates)
+-> audit.ps1 green. Log it to docs/CHANGE_AUDIT_LOG.md (new E-entry), tag pre-rtperfA before
+applying, commit on green. If M30/the live smoke shows any D3D12 debug-layer error or a crash,
+revert (git reset --hard pre-rtperfA) and report — do not debug forward.
+
+Tag: git tag pre-rtperfA   (rollback anchor, before applying)
+------------------------------------------------------------------------------------------
