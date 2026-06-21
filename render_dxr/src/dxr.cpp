@@ -774,7 +774,15 @@ void RayGen(){
     uint2 px = DispatchRaysIndex().xy;
     uint2 dim = DispatchRaysDimensions().xy;
     if (uResolve == 3u){ denoise_resolve(px, dim); return; }   // filter pass: no tracing
-    float2 uv = (float2(px) + 0.5) / float2(dim);
+    // Free temporal AA: the high bit of uFrame flags the INTERACTIVE path. Offline/golden/gate paths pass it
+    // unset (and uFrame=0) -> no jitter -> bit-identical. frameIdx masks the flag off for the RNG decorrelation.
+    uint frameIdx = uFrame & 0x7FFFFFFFu;
+    float2 jit = float2(0.0, 0.0);
+    [branch] if ((uFrame & 0x80000000u) != 0u){
+        uint js = px.x*6971u + px.y*60169u + frameIdx*15485863u + uSeed*19349663u + 1u;
+        jit = float2(rndf(js), rndf(js)) - 0.5;   // sub-pixel offset in [-0.5,0.5]^2; accumulation resolves AA, camera motion resets it
+    }
+    float2 uv = (float2(px) + 0.5 + jit) / float2(dim);
     float sx = (2.0 * uv.x - 1.0) * uTanY * uAspect;
     float sy = (1.0 - 2.0 * uv.y) * uTanY;
     float3 dir = normalize(uFwd + uRight * sx + uUp * sy);
@@ -808,7 +816,7 @@ void RayGen(){
     if (diffuse){
         [loop] for (uint s = 0; s < uSampleCount; ++s){
             uint sidx = uSampleStart + s;
-            uint st = px.x * 1973u + px.y * 9277u + (sidx + 1u) * 26699u + uSeed * 68111u + uFrame * 9781u + 1u;
+            uint st = px.x * 1973u + px.y * 9277u + (sidx + 1u) * 26699u + uSeed * 68111u + frameIdx * 9781u + 1u;
             float u1 = rndf(st), u2 = rndf(st);
             float3 wi = cosine_dir(h.N, u1, u2);
             Hit b = trace(h.P + h.N * 2e-3, wi);
@@ -827,8 +835,14 @@ void RayGen(){
     bool  resetPix  = (uSampleStart == 0u) || (h.hit && h.mat > 6.5 && h.mat < 7.5);
     float prevCount = resetPix ? 0.0 : g_accum[px].a;
     float3 prevSum  = resetPix ? float3(0.0, 0.0, 0.0) : g_accum[px].rgb;
-    float3 total    = prevSum + local;
-    float pixCount  = prevCount + float(uSampleCount);
+    // NaN/Inf guard (accumulator-poison prevention): a single bad sample would permanently corrupt the PERSISTENT
+    // accumulator. isnan()/isinf() are optimized away under fast-math, so bit-test the IEEE exponent (all-1 bits =
+    // NaN or Inf). A bad sample contributes nothing (sum + count unchanged). Golden-safe: a well-behaved scene
+    // never trips it (bad==false) -> identical to the unguarded accumulate.
+    uint3 lb = asuint(local);
+    bool bad = ((lb.x & 0x7F800000u) == 0x7F800000u) || ((lb.y & 0x7F800000u) == 0x7F800000u) || ((lb.z & 0x7F800000u) == 0x7F800000u);
+    float3 total    = prevSum + (bad ? float3(0.0, 0.0, 0.0) : local);
+    float pixCount  = prevCount + (bad ? 0.0 : float(uSampleCount));
     g_accum[px] = float4(total, pixCount);
 
     if (uResolve >= 1u){                                  // final batch: depth + denoiser guide
@@ -1283,7 +1297,7 @@ bool DxrRenderer::render_scene(const contracts::CameraPose& cam) {
 }
 
 bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t samples, uint32_t seed, bool reset,
-                                 bool denoise, uint32_t frame) {
+                                 bool denoise, uint32_t frame, bool aa) {
     Impl& d = *impl_;
     if (!d.sceneReady || !d.ptPso || !d.shadeVb) { last_error_ = "pt scene not built"; return false; }
     if (samples == 0) samples = 1;
@@ -1340,7 +1354,7 @@ bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t sam
         c[16] = base + start; c[17] = count; c[18] = total; c[19] = seed;
         c[20] = resolve ? (denoise ? 2u : 1u) : 0u; setf(c, 21, kPtExposure);
         setf(c, 22, static_cast<float>(d.width)); setf(c, 23, static_cast<float>(d.height));
-        c[24] = frame;  // uFrame: per-frame noise decorrelation (0 for the deterministic offline/golden path)
+        c[24] = frame | (aa ? 0x80000000u : 0u);  // uFrame: low 31 bits = per-frame RNG decorrelation; high bit = interactive AA flag (off offline -> bit-identical)
         setf(c, 25, d.flashIntensity);  // uFlashI: interactive flashlight (0 = off -> shader branch skipped, goldens bit-identical)
         c[26] = d.flareCount;           // uFlareN: active green flares (0 = none -> flare branches skipped, goldens bit-identical)
         setf(c, 27, d.dread);           // uDread: apparition dim (1.0 = off -> shader branch skipped, goldens bit-identical)

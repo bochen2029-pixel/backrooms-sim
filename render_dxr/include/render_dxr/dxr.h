@@ -81,8 +81,13 @@ public:
     // turns a noisy few-spp frame clean. INTERACTIVE ONLY; leave off for the converged
     // goldens (their seed/output must stay bit-stable). `frame` decorrelates the per-pixel
     // RNG across frames (0 for the deterministic offline path).
+    //
+    // `aa` (default off): jitter the primary ray a sub-pixel amount per frame so temporal
+    // accumulation resolves anti-aliased edges (free temporal AA). INTERACTIVE ONLY — the
+    // offline/golden + gate paths leave it off so their output stays bit-identical.
     bool render_pt_frame(const contracts::CameraPose& camera, uint32_t samples,
-                         uint32_t seed, bool reset, bool denoise = false, uint32_t frame = 0);
+                         uint32_t seed, bool reset, bool denoise = false, uint32_t frame = 0,
+                         bool aa = false);
 
     // Interactive flashlight (default OFF): a torch co-located with the eye, aimed along the camera
     // forward, that brightens primary hits inside a soft cone — no 3D model, no shadow rays (a primary

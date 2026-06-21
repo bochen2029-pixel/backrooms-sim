@@ -679,3 +679,30 @@ job is audit + fast, unambiguous rollback.
   clean exit (broker shutdown woke the workers → joined → no deadlock).
 - **Next (deferred):** route the text `DirectorHost` via a dependency-free gate; a `KeelBroker` telemetry counter;
   `max_concurrency` tuning if backend contention shows on the operator's hardware.
+
+## E30 — 2026-06-20 — RT sampling step 1: free temporal AA + NaN/Inf accumulator guard [from the Coding-Adventure brainstorm]
+- **Context:** the operator pointed at 3 Sebastian Lague "Coding Adventure" ray-tracing transcripts (`_brainstorm/
+  TurboScribe Export 1483246579/`) and asked what applies to our DXR tracer. Fanned out 3 agents to extract every
+  efficiency technique; most is intro-level software-BVH stuff our hardware DXR already does better. Two cheap,
+  golden-safe wins fell out (step 1); the bigger lever — stochastic single-light NEE — is step 2 (separate, with a
+  convergence oracle). Rollback anchor: tag **`pre-rt-sampling`** (`cdb28f1`, pushed) + file backup
+  `_staged_rt_sampling_backup/`.
+- **What (two changes, both in `render_dxr/src/dxr.cpp` shader + a 1-arg API add):**
+  - **Free temporal AA.** The primary ray now jitters a sub-pixel amount per frame (`±0.5 px`, seeded per
+    (pixel,frame)); temporal accumulation resolves the jittered samples into anti-aliased edges — no MSAA, no extra
+    rays. Gated by a new `render_pt_frame(..., bool aa=false)` arg, transported as the **high bit of `uFrame`** (no
+    spare cbuffer slot — `uPad2` is now `uDread`); `frameIdx = uFrame & 0x7FFFFFFF` masks it off for the RNG. Only the
+    two interactive game call sites (`run_play`, `run_game`) pass `aa=true`.
+  - **NaN/Inf accumulator guard.** A single bad sample would permanently poison the PERSISTENT temporal accumulator;
+    `isnan()`/`isinf()` are compiled away under fast-math, so the accumulate bit-tests the IEEE exponent (all-1 = NaN
+    or Inf) and a bad sample contributes nothing (sum + count unchanged). Also a prerequisite for step 2's pdf-divide.
+- **Why golden-safe:** the offline/golden path and every M9 gate/test call site default `aa=false` → no jitter → the
+  primary ray is byte-unchanged; the NaN guard is a no-op on a well-behaved scene (`bad==false`) → identical accumulate.
+- **Files:** `render_dxr/src/dxr.cpp` (shader RayGen jitter + accumulate guard + the `aa` plumbing),
+  `render_dxr/include/render_dxr/dxr.h` (the `aa` param), `app/src/main.cpp` (2 game call sites). **Rollback:** tag
+  `pre-rt-sampling` / `git reset --hard cdb28f1`.
+- **Verified:** **gate M9 PASSED** — PT goldens **bit-identical** (0.000004/0.000677/0.000000), denoiser sub-gate
+  **0.362 IDENTICAL** to baseline (the `aa=false` default left the gates unperturbed — the design intent), ctest
+  116/116, interactive PT **182.1 FPS** (no regression — the jitter is free), 1km TLAS walk debug-clean. Live
+  `--game --auto-play --rt` (aa=true path active): `debug_error_count:0`, clean exit, `lookcheck:PASS`. The AA quality
+  itself is visible in-game (TAA needs several still frames to resolve) — for the operator to confirm.

@@ -1070,7 +1070,7 @@ int run_play(const Options& o) {
                 // static view converges clean at 1 spp/frame instead of 4-spp-from-scratch (see pt_view_moved + run_game).
                 const bool ptReset = !dxrHaveCam || sceneRebuilt || pt_view_moved(cam, dxrPrevCam);
                 dxr->render_pt_frame(cam, ptReset ? 4u : 1u, static_cast<uint32_t>(o.seed) + static_cast<uint32_t>(frames),
-                                     ptReset, true, static_cast<uint32_t>(frames));
+                                     ptReset, true, static_cast<uint32_t>(frames), /*aa=*/true);
                 dxrPrevCam = cam; dxrHaveCam = true;
                 // RT_PERF item A: present the PT output as a same-device GPU texture (no per-frame CPU readback).
                 if (renderer.present_pt_texture(dxr->pt_output(), /*draw_caption=*/false)) {
@@ -1999,7 +1999,7 @@ int run_game(const Options& o) {
                     const bool ptReset = !dxrHaveCam || sceneRebuilt || flashChanged || flaresChanged || pt_view_moved(cam, dxrPrevCam);
                     flaresChanged = false;
                     dxr->render_pt_frame(cam, ptReset ? 4u : 1u, static_cast<uint32_t>(texSeed) + static_cast<uint32_t>(frames),
-                                         ptReset, true, static_cast<uint32_t>(frames));
+                                         ptReset, true, static_cast<uint32_t>(frames), /*aa=*/true);
                     dxrPrevCam = cam; dxrHaveCam = true;
                     // RT_PERF item A: present the PT output as a SAME-DEVICE GPU texture -- no per-frame CPU
                     // readback. The readback now happens ONLY when the Director VLM / chat needs the player POV.
