@@ -103,6 +103,7 @@ struct Options {
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
     bool dxr_denoise = false;   // headless: does the spatial denoiser bring a noisy few-spp frame closer to ground truth?
     bool dxr_stoch = false;     // headless oracle: does stochastic single-light NEE (RIS) converge to the full-NEE image? (unbiasedness)
+    uint32_t rt_scale = 0;      // run_game initial RT internal-resolution scale index (0 Quality 2/3, 1 Balanced 1/2, 2 Performance 1/3); F3 cycles it live
     bool llm_test = false;      // CLI: exercise the in-game "Test Connection" probe + print the status line
     bool soak = false, crash_test = false, director_probe = false;
     bool director_record = false, director_replay = false;
@@ -273,6 +274,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--say") == 0) { if (!str(o.say_text)) return false; }
         else if (std::strcmp(a, "--shot-every") == 0) { if (!u32(o.shot_every)) return false; }
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
+        else if (std::strcmp(a, "--rt-scale") == 0) { if (!u32(o.rt_scale)) return false; }
         else if (std::strcmp(a, "--flashlight") == 0) o.flashlight = true;
         else if (std::strcmp(a, "--game-shot") == 0) o.game_shot = true;
         else if (std::strcmp(a, "--ladder-walk") == 0) o.ladder_walk = true;
@@ -1496,6 +1498,11 @@ int run_game(const Options& o) {
     uint32_t dxrW = 0, dxrH = 0;
     contracts::ChunkKey dxrCenter{0, static_cast<int64_t>(1) << 40, 0};
     contracts::CameraPose dxrPrevCam{}; bool dxrHaveCam = false;  // GLM 01 Tier 1: PT temporal-accumulation state
+    // RT internal-resolution scale (F3 cycles): the path tracer renders at num/den of the window, upscaled on present.
+    // Lower = proportionally fewer primary/GI/shadow rays -- the "render low / display high" perf knob; the temporal
+    // accumulation + denoiser carry quality. Default Quality (2/3) = the prior hardcoded behavior.
+    static const struct { uint32_t num, den; const char* name; } kRtScales[] = { {2,3,"Quality"}, {1,2,"Balanced"}, {1,3,"Performance"} };
+    int rtScaleIdx = (o.rt_scale < 3u) ? static_cast<int>(o.rt_scale) : 0; bool prevF3 = false;
     app::Shoggoth shog;                       // M20b: the hunting creature (spawned on New Game)
     std::vector<contracts::ChunkVertex> shogBody;
     std::vector<contracts::ChunkVertex> ladderMesh; int64_t ladderCell = (static_cast<int64_t>(1) << 62);  // the infinite ladder's render mesh (rebuilt only when the player crosses a 24 m cell)
@@ -1651,6 +1658,9 @@ int run_game(const Options& o) {
         const bool f2 = focused && (GetAsyncKeyState(VK_F2) & 0x8000) != 0;  // M19: toggle ray tracing
         if (f2 && !prevF2) model.settings.rt ^= 1;
         prevF2 = f2;
+        const bool f3 = focused && (GetAsyncKeyState(VK_F3) & 0x8000) != 0;  // F3: cycle RT internal resolution (Quality 2/3 -> Balanced 1/2 -> Performance 1/3)
+        if (f3 && !prevF3) { rtScaleIdx = (rtScaleIdx + 1) % 3; dxrHaveCam = false; }  // res change -> the rw/rh below re-inits the DxrRenderer; force a clean accumulator reset
+        prevF3 = f3;
         const bool fkey = focused && (GetAsyncKeyState('F') & 0x8000) != 0;  // F: toggle the RT flashlight (eye-torch)
         if (fkey && !prevF) flashOn = !flashOn;
         prevF = fkey;
@@ -1963,7 +1973,8 @@ int run_game(const Options& o) {
                                  && !capText.empty() && now < capUntil;
             if (model.settings.rt) {
                 // M19 ray-traced path: DXR at 2/3 internal res -> present (upscaled).
-                const uint32_t rw = (curW * 2u) / 3u, rh = (curH * 2u) / 3u;
+                const uint32_t rw = (curW * kRtScales[rtScaleIdx].num) / kRtScales[rtScaleIdx].den,
+                               rh = (curH * kRtScales[rtScaleIdx].num) / kRtScales[rtScaleIdx].den;   // F3-cycled internal RT res
                 if (!dxr || dxrW != rw || dxrH != rh) {
                     dxr = std::make_unique<br::render_dxr::DxrRenderer>();
                     if (renderer.native_device5() && dxr->init(rw, rh, renderer.native_device5())) { dxrW = rw; dxrH = rh; dxrCenter = contracts::ChunkKey{0, static_cast<int64_t>(1) << 40, 0}; }   // RT_PERF item A: share the raster Device5 (else RT off)

@@ -738,3 +738,23 @@ job is audit + fast, unambiguous rollback.
   clean exit, `lookcheck:PASS`. The shadow-ray cut (~6-9× per `direct_light` call) is largest in light-dense OPEN
   rooms — the operator's stated pain point; the auto-play smoke (corridor-ish) shows it debug-clean at similar FPS, the
   real win is at the operator's open-room/fullscreen settings.
+
+## E32 — 2026-06-21 — RT internal-resolution knob (F3 / --rt-scale): the "render low / display high" perf lever
+- **Context:** the operator's "still slow" + their own observation that AAA ray-traces at 1080p even for 4K output. We
+  hardcoded the PT at 2/3 of the window; this makes it a live knob. Rollback anchor: tag `pre-rt-reproj` (`0c03c65`).
+- **What:** `run_game` renders the path tracer at `kRtScales[idx]` of the window — **Quality 2/3 (default = prior
+  behavior), Balanced 1/2, Performance 1/3** — upscaled on present. **F3 cycles it live** (edge-triggered, forces a
+  clean accumulator reset via `dxrHaveCam=false` → the existing window-resize re-init path rebuilds the DxrRenderer at
+  the new res). New `--rt-scale 0|1|2` flag sets the initial index (CLI/testing). Lower scale = proportionally fewer
+  primary/GI/shadow rays.
+- **Why safe / no regression:** `run_game`-only (live path) — touches no PT shader, no goldens, no sim/determinism, and
+  the gates use the fixed-res `run_dxr_*` modes (unaffected). The re-init-at-new-res path is the same one a window
+  resize already exercises. Default index 0 = the exact prior 2/3 behavior.
+- **Files:** `app/src/main.cpp` (the `kRtScales` table + `rtScaleIdx` + F3 handler + the `rw/rh` computation +
+  `Options::rt_scale` + `--rt-scale` parse). **Rollback:** `git reset --hard 0c03c65` (tag `pre-rt-reproj`).
+- **Verified:** `audit.ps1` PASS (build /WX, **ctest 116/116**, determinism `409129a0` UNCHANGED = live-only, inventory,
+  isolation). Live smokes both **debug_error_count 0, lookcheck PASS**: Quality 911 frames vs Performance (1/3 res) 927
+  — **barely faster at the smoke's 720p window**, which CONFIRMS the RT_PERF_PLAN thesis: at low display res the FIXED
+  per-frame costs (sim, present, AS, update_creature syncs) dominate, so cutting PT pixels barely moves it. The knob's
+  win scales with display res — at the operator's **4K** the PT (~4.4M px at 2/3) is the dominant cost so 1/3 res cuts
+  it ~4×. *Next:* instrument the per-frame breakdown to find + cut the fixed costs (which help at ALL resolutions).
