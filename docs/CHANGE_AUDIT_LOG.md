@@ -778,3 +778,13 @@ job is audit + fast, unambiguous rollback.
 - **Verified:** `audit.ps1` PASS (build /WX, ctest 116/116, determinism unchanged, inventory, isolation); live smokes
   debug-clean both vsync states. **Operator takeaway: press V (uncap) + F3 (lower RT res) — two keystrokes, ~60%+ FPS
   at 720p and proportionally more at 4K.**
+
+## E34 — 2026-07-01 — inventory reconciliation: `licenses/` + foreign tool caches (audit was red)
+- **What/why:** the pre-step audit failed Iron Rule 7: `licenses/` (added by `b0c48be`-era itch.io work, `b326bc0`,
+  without the same-commit inventory reconciliation) + two foreign tool-cache dirs (`.wrangler/` Cloudflare CLI,
+  `___INDEX_CACHE/` operator repo-index tooling) were unclassified at the repo root.
+- **Fix:** `check_inventory.ps1` `$known` += `licenses` (legal/packaging content, same class as `files`) +
+  `___INDEX_CACHE`/`.wrangler` (gitignored foreign caches, commented as never-inventory); `.gitignore` += both cache
+  dirs; deleted `.wrangler/` (2 regenerable CLI json files). `___INDEX_CACHE/` left in place (operator tooling — not
+  mine to delete). NOT a gate relaxation: classification of non-module content, the same mechanism as `_brainstorm`.
+- **Verified:** `check_inventory.ps1` exit 0.

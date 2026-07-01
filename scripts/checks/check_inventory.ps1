@@ -31,7 +31,13 @@ foreach ($m in $expected) {
 # as `runs`/`scripts` — not sim modules, so they carry no MODULE.md / ARCHITECTURE entry.
 $known = $expected + @('contracts', 'docs', 'scripts', 'tests', 'goldens', 'runs',
                        'build', 'build-release', 'dist', 'extern', 'files', '.git', '.claude',
-                       '_run_state', '.brstate', '_brainstorm')
+                       '_run_state', '.brstate', '_brainstorm',
+                       # `licenses` = bundled third-party license texts for the itch.io release (b326bc0) --
+                       # packaging/legal content, same class as `files`/`dist`, not a sim module.
+                       'licenses',
+                       # `___INDEX_CACHE` (operator repo-index tooling) + `.wrangler` (Cloudflare CLI cache):
+                       # foreign-tool caches, gitignored, zero project content -- never inventory entries.
+                       '___INDEX_CACHE', '.wrangler')
 # `_staged_*` = a session's prepared-changeset staging dir (APPLY_PROMPT + CHANGESET.md review artifacts),
 # the same working-dir class as `_brainstorm`/`runs` -- not a sim module, so it carries no inventory entry.
 Get-ChildItem $RepoRoot -Directory | ForEach-Object {

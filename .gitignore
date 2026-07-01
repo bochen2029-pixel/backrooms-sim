@@ -26,6 +26,10 @@ compile_commands.json
 /files/
 *.zip
 
+# Foreign tool caches dropped at the repo root (operator indexing tools, Cloudflare CLI)
+/___INDEX_CACHE/
+/.wrangler/
+
 # OS
 Thumbs.db
 desktop.ini
