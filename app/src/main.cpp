@@ -1076,7 +1076,8 @@ int run_play(const Options& o) {
                 // static view converges clean at 1 spp/frame instead of 4-spp-from-scratch (see pt_view_moved + run_game).
                 const bool ptReset = !dxrHaveCam || sceneRebuilt || pt_view_moved(cam, dxrPrevCam);
                 dxr->render_pt_frame(cam, ptReset ? 4u : 1u, static_cast<uint32_t>(o.seed) + static_cast<uint32_t>(frames),
-                                     ptReset, true, static_cast<uint32_t>(frames), /*aa=*/true, /*stochastic_lights=*/true);
+                                     ptReset, true, static_cast<uint32_t>(frames), /*aa=*/true, /*stochastic_lights=*/true,
+                                     /*want_readback=*/!o.out.empty());   // E35: --out capture is the only reader here
                 dxrPrevCam = cam; dxrHaveCam = true;
                 // RT_PERF item A: present the PT output as a same-device GPU texture (no per-frame CPU readback).
                 if (renderer.present_pt_texture(dxr->pt_output(), /*draw_caption=*/false)) {
@@ -2018,13 +2019,19 @@ int run_game(const Options& o) {
                     dxr->set_dread(dreadRt);
                     const bool ptReset = !dxrHaveCam || sceneRebuilt || flashChanged || flaresChanged || pt_view_moved(cam, dxrPrevCam);
                     flaresChanged = false;
+                    // E35: request the color+depth CPU-readback copies ONLY on the sparse frames something actually
+                    // reads the POV back (Director vision cadence / a waiting voice turn). Every other frame is
+                    // presented same-device and the copies are ~30 MB of dead PCIe traffic at a 4K-Quality internal res.
+                    const bool visionDue = model.settings.director && visionDir && (now - last_vision >= vision_interval);
+                    const bool chatPovDue = model.settings.director && chat && wantChatPov;
                     dxr->render_pt_frame(cam, ptReset ? 4u : 1u, static_cast<uint32_t>(texSeed) + static_cast<uint32_t>(frames),
-                                         ptReset, true, static_cast<uint32_t>(frames), /*aa=*/true, /*stochastic_lights=*/true);
+                                         ptReset, true, static_cast<uint32_t>(frames), /*aa=*/true, /*stochastic_lights=*/true,
+                                         /*want_readback=*/(visionDue || chatPovDue));
                     dxrPrevCam = cam; dxrHaveCam = true;
                     // RT_PERF item A: present the PT output as a SAME-DEVICE GPU texture -- no per-frame CPU
                     // readback. The readback now happens ONLY when the Director VLM / chat needs the player POV.
                     std::vector<uint8_t> rt;
-                    if (model.settings.director && visionDir && now - last_vision >= vision_interval) {
+                    if (visionDue) {
                         last_vision = now;
                         if (dxr->readback(rt)) {
                             std::string b64 = encode_pov_b64(rt, dxrW, dxrH);
@@ -2032,7 +2039,7 @@ int run_game(const Options& o) {
                         }
                     }
                     // ADR-074: a waiting voice turn grabs the player POV so the Director answers about what you SEE.
-                    if (model.settings.director && chat && wantChatPov) {
+                    if (chatPovDue) {
                         if (rt.empty()) dxr->readback(rt);   // reuse this frame's readback if vision already grabbed it
                         if (!rt.empty()) { wantChatPov = false; chat->submit(std::move(pendingChatWav), encode_pov_b64(rt, dxrW, dxrH), std::move(pendingChatCtx)); }
                     }

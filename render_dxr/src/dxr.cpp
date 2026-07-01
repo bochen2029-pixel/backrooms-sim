@@ -1330,7 +1330,7 @@ bool DxrRenderer::render_scene(const contracts::CameraPose& cam) {
 }
 
 bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t samples, uint32_t seed, bool reset,
-                                 bool denoise, uint32_t frame, bool aa, bool stochastic_lights) {
+                                 bool denoise, uint32_t frame, bool aa, bool stochastic_lights, bool want_readback) {
     Impl& d = *impl_;
     if (!d.sceneReady || !d.ptPso || !d.shadeVb) { last_error_ = "pt scene not built"; return false; }
     if (samples == 0) samples = 1;
@@ -1398,13 +1398,19 @@ bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t sam
         d.list->DispatchRays(&dr);
 
         if (resolve) {
-            const D3D12_RESOURCE_BARRIER dToCopy = transition(d.depthTex.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            d.list->ResourceBarrier(1, &dToCopy);
-            D3D12_TEXTURE_COPY_LOCATION ddst{}; ddst.pResource = d.depthReadback.Get(); ddst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; ddst.PlacedFootprint = d.depthFootprint;
-            D3D12_TEXTURE_COPY_LOCATION dsrc{}; dsrc.pResource = d.depthTex.Get(); dsrc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dsrc.SubresourceIndex = 0;
-            d.list->CopyTextureRegion(&ddst, 0, 0, 0, &dsrc, nullptr);
-            const D3D12_RESOURCE_BARRIER dBack = transition(d.depthTex.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            d.list->ResourceBarrier(1, &dBack);
+            // E35: the depth + color readback copies are requested per frame (want_readback). In-game almost every
+            // frame is presented same-device and never read back -- at a 4K-Quality internal res the two copies are
+            // ~30 MB/frame of dead GPU->sysmem PCIe traffic, serialized on the queue. Offline/golden/gate callers
+            // keep the default (true), so readback()-based oracles see byte-identical behavior.
+            if (want_readback) {
+                const D3D12_RESOURCE_BARRIER dToCopy = transition(d.depthTex.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                d.list->ResourceBarrier(1, &dToCopy);
+                D3D12_TEXTURE_COPY_LOCATION ddst{}; ddst.pResource = d.depthReadback.Get(); ddst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; ddst.PlacedFootprint = d.depthFootprint;
+                D3D12_TEXTURE_COPY_LOCATION dsrc{}; dsrc.pResource = d.depthTex.Get(); dsrc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dsrc.SubresourceIndex = 0;
+                d.list->CopyTextureRegion(&ddst, 0, 0, 0, &dsrc, nullptr);
+                const D3D12_RESOURCE_BARRIER dBack = transition(d.depthTex.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                d.list->ResourceBarrier(1, &dBack);
+            }
             if (denoise) {
                 // RT_PERF item B1: fold the denoise dispatch into THIS list -> one ExecuteCommandLists + wait_idle
                 // for the frame instead of two. The accumulate pass (uResolve==2) wrote g_accum + g_guide; a UAV
@@ -1422,7 +1428,7 @@ bool DxrRenderer::render_pt_frame(const contracts::CameraPose& cam, uint32_t sam
                 d.list->SetComputeRoot32BitConstants(0, 28, cd, 0);
                 d.list->DispatchRays(&dr);
             }
-            copy_color();   // denoise off: the uResolve==1 tonemap is final; denoise on: the fold above made it final
+            if (want_readback) copy_color();   // denoise off: the uResolve==1 tonemap is final; denoise on: the fold above made it final
         }
 
         if (FAILED(d.list->Close())) { last_error_ = "pt list close"; return false; }

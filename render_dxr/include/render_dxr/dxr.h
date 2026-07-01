@@ -91,9 +91,17 @@ public:
     // grid — far fewer shadow rays in light-dense rooms. Unbiased (converges to the full-NEE
     // image via temporal accumulation; proven by run_dxr_stoch). INTERACTIVE ONLY — offline/
     // golden uses full NEE so goldens stay bit-identical.
+    //
+    // `want_readback` (default ON): at the resolve, copy the color + depth into the CPU-readback
+    // staging buffers that readback()/readback_depth() map. The interactive game passes false on
+    // every frame nothing reads back (the two copies are ~30 MB/frame of dead PCIe traffic at a
+    // 4K-Quality internal res) and true only on the sparse POV-grab frames (Director vision /
+    // voice chat / --out). Offline/golden/gate paths keep the default, so every readback()-based
+    // oracle is untouched. NOTE: readback()/readback_depth() after a want_readback=false frame
+    // map the LAST copied frame (stale) — request the copy on the frame you read.
     bool render_pt_frame(const contracts::CameraPose& camera, uint32_t samples,
                          uint32_t seed, bool reset, bool denoise = false, uint32_t frame = 0,
-                         bool aa = false, bool stochastic_lights = false);
+                         bool aa = false, bool stochastic_lights = false, bool want_readback = true);
 
     // Interactive flashlight (default OFF): a torch co-located with the eye, aimed along the camera
     // forward, that brightens primary hits inside a soft cone — no 3D model, no shadow rays (a primary

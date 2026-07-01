@@ -21,6 +21,10 @@ self-contained, ADR-035), `stream`.
   (green chemlight analytic point lights), `set_dread` (Apparition Phase 2b.2: a soft **post-accumulation** dim
   of the PT output while a verdict lingers — applied at the tonemap, so it never pollutes the radiance accumulator
   and needs no reset; `1.0`=off → `uDread` branch skipped → goldens exact).
+- `render_pt_frame(..., want_readback)` (default **ON**, E35) — the resolve's color+depth staging copies into the
+  CPU-readback buffers are per-frame skippable: the interactive game passes false except on the sparse POV-grab
+  frames (Director vision / voice chat / `--out`); at a 4K-Quality internal res the copies are ~30 MB/frame of dead
+  PCIe traffic otherwise. Offline/golden/gate callers keep the default → `readback()`-based oracles untouched.
 - `render_dxr/render_dxr.h` — identity stub (module banner).
 - `dxc.*` (internal) — runtime DXC wrapper: loads `dxcompiler.dll`/`dxil.dll`,
   compiles HLSL → signed SM 6.3 DXIL.
