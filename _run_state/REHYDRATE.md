@@ -1,5 +1,12 @@
 # ⏸ REHYDRATE — read this FIRST (reconstitution pointer)
 
+> **STALENESS BANNER (2026-07-01, Session 45):** the body below is the 2026-06-18 snapshot — still right about
+> HOW to work here, but its "single next action" (Phase C.2) is superseded. **Current thread = 4K RT performance:**
+> `docs/RT_4K_OPTIMIZATION_REPORT.md` (the ranked plan) + SESSION_LOG **Session 45** (report → root-cause → E34–E36
+> shipped: readback-copy cut, F1 HUD/toasts, F3/V persistence, AUTO-Balanced at 4K; bundle + Desktop shortcut
+> re-staged; HEAD `be9b8ac`, anchor `pre-rt4k-s1`). Ledger now runs **E0–E36**. Next report steps if continuing RT:
+> §2.2 one-submit frame · §3 reprojection keystone. Phase C.2 remains a valid parked thread, not the active one.
+
 > Written by the session that lived the context (Bo's perpetual-memory doctrine, Procedure A), at ~89%
 > context before a planned fresh-session handoff. **Trust the files + git over this summary. Verify with
 > the commands below. Never recall blind.** Date stamped: 2026-06-18.
