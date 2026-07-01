@@ -55,6 +55,22 @@ and F1 showing the numbers.** Rollback: tag `pre-rt4k-s1`. Left alone: Desktop `
 possibly his installed screensaver — stale but not mine to break). Next report steps: §2.2 one-submit frame,
 §3 reprojection (the keystone).
 
+**PART 3 (same session): "the escalator is broken in raster, looks horrible" → fixed (E37, `f1132d8`).** The
+"escalator" = the infinite 45° ladder (`54115a3`, raster-only — RT never renders it, hence "not in RTX"). It had
+shipped smoke-verified but never LOOKED at; `--ladder-shot` reproduced the horror. Three root causes: (1) the lit
+shader **normalizes vertex color to hue-only** (`i.col / m`, renderer.cpp) so the emissive steps' baked brightness
+could never render → one flat blown-out neon-cyan cutout; (2) the band carve dropped **single faces of one-sided
+wall BOXES by centroid** → the lane was lined with black box interiors + floating top ribbons; (3) the **spur
+carved render-only** → invisible solid walls on the spawn approach. Fixes: emissive branch × `m` (gen lamps have
+col {1,1,0.97} → m==1.0 → IEEE identity — **gates M5+M8 PASSED bit-identical**); carve rewritten to whole-box
+z-interval overlap exactly matching `apply_to_collision`; spur mirrored into collision (tall boxes only); ladder
+mesh = solid shaded escalator beam (baked per-face shades 1.00/0.84 treads · 0.55/0.45 risers · 0.34 skirts ·
+0.20 underside, `kSkirtVis` 1.6 m body + underside plugs the inter-floor void; 36 verts/step ≤ slot cap).
+Verified: audit PASS (determ `409129a0` unchanged), gates M5+M8, `--ladder-walk` PASS seeds 1+7 (59 m
+down/up, no fall-through), shot A/B, live `--play` raster smoke debug-clean. Release rebuilt + bundle exe/scr
+re-staged. Known cosmetic remainder: the punch-through hole rims still read dark (one-sided floor backsides —
+same look as every M27 stairwell); options if wanted: rim collars or void-plates, ~1 h.
+
 ---
 
 ## Session 44 — RT perf knobs (F3 resolution + V vsync) + the diagnosis that vsync was capping everything ✅ (ledger E32–E33, anchor `pre-rt-reproj`)
