@@ -20,6 +20,8 @@ void require_equal(const Config& a, const Config& b) {
     REQUIRE(a.director == b.director);
     REQUIRE(a.fov == b.fov);
     REQUIRE(a.renderer == b.renderer);
+    REQUIRE(a.model_tier == b.model_tier);
+    REQUIRE(a.rt_scale == b.rt_scale);
     REQUIRE(a.seed == b.seed);
 }
 }  // namespace
@@ -28,7 +30,7 @@ TEST_CASE("config write -> read round-trips identically", "[m16][config]") {
     Config c;
     c.width = 1920; c.height = 1080; c.fullscreen = 1; c.vsync = 0;
     c.master = 65; c.sfx = 40; c.mouse = 75; c.director = 1; c.fov = 95;
-    c.renderer = 1; c.seed = 123456789ull;
+    c.renderer = 1; c.model_tier = 2; c.rt_scale = 2; c.seed = 123456789ull;
     const Config back = parse(serialize(c));
     require_equal(c, back);
 
@@ -59,7 +61,7 @@ TEST_CASE("parse ignores comments, blanks, and unknown keys; missing keys keep d
 
 TEST_CASE("sanitize clamps an out-of-range hand-edited config", "[m16][config]") {
     std::string text =
-        "master=500\nsfx=-20\nmouse=1000\nfov=10\nwidth=10\nheight=99999\nseed=0\n";
+        "master=500\nsfx=-20\nmouse=1000\nfov=10\nwidth=10\nheight=99999\nrt_scale=9\nseed=0\n";
     const Config c = parse(text);  // parse() runs sanitize()
     REQUIRE(c.master == 100);
     REQUIRE(c.sfx == 0);
@@ -67,5 +69,6 @@ TEST_CASE("sanitize clamps an out-of-range hand-edited config", "[m16][config]")
     REQUIRE(c.fov == 50);          // clamped up to the floor
     REQUIRE(c.width == 320);       // clamped up
     REQUIRE(c.height == 4320);     // clamped down
+    REQUIRE(c.rt_scale == 2);      // clamped into -1 (AUTO) .. 2 (Performance)
     REQUIRE(c.seed == 1);          // 0 -> 1 (a valid seed)
 }

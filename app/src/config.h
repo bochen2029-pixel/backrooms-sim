@@ -28,6 +28,8 @@ struct Config {
     int fov = 70;           // degrees
     int renderer = 0;       // 0 raster, 1 DXR (reserved)
     int model_tier = 0;     // LLM model: 0 AUTO (VRAM-picked), 1 force 9B (vision), 2 force 4B (text). Applies on restart.
+    int rt_scale = -1;      // RT internal-res scale: -1 AUTO (window-size pick), 0 Quality 2/3, 1 Balanced 1/2,
+                            // 2 Performance 1/3. F3 cycles it live; an explicit F3 choice is persisted here.
     uint64_t seed = 1;
 };
 
@@ -46,6 +48,7 @@ inline Config sanitize(Config c) {
     c.fov = clamp_int(c.fov, 50, 110);
     c.renderer = c.renderer ? 1 : 0;
     c.model_tier = clamp_int(c.model_tier, 0, 2);
+    c.rt_scale = clamp_int(c.rt_scale, -1, 2);
     if (c.seed == 0) c.seed = 1;
     return c;
 }
@@ -64,6 +67,7 @@ inline std::string serialize(const Config& c) {
     o << "fov=" << c.fov << "\n";
     o << "renderer=" << c.renderer << "\n";
     o << "model_tier=" << c.model_tier << "\n";
+    o << "rt_scale=" << c.rt_scale << "\n";
     o << "seed=" << c.seed << "\n";
     return o.str();
 }
@@ -89,6 +93,7 @@ inline Config parse(const std::string& text) {
         else if (k == "fov") c.fov = std::atoi(v.c_str());
         else if (k == "renderer") c.renderer = std::atoi(v.c_str());
         else if (k == "model_tier") c.model_tier = std::atoi(v.c_str());
+        else if (k == "rt_scale") c.rt_scale = std::atoi(v.c_str());
         else if (k == "seed") c.seed = std::strtoull(v.c_str(), nullptr, 10);
     }
     return sanitize(c);

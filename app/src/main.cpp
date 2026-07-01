@@ -103,8 +103,10 @@ struct Options {
     bool dxr_depth = false, dxr_pt = false, dxr_fps = false, dxr_ghost = false, dxr_walk = false;
     bool dxr_denoise = false;   // headless: does the spatial denoiser bring a noisy few-spp frame closer to ground truth?
     bool dxr_stoch = false;     // headless oracle: does stochastic single-light NEE (RIS) converge to the full-NEE image? (unbiasedness)
-    uint32_t rt_scale = 0;      // run_game initial RT internal-resolution scale index (0 Quality 2/3, 1 Balanced 1/2, 2 Performance 1/3); F3 cycles it live
-    bool no_vsync = false;      // run_game: start with vsync OFF (uncapped FPS, lower latency, tearing); V toggles it live. Default vsync ON.
+    uint32_t rt_scale = 0xFFFFFFFFu;  // run_game RT internal-res scale FORCED for this run (0 Quality 2/3, 1 Balanced 1/2, 2 Performance 1/3);
+                                      // unset (the default) -> the persisted cfg rt_scale, else AUTO by window size. F3 cycles it live.
+    bool no_vsync = false;      // run_game: force vsync OFF this run (uncapped FPS, lower latency, tearing); V toggles + persists. Default: cfg.
+    bool hud = false;           // run_game: start with the F1 stats HUD on (fps / RT internal res / vsync) -- headless smokes read it via a shot
     bool llm_test = false;      // CLI: exercise the in-game "Test Connection" probe + print the status line
     bool soak = false, crash_test = false, director_probe = false;
     bool director_record = false, director_replay = false;
@@ -277,6 +279,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (std::strcmp(a, "--spp") == 0) { if (!u32(o.spp)) return false; }
         else if (std::strcmp(a, "--rt-scale") == 0) { if (!u32(o.rt_scale)) return false; }
         else if (std::strcmp(a, "--no-vsync") == 0) o.no_vsync = true;
+        else if (std::strcmp(a, "--hud") == 0) o.hud = true;
         else if (std::strcmp(a, "--flashlight") == 0) o.flashlight = true;
         else if (std::strcmp(a, "--game-shot") == 0) o.game_shot = true;
         else if (std::strcmp(a, "--ladder-walk") == 0) o.ladder_walk = true;
@@ -1503,11 +1506,26 @@ int run_game(const Options& o) {
     contracts::CameraPose dxrPrevCam{}; bool dxrHaveCam = false;  // GLM 01 Tier 1: PT temporal-accumulation state
     // RT internal-resolution scale (F3 cycles): the path tracer renders at num/den of the window, upscaled on present.
     // Lower = proportionally fewer primary/GI/shadow rays -- the "render low / display high" perf knob; the temporal
-    // accumulation + denoiser carry quality. Default Quality (2/3) = the prior hardcoded behavior.
-    static const struct { uint32_t num, den; const char* name; } kRtScales[] = { {2,3,"Quality"}, {1,2,"Balanced"}, {1,3,"Performance"} };
-    int rtScaleIdx = (o.rt_scale < 3u) ? static_cast<int>(o.rt_scale) : 0; bool prevF3 = false;
-    bool vsyncOn = !o.no_vsync; bool prevV = false;   // V toggles vsync; OFF = uncapped FPS (real perf, lower latency, tearing)
+    // accumulation + denoiser carry quality. Names are UPPERCASE (the HUD font is caps-only).
+    // E36 initial pick: --rt-scale (forces, this run only) > cfg.rt_scale (the user's persisted F3 choice) > AUTO
+    // by window height. At a 4K window "QUALITY 2/3" is still 2560x1440 of path tracing, so AUTO starts tall
+    // (>=1800 px) windows at BALANCED -- the literal "game at 4K, rays at 1080p" split the operator asked for.
+    static const struct { uint32_t num, den; const char* name; } kRtScales[] = { {2,3,"QUALITY"}, {1,2,"BALANCED"}, {1,3,"PERFORMANCE"} };
+    bool rtScaleUserSet = false; bool prevF3 = false;
+    int rtScaleIdx = (o.rt_scale < 3u) ? static_cast<int>(o.rt_scale)
+                   : (cfg.rt_scale >= 0) ? cfg.rt_scale
+                   : (curH >= 1800u) ? 1 : 0;
+    bool vsyncOn = o.no_vsync ? false : (cfg.vsync != 0); bool prevV = false;   // V toggles (persisted); --no-vsync forces OFF this run
     renderer.set_vsync(vsyncOn);
+    // E36 F1 stats HUD / keypress toast, through the existing caption-overlay channel (zero new render machinery,
+    // bottom-centred line). F2/F3/V flash it for a beat so the knobs are visibly DOING something (they were silent
+    // -- the operator pressed F3 at 4K and reasonably concluded nothing happened); F1 pins it. The 4K overlay
+    // re-rasterises/uploads only when the composed string actually changes (~1.3 Hz refresh while shown).
+    bool hudPersist = o.hud; bool prevF1 = false; bool hudPing = false;
+    std::string hudLine; std::string lastOvlUploaded; uint32_t lastOvlW = 0, lastOvlH = 0;
+    steady_clock::time_point hudUntil{}; steady_clock::time_point hudNextText{};
+    float fpsEma = 0.0f, renderMsEma = 0.0f;
+    auto prevFrameT = steady_clock::now();
     app::Shoggoth shog;                       // M20b: the hunting creature (spawned on New Game)
     std::vector<contracts::ChunkVertex> shogBody;
     std::vector<contracts::ChunkVertex> ladderMesh; int64_t ladderCell = (static_cast<int64_t>(1) << 62);  // the infinite ladder's render mesh (rebuilt only when the player crosses a 24 m cell)
@@ -1604,7 +1622,6 @@ int run_game(const Options& o) {
     std::string capText;                 // the current on-screen subtitle text (Settings -> Subtitles)...
     auto capUntil = t_start;             // ...shown until this time (a few seconds per line)
     std::vector<uint8_t> capOvl;         // its rasterised RGBA, uploaded to the renderer when the line changes
-    std::string lastCapUploaded;         // RT_PERF item A: the caption text last uploaded to the GPU overlay (upload only on change)
 
     // Headless spin guard (--auto-play): drop straight into Play and watch the mouse-look delta with a
     // STILL mouse. Raw input emits nothing when the mouse is idle, so the delta must stay ~0 rad/frame; the
@@ -1661,14 +1678,17 @@ int run_game(const Options& o) {
         if (f11 && !prevF11) { apply_fullscreen(!isFull); if (cursorHidden) clip_to_window(true); }
         prevF11 = f11;
         const bool f2 = focused && (GetAsyncKeyState(VK_F2) & 0x8000) != 0;  // M19: toggle ray tracing
-        if (f2 && !prevF2) model.settings.rt ^= 1;
+        if (f2 && !prevF2) { model.settings.rt ^= 1; hudPing = true; }
         prevF2 = f2;
         const bool f3 = focused && (GetAsyncKeyState(VK_F3) & 0x8000) != 0;  // F3: cycle RT internal resolution (Quality 2/3 -> Balanced 1/2 -> Performance 1/3)
-        if (f3 && !prevF3) { rtScaleIdx = (rtScaleIdx + 1) % 3; dxrHaveCam = false; }  // res change -> the rw/rh below re-inits the DxrRenderer; force a clean accumulator reset
+        if (f3 && !prevF3) { rtScaleIdx = (rtScaleIdx + 1) % 3; rtScaleUserSet = true; dxrHaveCam = false; hudPing = true; }  // res change -> the rw/rh below re-inits the DxrRenderer; force a clean accumulator reset; persisted at exit
         prevF3 = f3;
         const bool vkey = focused && (GetAsyncKeyState('V') & 0x8000) != 0;  // V: toggle vsync (OFF = uncapped FPS / lower latency / tearing)
-        if (vkey && !prevV) { vsyncOn = !vsyncOn; renderer.set_vsync(vsyncOn); }
+        if (vkey && !prevV) { vsyncOn = !vsyncOn; renderer.set_vsync(vsyncOn); cfg.vsync = vsyncOn ? 1 : 0; hudPing = true; }  // persisted at exit
         prevV = vkey;
+        const bool f1 = focused && (GetAsyncKeyState(VK_F1) & 0x8000) != 0;  // E36 F1: pin/unpin the stats HUD (fps / RT internal res / vsync)
+        if (f1 && !prevF1) { hudPersist = !hudPersist; hudPing = true; }
+        prevF1 = f1;
         const bool fkey = focused && (GetAsyncKeyState('F') & 0x8000) != 0;  // F: toggle the RT flashlight (eye-torch)
         if (fkey && !prevF) flashOn = !flashOn;
         prevF = fkey;
@@ -1729,6 +1749,10 @@ int run_game(const Options& o) {
         accum += duration<float>(now - prevt).count();
         prevt = now;
         if (accum > 0.25f) accum = 0.25f;
+        {   // E36 HUD: smoothed frames-per-second over the wall-clock frame delta
+            const float fdt = duration<float>(now - prevFrameT).count(); prevFrameT = now;
+            if (fdt > 1e-5f) { const float inst = 1.0f / fdt; fpsEma = (fpsEma <= 0.0f) ? inst : fpsEma + 0.12f * (inst - fpsEma); }
+        }
 
         if (model.screen == app::Screen::Play && sm) {
             const float aspect = static_cast<float>(curW) / static_cast<float>(curH);
@@ -1885,9 +1909,7 @@ int run_game(const Options& o) {
                         last_pa_line = d.caption;
                         if (audioOn) speak_pa(d.caption, contracts::kAudioSampleRate);   // PA voice
                         if (model.settings.subtitles) {                                  // + on-screen subtitle
-                            capText = d.caption; capUntil = now + seconds(6);
-                            app::build_caption_overlay(capOvl, curW, curH, capText);
-                            renderer.upload_caption_overlay(capOvl.data(), curW, curH);  // upload once; drawing it is then free
+                            capText = d.caption; capUntil = now + seconds(6);            // E36: uploaded by the shared overlay block below
                         }
                         ++director_spoke;
                     }
@@ -1946,8 +1968,7 @@ int run_game(const Options& o) {
                         last_pa_line = ex.reply;
                         if (audioOn) speak_pa(ex.reply, contracts::kAudioSampleRate);
                         if (model.settings.subtitles) {
-                            capText = ex.reply; capUntil = now + seconds(8);
-                            if (!model.settings.rt) { app::build_caption_overlay(capOvl, curW, curH, capText); renderer.upload_caption_overlay(capOvl.data(), curW, curH); }
+                            capText = ex.reply; capUntil = now + seconds(8);   // E36: uploaded by the shared overlay block below
                         }
                         ++director_spoke;
                     }
@@ -1979,6 +2000,32 @@ int run_game(const Options& o) {
             // Director subtitle active this frame? Shown in BOTH the ray-traced and raster paths.
             const bool showCap = model.settings.director && model.settings.subtitles
                                  && !capText.empty() && now < capUntil;
+            // E36: the F1 stats HUD / keypress toast rides the SAME caption overlay (it takes priority over a
+            // subtitle for the beat it is shown). Composed here once for both render paths; the full-window
+            // overlay re-rasterises + re-uploads only when the string (or the window size) actually changes.
+            if (hudPing) { hudUntil = now + milliseconds(2500); hudNextText = now; hudPing = false; }
+            const bool hudActive = hudPersist || now < hudUntil;
+            if (hudActive && now >= hudNextText) {
+                char hb[160];
+                const int fpsI = static_cast<int>(fpsEma + 0.5f);
+                if (model.settings.rt) {
+                    const uint32_t hrw = (curW * kRtScales[rtScaleIdx].num) / kRtScales[rtScaleIdx].den,
+                                   hrh = (curH * kRtScales[rtScaleIdx].num) / kRtScales[rtScaleIdx].den;
+                    std::snprintf(hb, sizeof(hb), "RT %s %uX%u . VSYNC %s . %d FPS . PT %.1f MS",
+                                  kRtScales[rtScaleIdx].name, hrw, hrh, vsyncOn ? "ON" : "OFF", fpsI, renderMsEma);
+                } else {
+                    std::snprintf(hb, sizeof(hb), "RASTER %uX%u . VSYNC %s . %d FPS . RENDER %.1f MS",
+                                  curW, curH, vsyncOn ? "ON" : "OFF", fpsI, renderMsEma);
+                }
+                hudLine = hb; hudNextText = now + milliseconds(750);
+            }
+            const bool showOvl = hudActive || showCap;
+            const std::string& ovlText = hudActive ? hudLine : capText;
+            if (showOvl && (ovlText != lastOvlUploaded || lastOvlW != curW || lastOvlH != curH)) {
+                app::build_caption_overlay(capOvl, curW, curH, ovlText);
+                renderer.upload_caption_overlay(capOvl.data(), curW, curH);
+                lastOvlUploaded = ovlText; lastOvlW = curW; lastOvlH = curH;
+            }
             if (model.settings.rt) {
                 // M19 ray-traced path: DXR at 2/3 internal res -> present (upscaled).
                 const uint32_t rw = (curW * kRtScales[rtScaleIdx].num) / kRtScales[rtScaleIdx].den,
@@ -2024,9 +2071,12 @@ int run_game(const Options& o) {
                     // presented same-device and the copies are ~30 MB of dead PCIe traffic at a 4K-Quality internal res.
                     const bool visionDue = model.settings.director && visionDir && (now - last_vision >= vision_interval);
                     const bool chatPovDue = model.settings.director && chat && wantChatPov;
+                    const auto rtT0 = steady_clock::now();   // E36 HUD: wait_idle inside makes CPU time ~= GPU time
                     dxr->render_pt_frame(cam, ptReset ? 4u : 1u, static_cast<uint32_t>(texSeed) + static_cast<uint32_t>(frames),
                                          ptReset, true, static_cast<uint32_t>(frames), /*aa=*/true, /*stochastic_lights=*/true,
                                          /*want_readback=*/(visionDue || chatPovDue));
+                    { const float ms = duration<float, std::milli>(steady_clock::now() - rtT0).count();
+                      renderMsEma = (renderMsEma <= 0.0f) ? ms : renderMsEma + 0.12f * (ms - renderMsEma); }
                     dxrPrevCam = cam; dxrHaveCam = true;
                     // RT_PERF item A: present the PT output as a SAME-DEVICE GPU texture -- no per-frame CPU
                     // readback. The readback now happens ONLY when the Director VLM / chat needs the player POV.
@@ -2043,13 +2093,8 @@ int run_game(const Options& o) {
                         if (rt.empty()) dxr->readback(rt);   // reuse this frame's readback if vision already grabbed it
                         if (!rt.empty()) { wantChatPov = false; chat->submit(std::move(pendingChatWav), encode_pov_b64(rt, dxrW, dxrH), std::move(pendingChatCtx)); }
                     }
-                    // The caption is GPU-blended by present_pt_texture; upload it to the overlay only when it changes.
-                    if (showCap && capText != lastCapUploaded) {
-                        app::build_caption_overlay(capOvl, curW, curH, capText);
-                        renderer.upload_caption_overlay(capOvl.data(), curW, curH);
-                        lastCapUploaded = capText;
-                    }
-                    if (renderer.present_pt_texture(dxr->pt_output(), showCap)) ++rtFrames;  // same-device blit, no readback
+                    // The caption/HUD overlay is GPU-blended by present_pt_texture; the shared block above uploaded it.
+                    if (renderer.present_pt_texture(dxr->pt_output(), showOvl)) ++rtFrames;  // same-device blit, no readback
                 }
             }
             if (!model.settings.rt) {
@@ -2073,9 +2118,12 @@ int run_game(const Options& o) {
                     dread = 1.0f - maxDim * frac;   // fluorescents ease to ~0.7x..0.46x at the verdict, back to full
                 }
                 renderer.set_dread(dread);
-                if (!renderer.render_chunks_windowed(cam, withShog, 8u, s.tick, &drawn, showCap)) {
+                const auto rsT0 = steady_clock::now();   // E36 HUD: raster render time
+                if (!renderer.render_chunks_windowed(cam, withShog, 8u, s.tick, &drawn, showOvl)) {
                     std::fprintf(stderr, "render: %s\n", renderer.last_error().c_str()); ShowCursor(TRUE); return 1;
                 }
+                { const float ms = duration<float, std::milli>(steady_clock::now() - rsT0).count();
+                  renderMsEma = (renderMsEma <= 0.0f) ? ms : renderMsEma + 0.12f * (ms - renderMsEma); }
             }
         } else {
             accum = 0.0f;  // sim time doesn't advance in menus
@@ -2098,7 +2146,9 @@ int run_game(const Options& o) {
     cfg.model_tier = model.settings.model_tier;  // persist the AI model tier (applies next launch)
     cfg.fullscreen = isFull ? 1 : 0; cfg.seed = model.seed;
     cfg.width = model.settings.res_w; cfg.height = model.settings.res_h;  // the picked resolution (applies next launch)
-    app::save_config(cfgPath, app::sanitize(cfg));
+    if (rtScaleUserSet) cfg.rt_scale = rtScaleIdx;  // E36: persist an explicit F3 choice; AUTO stays -1 so a future
+                                                    // window-size change re-picks (--rt-scale forces but never persists)
+    app::save_config(cfgPath, app::sanitize(cfg));  // cfg.vsync was updated live on each V press
 
     const uint32_t dbg = renderer.debug_error_count();
     const unsigned long long underruns = static_cast<unsigned long long>(audioOn ? eng.underruns() : 0ull);
@@ -2142,6 +2192,8 @@ int run_game(const Options& o) {
     std::printf("chat_requests: %llu\n", chat_req);
     std::printf("chat_produced: %llu\n", chat_prod);
     std::printf("rt_frames: %llu\n", static_cast<unsigned long long>(rtFrames));   // ADR-077: live RT presents (0 => RT crashed or silently fell back to raster)
+    std::printf("rt_scale: %d (%s)\n", rtScaleIdx, kRtScales[rtScaleIdx].name);    // E36: the effective RT internal-res scale (CLI > cfg > auto)
+    std::printf("vsync: %d\n", vsyncOn ? 1 : 0);                                   // E36: effective vsync at exit
     if (!last_pa_line.empty()) std::printf("director_last_line: %s\n", last_pa_line.c_str());
     std::printf("debug_error_count: %u\n", dbg);
     if (o.auto_play) {
