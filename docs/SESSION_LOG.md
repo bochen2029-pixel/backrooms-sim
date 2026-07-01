@@ -6,6 +6,38 @@ Newest entry first. Every session appends: done / pending / open questions / got
 
 ---
 
+## Session 45 — 4K RT deep-read → optimization REPORT (analysis only, zero code changed) ✅
+
+**The operator: "4K RTX is horribly slow — no engines, no DLSS; find Carmack-style clever optimizations, report
+only."** Read the entire PT shader + host (`render_dxr/src/dxr.cpp`), the `run_game` RT path, and the present path
+(2 Explore agents for the host maps, shader read personally). Deliverable: **`docs/RT_4K_OPTIMIZATION_REPORT.md`**.
+
+**The three load-bearing findings (all code-confirmed, file:line in the report):**
+1. **Walking = permanent accumulator reset.** `pt_view_moved` ε (main.cpp:906) is exceeded by head-bob/mouse-look
+   every moving frame → `ptReset=true` → **4 spp from scratch ≈ 10 rays/px** vs 4 rays/px accumulating. The
+   E12 temporal accumulation (and everything since) only ever engages standing still — gameplay runs the worst
+   case. Reprojection (the session-44 keystone) is therefore the #1 lever: ~2.5× on the dominant cost + better image.
+2. **~30 MB/frame of DEAD readback copies at 4K-Quality**: color (`copy_color`, dxr.cpp:1425) + depth
+   (dxr.cpp:1401-1407) are copied to readback heaps EVERY frame; in-game depth has no consumer and color is used
+   ~every 28 s (vision/chat). Invisible in the 720p smokes (~0.8 MB), ~1.3-1.9 ms at 4K. Free win.
+3. **Single-buffered frame**: 3-4 `wait_idle` round-trips (update_creature ×2, PT batch, present fence) + 4-6
+   `CreateCommittedResource` per frame in `update_creature` (TLAS resource re-created each frame, dxr.cpp:1258).
+   One-submit frame + persistent buffers + 1 frame in flight = ~2-4 ms + CPU/GPU overlap.
+
+**Report structure:** found money (§2) → reprojection keystone w/ mat-7 composability (§3) → R2/blue-noise
+quality-per-ray (§4, "the magic constant is the plastic number") → denoiser diet (96 taps × RGBA32F → fp16/packed/
+adaptive, §5) → GI TMax clamp + light-loop compaction + **irradiance lattice on the 4 m cell grid** (DDGI-lite,
+kills the GI ray pair; 2-D wall-map DDA as the leak test — the Wolfenstein trick's honest home, §6) → per-prim
+normal-code fetch diet (§7) → SER scoped/parked (§8) → Catmull-Rom+RCAS present upscale (§9). Attack order with
+estimates: ~17 fps → ~60-80 fps @ 4K-Quality across steps 0-6, all interactive-only (`uFrame` bits), goldens
+untouched, every step gate-provable. **Step 0 = GPU timestamp queries** (estimates are ±40% until measured).
+
+- Done: report + this entry. No code touched, no gates run (nothing to gate).
+- Pending: operator picks steps; step 0-2 are a natural first increment (~½ day, zero image change).
+- Gotchas: report estimates anchor on session 44's 720p smoke numbers scaled ×9 px — measure before believing.
+
+---
+
 ## Session 44 — RT perf knobs (F3 resolution + V vsync) + the diagnosis that vsync was capping everything ✅ (ledger E32–E33, anchor `pre-rt-reproj`)
 
 **The operator: "still slow," + a brainstorm (VXGI? AAA renders 4K-RT at 1080p?).** Fanned out 3 research agents
