@@ -1094,7 +1094,11 @@ float4 PSMain(VSOut i) : SV_TARGET {
     float m = max(i.col.r, max(i.col.g, i.col.b));
     float3 tint = (m > 0.001) ? (i.col / m) : float3(1,1,1);
     float3 albedo = tex * lerp(float3(1,1,1), tint, 0.5);
-    if (i.mat >= 2.5 && i.mat < 3.5) return float4(albedo, 1.0);   // fluorescent: emissive
+    // Fluorescent = emissive. Scale by the vertex color's max channel `m` (the luminance the tint
+    // normalization above throws away) so baked per-face shading survives — the ladder's escalator body
+    // depends on it (E37). Every gen-emitted lamp has col {1,1,0.97} -> m == 1.0 exactly -> multiplying
+    // by 1.0 is an IEEE identity, so all raster goldens stay bit-identical.
+    if (i.mat >= 2.5 && i.mat < 3.5) return float4(albedo * m, 1.0);
 
     float3 N = normalize(i.wnrm);
     float sum = 0.0;

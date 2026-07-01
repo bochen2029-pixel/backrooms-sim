@@ -817,3 +817,25 @@ job is audit + fast, unambiguous rollback.
   the staged exe writes the new `rt_scale` cfg key, exit 0); the STALE Desktop exe (2026-06-18, pre-E30..E33!) +
   its 2026-06-16 cfg moved to `C:\backrooms_backups\`, replaced by `Backrooms.lnk` → the bundle exe (can't go
   stale again). Bundle cfg (4K, RT on) untouched → next launch AUTO-starts BALANCED.
+
+## E37 — 2026-07-01 — the "escalator" (infinite 45° ladder) fixed in raster: shaded body + whole-box carve + real spur
+- **What/why:** operator: "in raster mode the escalator is broken, looks horrible" (RT is unaffected — the ladder
+  only exists in the raster path, `54115a3`, and shipped without a visual QC). Three root causes found via
+  `--ladder-shot` A/B + a gen/renderer code read: (1) **the lit shader NORMALIZES vertex color to its max channel**
+  (renderer.cpp `i.col / m`) — brightness never reaches the screen, so the emissive fluorescent steps rendered as
+  one flat blown-out neon-cyan cutout; (2) **the band carve dropped single FACES of one-sided wall BOXES by
+  centroid** — the lane's edge walls lost only their inner face, lining the whole gallery with black box
+  interiors, and crossing walls left floating top ribbons; (3) **the spawn spur carved render-only** — invisible
+  but solid walls on the approach (seed-dependent), while the lane's edge walls were the inverse (visible black,
+  walk-through).
+- **How:** ladder.h: baked per-face shading (treads 1.00/0.84 alternating, risers 0.55/0.45, skirts 0.34,
+  underside 0.20) + a deep `kSkirtVis=1.6` body + underside → a solid shaded escalator beam (36 verts/step,
+  ~5.6 k ≤ the 6144 slot cap) that also plugs the inter-floor void at punch-throughs; carve rewritten to
+  **whole-box z-interval overlap** (matches `apply_to_collision`'s AABB carve semantics — nothing is ever
+  visible-but-hollow or solid-but-invisible); spur uses the same overlap rule AND is mirrored into
+  `apply_to_collision` (tall boxes only — floors stay). renderer.cpp: the emissive branch multiplies by `m`
+  (the luminance the tint normalization discards); every gen lamp has col {1,1,0.97} → m==1.0 → IEEE identity.
+- **Verified:** audit PASS (ctest 116/116, determ `409129a0` unchanged); **gate M5 + M8 PASSED** (raster goldens
+  bit-identical = the `*m` identity proven by oracle); `--ladder-walk` PASS seeds 1 + 7 (59 m down/up, ~15 levels,
+  no fall-through — the collision spur carve is safe); `--ladder-shot` pose 0/1 A/B: flat cyan cutout + black
+  lane → shaded stepped beam in a clean gallery; live `--play` raster smoke debug-clean.
