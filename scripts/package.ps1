@@ -73,10 +73,12 @@ offline AI -- you do not need to open or touch any of it.
 
 Controls:  WASD/arrows move - mouse look - Shift run - Space jump
            Esc pause - F11 fullscreen - F2 ray tracing
-           F3 RT quality - V vsync - F flashlight - R flare (in RT)
+           F3 RT quality - V vsync - F1 stats - F flashlight - R flare
 
 Slow with ray tracing on? Press V (uncaps the frame rate) and F3
 (lowers the ray-tracing resolution). A big speed-up, esp. at 4K.
+Press F1 to SEE the fps + current mode; F3/V choices are remembered.
+At 4K the game now starts on Balanced RT automatically.
 
 See README.txt for requirements, the AI/privacy note, and credits.
 ================================================================
@@ -127,10 +129,14 @@ BACKROOMS SIM (portable, self-contained)
 Double-click Backrooms.exe to play. Everything it needs is in this folder -- no install, no setup.
 
 Controls:  WASD / arrows move | Mouse look | Space jump | Shift run | Esc pause | F11 fullscreen | F2 ray tracing
-           F3 RT quality (Quality/Balanced/Performance) | V vsync on/off | F flashlight (RT) | R drop flare (RT)
+           F3 RT quality (Quality/Balanced/Performance) | V vsync on/off | F1 stats HUD | F flashlight (RT)
+           R drop flare (RT)
 If ray tracing feels slow:  press V (turns OFF vsync -> uncaps the frame rate) and F3 (lowers the ray-tracing
-           resolution -- Balanced or Performance). Together these are a big speed-up, especially at 4K. The image
-           stays sharp when you hold still (it refines over a moment); lower RT quality is softest while moving.
+           resolution -- Balanced or Performance). Together these are a big speed-up, especially at 4K. Press F1
+           to SEE the frame rate + the current RT mode on screen; every F3/V press flashes the same stats line so
+           you can watch the numbers move. Your F3/V choices are REMEMBERED for next launch, and on a 4K window
+           the game now auto-starts at Balanced (rays at ~1080p, image upscaled). The image stays sharp when you
+           hold still (it refines over a moment); lower RT quality is softest while moving.
 Talk to it:  with DIRECTOR on, the facility intelligence SEES your view and narrates it -- and you can SPEAK
              into your mic and it answers, aloud + subtitled. Try Settings -> TEST MICROPHONE first.
 

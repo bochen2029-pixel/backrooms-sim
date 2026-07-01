@@ -36,6 +36,25 @@ untouched, every step gate-provable. **Step 0 = GPU timestamp queries** (estimat
 - Pending: operator picks steps; step 0-2 are a natural first increment (~½ day, zero image change).
 - Gotchas: report estimates anchor on session 44's 720p smoke numbers scaled ×9 px — measure before believing.
 
+**PART 2 (same session): the operator asked "I was told a dual-res trick was implemented but felt nothing — what's
+really going on?" → root cause found + the first increment SHIPPED (E34–E36, commits `6a94abf`/`432af24`/`6dfedde`).**
+The smoking gun: **`Desktop\Backrooms.exe` was the 2026-06-18 build — it predates E30/E31 (RIS!) AND E32/E33 (F3/V)
+by 3 days; F3/V were dead keys in the binary he was launching**, and it still full-NEE'd every bounce (~35-45
+rays/px walking). Even on the current exe the knobs were silent (no OSD/fps), unpersisted, defaulted to Quality,
+and vsync-masked. Shipped: **E34** inventory reconciliation (`licenses/` + foreign tool caches — audit was red);
+**E35** dead readback copies skipped in-game (`want_readback` param; ~30 MB/frame of PCIe at 4K-Quality; offline
+default unchanged); **E36** F1 stats HUD + F2/F3/V toasts through the caption channel, `rt_scale` persisted (new
+cfg key, −1=AUTO), the dead `vsync` cfg key wired + persisted, AUTO starts ≥1800-px windows at BALANCED, exit
+telemetry `rt_scale:`/`vsync:`, `--hud` flag, config tests extended. Verified: audit PASS ×2 (determinism
+`409129a0` unchanged), **gate M9 PASSED** (PT goldens bit-identical), smokes: forced PERFORMANCE+no-vsync+HUD
+1213/1213 rt_frames debug-clean · AUTO picked QUALITY at 720p · CLI flags never persist. Staged: release rebuilt,
+bundle exe/scr/READMEs re-staged (fingerprint-proven: the staged exe writes `rt_scale` into the bundle cfg, exit 0);
+stale Desktop exe+cfg archived to `C:\backrooms_backups\`, replaced with `Backrooms.lnk` → the bundle (Start-in set).
+The bundle cfg is 3840×2160/RT-on → **next launch auto-starts BALANCED (rays at 1080p) with vsync V one press away
+and F1 showing the numbers.** Rollback: tag `pre-rt4k-s1`. Left alone: Desktop `Backrooms_v2.scr` (2026-06-17,
+possibly his installed screensaver — stale but not mine to break). Next report steps: §2.2 one-submit frame,
+§3 reprojection (the keystone).
+
 ---
 
 ## Session 44 — RT perf knobs (F3 resolution + V vsync) + the diagnosis that vsync was capping everything ✅ (ledger E32–E33, anchor `pre-rt-reproj`)

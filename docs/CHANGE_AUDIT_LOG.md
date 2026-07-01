@@ -788,3 +788,32 @@ job is audit + fast, unambiguous rollback.
   dirs; deleted `.wrangler/` (2 regenerable CLI json files). `___INDEX_CACHE/` left in place (operator tooling — not
   mine to delete). NOT a gate relaxation: classification of non-module content, the same mechanism as `_brainstorm`.
 - **Verified:** `check_inventory.ps1` exit 0.
+
+## E35 — 2026-07-01 — skip the dead per-frame color+depth readback copies in-game (`want_readback`)
+- **What/why:** every interactive RT frame copied the full PT color (`copy_color`, dxr.cpp) AND depth textures into
+  CPU-readback staging buffers — ~30 MB/frame of GPU→sysmem PCIe traffic at a 4K-Quality internal res — while
+  in-game NOTHING reads depth back and color is read only on the sparse POV grabs (Director vision ~28 s /
+  voice chat / `--out`). Found by the Session-45 code read (`RT_4K_OPTIMIZATION_REPORT.md` §2.1).
+- **How:** `render_pt_frame(..., bool want_readback = true)`; the resolve records the two copies only when asked.
+  `run_game` passes `visionDue || chatPovDue` (hoisted before the render so the copy lands on the frame that reads
+  it); `run_play` passes `!o.out.empty()`. Offline/golden/gate callers keep the default → oracles byte-identical.
+- **Verified:** audit PASS (ctest 116/116, determinism `409129a0` unchanged); **gate M9 PASSED** (converged PT
+  golden bit-match, depth compare green, 1 km TLAS walk debug-clean); live smoke 1213/1213 rt_frames,
+  `debug_error_count 0`. **Commit `432af24`.** Rollback: tag `pre-rt4k-s1`.
+
+## E36 — 2026-07-01 — F1 stats HUD + keypress toasts; F3/V persist; AUTO Balanced at 4K
+- **What/why:** the E32/E33 knobs were real but SILENT (no OSD, no fps readout), unpersisted (locals), and defaulted
+  to Quality — at 4K the operator pressed F3, saw nothing change (vsync also masked it), and reasonably concluded
+  the feature didn't work. Root-caused in Session 45 (plus: the Desktop exe predated E32/E33 entirely).
+- **How:** F1 pins a stats line (fps EMA, RT internal res, vsync, PT/render ms) through the EXISTING caption-overlay
+  channel (uploads only when the composed string changes); F2/F3/V flash it 2.5 s. `cfg.rt_scale` (new key, −1=AUTO)
+  persists an explicit F3 choice; `cfg.vsync` (existing dead key, now wired) persists V. Initial pick: `--rt-scale`
+  (forces, never persists) > cfg > AUTO (window ≥1800 px tall → BALANCED = "game at 4K, rays at 1080p"). Exit
+  telemetry prints `rt_scale:`/`vsync:`. `--hud` starts the HUD on. config round-trip/sanitize tests extended.
+- **Verified:** audit PASS; gate M9 PASSED; smokes: forced `--rt-scale 2 --no-vsync --hud` → `rt_scale: 2
+  (PERFORMANCE)`/`vsync: 0`, 1213/1213 rt_frames debug-clean; defaults at a 720p window → AUTO picked QUALITY,
+  `vsync: 1`; CLI flags did NOT persist (cfg kept `rt_scale=-1`, `vsync=1`). **Commit `6dfedde`.**
+- **Staged:** release rebuilt + bundle exe/screensaver/READMEs re-staged (`dist\Backrooms\`, fingerprint-proven:
+  the staged exe writes the new `rt_scale` cfg key, exit 0); the STALE Desktop exe (2026-06-18, pre-E30..E33!) +
+  its 2026-06-16 cfg moved to `C:\backrooms_backups\`, replaced by `Backrooms.lnk` → the bundle exe (can't go
+  stale again). Bundle cfg (4K, RT on) untouched → next launch AUTO-starts BALANCED.
