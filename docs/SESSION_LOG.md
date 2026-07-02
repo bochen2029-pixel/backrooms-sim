@@ -88,6 +88,19 @@ points at the bundle). Note for the operator's own eyes: at player-eye height th
 45° grazing angle (reads as a ramp underfoot — physical, matches real escalators); the step banding + the vanish
 show from a half-level offset or mid-descent.
 
+**PART 5 (same session): the escalator enters the RAY-TRACED path (E39, `7aaed70`).** Operator: "convert the
+stairs into the RTX version too." Until now the ladder was raster-only while the COLLISION carve ran in both
+modes — RT was incoherent (ghost lane walls + an invisible climbable staircase). Now: run_game's RT scene rebuild
++ the `--game-shot --rt` harness feed `carve_residents` + the ladder mesh into `build_scene` (one quasi-static
+~3.7 k-vert BLAS, rebuilt only on the 32 m scene grid → the 220 m fade anchor lags ≤16 m, invisible). The mesh is
+retargeted to **material 8** (raster keeps 3): the PT `Hit` now carries the interpolated vertex COLOR, and mat 8
+emits `h.col × kLadderEmit(1.5)` at the primary hit + as a GI-bounce emitter — baked shading, tread banding, and
+the fade-to-black read identically in PT, and the glowing run lights its own shaft. Not in the NEE lattice; the
+five gate/oracle `build_scene` callers keep plain residents. Verified: audit PASS (determ `409129a0`), **gate M9
+PASSED** (goldens contain no mat 8 → branches untaken offline), RT QC shots poses 0/1/2 @ 240 spp debug-clean
+(`runs/ladder_rt_p{0,1,2}.png`), live `--game --rt` smoke **2832/2832 rt_frames debug_error 0**. Release + bundle
+re-staged. The escalator now exists — carved lane, glowing banded body, infinite vanish — in BOTH render paths.
+
 ---
 
 ## Session 44 — RT perf knobs (F3 resolution + V vsync) + the diagnosis that vsync was capping everything ✅ (ledger E32–E33, anchor `pre-rt-reproj`)
