@@ -25,6 +25,10 @@ self-contained, ADR-035), `stream`.
   CPU-readback buffers are per-frame skippable: the interactive game passes false except on the sparse POV-grab
   frames (Director vision / voice chat / `--out`); at a 4K-Quality internal res the copies are ~30 MB/frame of dead
   PCIe traffic otherwise. Offline/golden/gate callers keep the default → `readback()`-based oracles untouched.
+- Material **8** (E39) = the escalator (the app's infinite 45° ladder) in the PT: emission = the **interpolated
+  vertex color** × `kLadderEmit` (the mesh bakes per-face shading + a 220 m fade-to-black into its colors), at the
+  primary hit and as a GI-bounce emitter — the glowing run lights its own shaft. Not part of the NEE light lattice.
+  Goldens contain no material 8 → the branches are never taken offline → gate M9 byte-comparable.
 - `render_dxr/render_dxr.h` — identity stub (module banner).
 - `dxc.*` (internal) — runtime DXC wrapper: loads `dxcompiler.dll`/`dxil.dll`,
   compiles HLSL → signed SM 6.3 DXIL.

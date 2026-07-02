@@ -601,11 +601,18 @@ static const float3 kAmbient = float3(0.06, 0.055, 0.045);  // multi-bounce floo
 float rndf(inout uint st){ st = st*747796405u + 2891336453u; uint w = ((st >> ((st >> 28u) + 4u)) ^ st) * 277803737u; return float((w >> 22u) ^ w) * (1.0/4294967296.0); }
 
 bool is_emitter(float m){ return m > 2.5 && m < 3.5; }
+// E39: material 8 = the escalator (the infinite 45-deg ladder) in the ray-traced path. Its emission comes from
+// the INTERPOLATED VERTEX COLOR (the raster mesh bakes per-face shading + the 220 m fade-to-black into it), so
+// the banded steps and the vanish-into-darkness read identically in PT. Goldens have no material 8 -> the new
+// branches are never taken offline -> gate M9 stays byte-comparable.
+static const float kLadderEmit = 1.5;
+bool is_ladder(float m){ return m > 7.5; }
 float3 albedo_of(float m){
     if (m < 0.5) return float3(0.80, 0.72, 0.40);   // wallpaper
     if (m < 1.5) return float3(0.42, 0.30, 0.19);   // carpet
     if (m < 2.5) return float3(0.16, 0.16, 0.15);   // ceiling tile
     if (m < 3.5) return float3(0.0, 0.0, 0.0);       // fluorescent (emitter)
+    if (m > 7.5) return float3(1.00, 0.87, 0.52);   // E39: escalator body (emission path uses the vertex color)
     if (m > 6.5) return float3(0.90, 0.42, 0.34);   // M25: the Shoggoth (warm salmon, R>G>B)
     return float3(0.28, 0.26, 0.22);                 // baseboard
 }
@@ -734,9 +741,9 @@ float3 cosine_dir(float3 N, float u1, float u2){
     return normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + N * sqrt(max(0.0, 1.0 - u1)));
 }
 )" R"(
-struct Hit { bool hit; float3 P; float3 N; float mat; float t; };
+struct Hit { bool hit; float3 P; float3 N; float3 col; float mat; float t; };
 Hit trace(float3 origin, float3 dir){
-    Hit h; h.hit = false; h.P = 0; h.N = float3(0,1,0); h.mat = 0; h.t = 0;
+    Hit h; h.hit = false; h.P = 0; h.N = float3(0,1,0); h.col = 0; h.mat = 0; h.t = 0;
     RayDesc r; r.Origin = origin; r.Direction = dir; r.TMin = 1e-3; r.TMax = uFar;
     RayQuery<RAY_FLAG_NONE> q;
     q.TraceRayInline(g_scene, RAY_FLAG_NONE, 0xFF, r);
@@ -749,6 +756,7 @@ Hit trace(float3 origin, float3 dir){
         h.hit = true; h.t = q.CommittedRayT();
         h.P = origin + dir * h.t;
         h.N = normalize(float3(a.nx,a.ny,a.nz) * w + float3(b.nx,b.ny,b.nz) * bc.x + float3(c.nx,c.ny,c.nz) * bc.y);
+        h.col = float3(a.cr,a.cg,a.cb) * w + float3(b.cr,b.cg,b.cb) * bc.x + float3(c.cr,c.cg,c.cb) * bc.y;   // E39: baked shading/fade (the escalator's emission)
         h.mat = a.mat;
     }
     return h;
@@ -829,6 +837,8 @@ void RayGen(){
     if (h.hit){
         if (is_emitter(h.mat)){
             deterministic = kEmit;
+        } else if (is_ladder(h.mat)){
+            deterministic = h.col * kLadderEmit;   // E39: the escalator glows its baked shading/fade (goldens: no mat 8 -> branch untaken)
         } else {
             baseAlb = albedo_of(h.mat);
             uint plr = px.x*9277u + px.y*1973u + frameIdx*60169u + uSeed*26699u + 13u;
@@ -854,6 +864,7 @@ void RayGen(){
             Hit b = trace(h.P + h.N * 2e-3, wi);
             if (b.hit){
                 if (is_emitter(b.mat)) indirectSum += baseAlb * kEmit;
+                else if (is_ladder(b.mat)) indirectSum += baseAlb * (b.col * kLadderEmit);   // E39: the glowing run lights its shaft
                 else { float3 dlb = stochLights ? direct_light_stochastic(b.P, b.N, st) : direct_light(b.P, b.N);
                        indirectSum += baseAlb * albedo_of(b.mat) * dlb; }
             }

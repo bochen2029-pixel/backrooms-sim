@@ -860,3 +860,19 @@ job is audit + fast, unambiguous rollback.
 - **Verified:** audit PASS (ctest 116/116, determ `409129a0` unchanged); **gates M5 + M8 PASSED** (raster goldens
   bit-identical); `--ladder-walk` PASS seeds 1 + 7 (collision untouched); shot series v2→v5
   (`runs/ladder_v5_p{0,1,2}.png`); live `--play` raster smoke debug-clean.
+
+## E39 — 2026-07-02 — the escalator enters the RAY-TRACED path (material 8: vertex-color emission)
+- **What/why:** operator: "convert the stairs into the RTX version too." Until now the ladder existed ONLY in
+  raster — while the collision carve ran in BOTH modes, so RT mode was incoherent: solid-looking lane walls you
+  walk through + an invisible staircase you climb. Now the PT draws the SAME carved world + escalator.
+- **How:** run_game's RT scene rebuild (and the `--game-shot --rt` harness) feed `carve_residents(...)` + the
+  ladder mesh into `build_scene` instead of raw residents — one extra quasi-static BLAS (~3.7 k verts), rebuilt
+  only with the scene (32 m grid; the 220 m fade anchor lags ≤16 m — invisible). The mesh is retargeted to
+  **material 8** (raster keeps 3): in the PT shader, `Hit` gains the interpolated vertex COLOR, and material 8
+  emits `h.col × kLadderEmit (1.5)` at the primary hit + as a GI-bounce emitter — the baked per-face shading,
+  tread banding, and the fade-to-black all read identically in PT, and the glowing run lights its own shaft.
+  Not part of the NEE lattice. Gate/oracle `build_scene` callers keep plain residents.
+- **Verified:** audit PASS (ctest 116/116, determ `409129a0` unchanged); **gate M9 PASSED** (converged PT golden,
+  depth compare, interactive FPS, 1 km TLAS walk, RIS unbiasedness — goldens have no material 8, branches untaken
+  offline); RT QC shots poses 0/1/2 @ 240 spp debug-clean (`runs/ladder_rt_p{0,1,2}.png` — warm, banded, the
+  up-shaft vanish works in PT); live `--game --rt` smoke 2832/2832 rt_frames, debug_error 0.

@@ -1528,8 +1528,14 @@ int run_game(const Options& o) {
     auto prevFrameT = steady_clock::now();
     app::Shoggoth shog;                       // M20b: the hunting creature (spawned on New Game)
     std::vector<contracts::ChunkVertex> shogBody;
-    std::vector<contracts::ChunkVertex> ladderMesh; int64_t ladderCell = (static_cast<int64_t>(1) << 62);  // the infinite ladder's render mesh (rebuilt only when the player crosses a 24 m cell)
+    std::vector<contracts::ChunkVertex> ladderMesh; int64_t ladderCell = (static_cast<int64_t>(1) << 62);  // the infinite ladder's render mesh (rebuilt only when the player crosses an 8 m cell)
     std::vector<std::vector<contracts::ChunkVertex>> ladderCarvePool;  // persistent per-frame scratch: band-carved copies of the cz==0 world chunks
+    // E39: the ray-traced path draws the SAME carved world + escalator (collision always had them -- RT was
+    // ghost-walled: solid-looking lane walls you walk through + an invisible staircase). Rebuilt only with the
+    // DXR scene (32 m grid), so the escalator's 220 m fade anchor lags the wanderer by <=16 m -- invisible.
+    std::vector<contracts::ChunkVertex> dxrLadderMesh;
+    std::vector<std::vector<contracts::ChunkVertex>> dxrCarvePool;
+    std::vector<contracts::ResidentChunk> dxrWithLadder;
 
     struct Keys { bool up=false, down=false, left=false, right=false, enter=false, esc=false; } prev;
     auto edge = [](bool now, bool& p) { const bool e = now && !p; p = now; return e; };
@@ -2037,7 +2043,15 @@ int run_game(const Options& o) {
                 }
                 if (dxr) {
                     const bool sceneRebuilt = (center != dxrCenter);
-                    if (sceneRebuilt) { dxr->build_scene(sm->resident()); dxrCenter = center; }
+                    if (sceneRebuilt) {
+                        // E39: carve the lane + inject the escalator into the RT scene (parity with raster).
+                        // Material 8 -> the PT emits the baked vertex color (shading + fade); raster keeps 3.
+                        app::ladder::carve_residents(sm->resident(), dxrCarvePool, dxrWithLadder);
+                        app::ladder::build_mesh(dxrLadderMesh, cam.pos[0], app::ladder::kFarReach);
+                        for (auto& v : dxrLadderMesh) v.material = 8.0f;
+                        dxrWithLadder.push_back(contracts::ResidentChunk{contracts::ChunkKey{9998, 0, 0}, dxrLadderMesh.data(), static_cast<uint32_t>(dxrLadderMesh.size())});
+                        dxr->build_scene(dxrWithLadder); dxrCenter = center;
+                    }
                     // M25: the Shoggoth's body in RT -- a dynamic creature BLAS updated each
                     // frame (chunk BLASes stay cached), material 7 so the PT shades it salmon.
                     app::build_shoggoth_mesh(shogBody, shog.pos, shog.writhe, 1.4f);
@@ -5032,7 +5046,16 @@ int run_game_shot(const Options& o) {
     if (o.rt) {
         br::render_dxr::DxrRenderer r;
         if (!r.init(o.width, o.height)) { std::fprintf(stderr, "dxr init: %s\n", r.last_error().c_str()); return 1; }
-        if (!r.build_scene(sm.resident())) { std::fprintf(stderr, "dxr scene: %s\n", r.last_error().c_str()); return 1; }
+        // E39: parity with the raster branch below -- the RT shot scene gets the carved lane + the escalator
+        // (material 8 -> the PT emits the baked vertex color). Gate/oracle paths keep plain residents.
+        std::vector<std::vector<contracts::ChunkVertex>> rtCarvePool;
+        std::vector<contracts::ResidentChunk> rtWithLadder;
+        app::ladder::carve_residents(sm.resident(), rtCarvePool, rtWithLadder);
+        std::vector<contracts::ChunkVertex> rtLadderMesh;
+        app::ladder::build_mesh(rtLadderMesh, cam.pos[0], app::ladder::kFarReach);
+        for (auto& v : rtLadderMesh) v.material = 8.0f;
+        rtWithLadder.push_back(contracts::ResidentChunk{contracts::ChunkKey{9998, 0, 0}, rtLadderMesh.data(), static_cast<uint32_t>(rtLadderMesh.size())});
+        if (!r.build_scene(rtWithLadder)) { std::fprintf(stderr, "dxr scene: %s\n", r.last_error().c_str()); return 1; }
         if (o.drop_flares) {   // QC A/B: a short line of green flares receding ahead along the view, on the floor
             app::FlareField ff;
             const float cy = cam.pos[1] - kEyeHeight + 0.15f;
