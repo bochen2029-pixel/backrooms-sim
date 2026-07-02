@@ -71,6 +71,23 @@ down/up, no fall-through), shot A/B, live `--play` raster smoke debug-clean. Rel
 re-staged. Known cosmetic remainder: the punch-through hole rims still read dark (one-sided floor backsides —
 same look as every M27 stairwell); options if wanted: rim collars or void-plates, ~1 h.
 
+**PART 4 (next day, after a quota-reset resume): the escalator POLISH pass (E38, `02eb15b`).** Operator: "yes do
+the collars; the color is way off — match it; I want to travel the stairs and see the run disappear up + down into
+infinite distance; polish it up." Resumed from an uncommitted working tree (E37 was safely pushed; the E38 draft
+was on disk). Shipped: **(1) warm amber-gold palette** (`kBody` 1.00/0.87/0.52; treads AND risers alternate shades
+— looking up the run, the stacked risers read as banded steps); **(2) the infinite run**: stepped mesh ±18 m, then
+a smooth 45° prism to ±220 m with a per-vertex fade-to-black gradient (`face_grad`/`fade_at` t^1.5) — the run
+VANISHES both ways, no pop; the 45° sightline threads every aligned punch-through hole (a true open infinite
+diagonal shaft); mesh rebuild key 24 m → 8 m so the fade window tracks the wanderer; **(3) void collars** with the
+travel corridor CUT OUT of the plates (the first cut sealed the shaft + sandwiched the new pose-2 camera between
+plates — caught by QC; plates now = two strips flanking `xP−0.5..xP+2.5` per plane). New `--ladder-shot --pose 2`
+(sight up the ascent); poses 1/2 hug the ±45° slope. Budget ~3.7 k verts (cap 6144). Verified: audit PASS ×2,
+gates M5+M8 PASSED (goldens bit-identical), `--ladder-walk` PASS seeds 1+7, live raster smoke debug-clean, shot
+series v2→v5 (`runs/ladder_v5_p{0,1,2}.png`). Release rebuilt + bundle exe/scr re-staged (Desktop shortcut already
+points at the bundle). Note for the operator's own eyes: at player-eye height the near treads foreshorten at the
+45° grazing angle (reads as a ramp underfoot — physical, matches real escalators); the step banding + the vanish
+show from a half-level offset or mid-descent.
+
 ---
 
 ## Session 44 — RT perf knobs (F3 resolution + V vsync) + the diagnosis that vsync was capping everything ✅ (ledger E32–E33, anchor `pre-rt-reproj`)
