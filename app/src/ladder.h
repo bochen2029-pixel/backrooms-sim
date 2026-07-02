@@ -43,6 +43,17 @@ constexpr float kStep    = 0.5f;    // run == rise -> 45 deg; riser 0.5 < core::
 constexpr float kDeep    = 6.0f;    // COLLISION slab depth (>= 1.5 levels) -> no fall-through across a level rebuild
 constexpr float kSkirtVis = 1.6f;   // RENDER body depth below each tread: a solid diagonal beam (escalator body) that
                                     // also plugs the 1 m inter-floor slab void where the run punches through a plane
+// E38 "infinite" visualization: stepped geometry only where steps are resolvable; beyond that the beam continues
+// as a smooth 45-deg prism whose baked brightness FADES to black with distance -- it visibly vanishes into the
+// dark above and below (no pop-out), reading as an endless run. All camX-relative; the mesh rebuilds on an 8 m
+// key so the fade window follows the wanderer.
+constexpr float kNearReach   = 18.0f;    // stepped zone half-length (steps read individually out to here)
+constexpr float kFarReach    = 220.0f;   // beam fade-out half-length (brightness reaches 0 -> "infinite" vanish)
+constexpr int   kFarSegs     = 12;       // prism segments per direction (piecewise-linear fade gradient)
+constexpr float kCollarReach = 30.0f;    // line the punch-through slab voids within this range of the wanderer
+// Warm palette (E38): the old chemlight cyan fought the Backrooms' yellow; the body now glows warm amber-gold
+// (the lit shader half-desaturates vertex tints, so the baked hue is pushed warmer than the target on purpose).
+constexpr float kBodyR = 1.00f, kBodyG = 0.87f, kBodyB = 0.52f;
 constexpr float kSpurZ0  = 1.0f;    // a clear walk-up from the spawn cell (Z~2) into the band, so you can reach the ladder
 constexpr float kSpurHalfW = 3.0f;  // spur half-width in X about the crossing (kAnchorX) -> X in [-1,5]
 constexpr float kHoleHalfW = 2.5f;  // floor/ceiling HOLE half-width (X): drops the whole 4 m cell the diagonal punches through
@@ -83,44 +94,129 @@ inline void apply_to_collision(std::vector<br::core::Aabb>& c, contracts::ChunkK
 
 // ----- render mesh (raster), EMISSIVE so it glows + reads distinct -----------
 namespace detail {
-// `shade` bakes the depth cue INTO the emissive color (the lit shader's fluorescent branch ignores lighting):
-// bright treads / dimmer risers / dark sides+underside make the steps read as 3-D instead of a flat cutout.
-inline void face(std::vector<contracts::ChunkVertex>& o, br::core::Vec3 a, br::core::Vec3 b,
-                 br::core::Vec3 c, br::core::Vec3 d, float nx, float ny, float nz, float shade) {
-    const br::core::Vec3 q[6] = { a, b, c, a, c, d };   // single winding (lit PSO CullMode = NONE)
+// Baked shading: the lit shader's fluorescent branch ignores lighting, so every depth cue lives in the vertex
+// color (warm body tint × per-face shade). `face_grad` shades the a/b edge with s0 and the c/d edge with s1 —
+// the rasterizer interpolates between them, which is how the far beam gets its smooth fade-to-black gradient.
+inline void face_grad(std::vector<contracts::ChunkVertex>& o, br::core::Vec3 a, br::core::Vec3 b,
+                      br::core::Vec3 c, br::core::Vec3 d, float nx, float ny, float nz, float s0, float s1) {
+    const br::core::Vec3 q[6] = { a, b, c, a, c, d };            // single winding (lit PSO CullMode = NONE)
+    const float s[6] = { s0, s0, s1, s0, s1, s1 };               // a,b carry s0; c,d carry s1
     for (int i = 0; i < 6; ++i) {
         contracts::ChunkVertex v{};
         v.pos[0] = q[i].x; v.pos[1] = q[i].y; v.pos[2] = q[i].z;
         v.nrm[0] = nx; v.nrm[1] = ny; v.nrm[2] = nz;
-        v.color[0] = 0.20f * shade; v.color[1] = 0.95f * shade; v.color[2] = 1.00f * shade;   // cyan × baked face shade
+        v.color[0] = kBodyR * s[i]; v.color[1] = kBodyG * s[i]; v.color[2] = kBodyB * s[i];
         v.uv[0] = 0.5f; v.uv[1] = 0.5f;
-        v.material = contracts::kMatFluorescent;   // 3.0 -> emissive branch in the lit shader -> the steps GLOW
+        v.material = contracts::kMatFluorescent;   // 3.0 -> emissive branch in the lit shader -> the body GLOWS
         o.push_back(v);
     }
 }
+inline void face(std::vector<contracts::ChunkVertex>& o, br::core::Vec3 a, br::core::Vec3 b,
+                 br::core::Vec3 c, br::core::Vec3 d, float nx, float ny, float nz, float shade) {
+    face_grad(o, a, b, c, d, nx, ny, nz, shade, shade);
+}
+// The distance fade of the far beam: 1.0 at the stepped seam easing to 0.0 at kFarReach (slightly convex so the
+// vanish lingers). This is what turns a finite mesh into "it disappears into infinite distance" — the end of the
+// geometry is black, so there is nothing to pop.
+inline float fade_at(float x, float camX) {
+    const float d = (x > camX) ? (x - camX) : (camX - x);
+    float t = (kFarReach - d) / (kFarReach - kNearReach);
+    if (t < 0.0f) t = 0.0f; if (t > 1.0f) t = 1.0f;
+    return t * std::sqrt(t);   // t^1.5
+}
 }  // namespace detail
 
-// Build the visible ladder as a chunk-vertex mesh (injected as a synthetic ResidentChunk): a SOLID diagonal
-// beam of steps — tread + riser lip + deep side skirts + underside — so it reads as an escalator body, hides
-// the one-sided world backfaces behind it, and plugs the inter-floor slab void at every punch-through. Only
-// steps within `reach` of camX (X≡Y on the ramp bounds the vertical span too). Budget: 6 faces × 6 verts =
-// 36 verts/step; reach 38 -> ~155 steps ≈ 5580 verts, under the renderer's 6144-vertex slot cap.
+// Build the visible ladder as a chunk-vertex mesh (injected as a synthetic ResidentChunk).
+// Three zones, one draw:
+//   1. STEPPED body (|x-camX| <= kNearReach): tread + riser lip + deep skirts + underside — a solid escalator
+//      beam with baked per-face shading (alternating treads so each step reads underfoot).
+//   2. FAR PRISMS (out to kFarReach both ways): the same beam as a smooth 45° prism (steps are sub-pixel out
+//      there) whose brightness fades to black with distance — the run visibly vanishes up and down forever.
+//   3. VOID COLLARS (|x-camX| <= kCollarReach): the 1 m structural slab void the run punches through at every
+//      level is lined with dark warm panels (2 side linings + top/bottom plates per crossing), so the rim reads
+//      as a finished stairwell opening instead of raw black backfaces.
+// Budget @ defaults: steps 73×36=2628 + prisms 2×12×24=576 + collars ~15×4×6=360 ≈ 3.6 k verts (cap 6144).
 inline void build_mesh(std::vector<contracts::ChunkVertex>& out, float camX, float reach) {
     using V = br::core::Vec3;
     out.clear();
     const float z0 = kAnchorZ - kHalfW, z1 = kAnchorZ + kHalfW;
-    const int i0 = static_cast<int>(std::floor((camX - reach - kAnchorX) / kStep));
-    const int i1 = static_cast<int>(std::ceil((camX + reach - kAnchorX) / kStep));
+    const float nearR = (reach < kNearReach) ? reach : kNearReach;
+
+    // 1) stepped zone, ending exactly on step-grid boundaries so the prisms continue from the seam.
+    const int i0 = static_cast<int>(std::floor((camX - nearR - kAnchorX) / kStep));
+    const int i1 = static_cast<int>(std::ceil((camX + nearR - kAnchorX) / kStep));
     for (int i = i0; i <= i1; ++i) {
         const float xa = kAnchorX + static_cast<float>(i) * kStep, xb = xa + kStep;
         const float yt = -static_cast<float>(i) * kStep, yb = yt - kSkirtVis;   // deep body (adjacent boxes overlap -> solid)
-        const float tread = ((i & 1) == 0) ? 1.00f : 0.84f;   // alternate treads so each step reads under your feet
+        const bool alt = ((i & 1) == 0);
+        const float tread = alt ? 1.00f : 0.84f;   // alternate treads so each step reads under your feet
+        const float rFrnt = alt ? 0.58f : 0.46f;   // risers alternate too: seen stacked from below (looking up the
+        const float rBack = alt ? 0.46f : 0.35f;   // run) the banding is what makes the wall of steps read as STEPS
         detail::face(out, V{xa,yt,z0}, V{xa,yt,z1}, V{xb,yt,z1}, V{xb,yt,z0}, 0, 1, 0, tread);       // top tread
-        detail::face(out, V{xa,yb,z0}, V{xa,yt,z0}, V{xa,yt,z1}, V{xa,yb,z1}, -1, 0, 0, 0.55f);      // front riser (-X)
-        detail::face(out, V{xb,yb,z1}, V{xb,yt,z1}, V{xb,yt,z0}, V{xb,yb,z0}, 1, 0, 0, 0.45f);       // back (+X)
+        detail::face(out, V{xa,yb,z0}, V{xa,yt,z0}, V{xa,yt,z1}, V{xa,yb,z1}, -1, 0, 0, rFrnt);      // front riser (-X)
+        detail::face(out, V{xb,yb,z1}, V{xb,yt,z1}, V{xb,yt,z0}, V{xb,yb,z0}, 1, 0, 0, rBack);       // back (+X)
         detail::face(out, V{xa,yb,z0}, V{xb,yb,z0}, V{xb,yt,z0}, V{xa,yt,z0}, 0, 0, -1, 0.34f);      // skirt (-Z)
         detail::face(out, V{xb,yb,z1}, V{xa,yb,z1}, V{xa,yt,z1}, V{xb,yt,z1}, 0, 0, 1, 0.34f);       // skirt (+Z)
         detail::face(out, V{xa,yb,z1}, V{xa,yb,z0}, V{xb,yb,z0}, V{xb,yb,z1}, 0, -1, 0, 0.20f);      // underside
+    }
+
+    // 2) far prisms: a smooth beam continuing from each end of the stepped zone out to kFarReach, brightness
+    //    fading to zero (top through the tread LEADING edges: y = surface_y(x), so the seam lines up).
+    if (reach > nearR + kStep) {
+        const float farR = (reach < kFarReach) ? reach : kFarReach;
+        const float xSeamLo = kAnchorX + static_cast<float>(i0) * kStep;        // ascending (-X) seam
+        const float xSeamHi = kAnchorX + static_cast<float>(i1 + 1) * kStep;    // descending (+X) seam
+        for (int dir = 0; dir < 2; ++dir) {
+            const float xs = dir ? xSeamHi : xSeamLo;
+            const float xe = dir ? (camX + farR) : (camX - farR);
+            const float span = (xe - xs) / static_cast<float>(kFarSegs);
+            for (int sgi = 0; sgi < kFarSegs; ++sgi) {
+                const float xa = xs + span * static_cast<float>(sgi);
+                const float xb = xa + span;
+                const float ya = surface_y(xa), yb2 = surface_y(xb);
+                const float fa = detail::fade_at(xa, camX), fb = detail::fade_at(xb, camX);
+                if (fa <= 0.004f && fb <= 0.004f) break;   // fully faded -> nothing to draw further out
+                detail::face_grad(out, V{xa,ya,z0}, V{xa,ya,z1}, V{xb,yb2,z1}, V{xb,yb2,z0}, 0, 1, 0, 0.92f*fa, 0.92f*fb);                          // top
+                detail::face_grad(out, V{xa,ya-kSkirtVis,z0}, V{xb,yb2-kSkirtVis,z0}, V{xb,yb2,z0}, V{xa,ya,z0}, 0, 0, -1, 0.34f*fa, 0.34f*fb);     // skirt (-Z)
+                detail::face_grad(out, V{xb,yb2-kSkirtVis,z1}, V{xa,ya-kSkirtVis,z1}, V{xa,ya,z1}, V{xb,yb2,z1}, 0, 0, 1, 0.34f*fb, 0.34f*fa);      // skirt (+Z)
+                detail::face_grad(out, V{xa,ya-kSkirtVis,z1}, V{xa,ya-kSkirtVis,z0}, V{xb,yb2-kSkirtVis,z0}, V{xb,yb2-kSkirtVis,z1}, 0, -1, 0, 0.20f*fa, 0.20f*fb);   // underside
+            }
+        }
+    }
+
+    // 3) void collars: at every level the run crosses near the wanderer, the ceiling hole (plane y=4k+3) and the
+    //    floor hole above (y=4k+4) expose the 1 m structural slab void — line it with dark warm panels. Panels
+    //    are inset 2 cm from the band edges/planes; where they extend past the actual holes they sit inside the
+    //    enclosed slab (invisible), so the analytic span needs no cell quantization.
+    {
+        const float zi0 = z0 + 0.02f, zi1 = z1 - 0.02f;
+        const int kLo = static_cast<int>(std::floor(((kAnchorX - camX) - kCollarReach - 3.0f) / 4.0f));
+        const int kHi = static_cast<int>(std::ceil(((kAnchorX - camX) + kCollarReach - 3.0f) / 4.0f));
+        for (int k = kLo; k <= kHi; ++k) {
+            const float v0 = 4.0f * static_cast<float>(k) + 3.0f;   // void bottom = level k's ceiling plane
+            const float v1 = v0 + 1.0f;                             // void top    = level k+1's floor plane
+            const float xC = kAnchorX - v0;                         // run crosses the ceiling plane here
+            const float u0 = xC - 1.0f - kHoleHalfW - 0.7f;         // union of both holes + margin (floor hole is 1 m -X)
+            const float u1 = xC + kHoleHalfW + 0.7f;
+            detail::face(out, V{u0,v0,zi0}, V{u0,v1,zi0}, V{u1,v1,zi0}, V{u1,v0,zi0}, 0, 0, 1, 0.18f);    // lining, band -Z side
+            detail::face(out, V{u1,v0,zi1}, V{u1,v1,zi1}, V{u0,v1,zi1}, V{u0,v0,zi1}, 0, 0, -1, 0.18f);   // lining, band +Z side
+            // Top/bottom plates close the view into the void — but the TRAVEL CORRIDOR must stay open: the run
+            // (and the wanderer riding it) passes through every plate plane. Emit each plate as two strips
+            // flanking the beam crossing at THAT plane's height (feet cross at xP, the head ~1.8 m of run later),
+            // so the aligned holes + beam read as one continuous open diagonal shaft — the "infinite" sightline.
+            auto plate = [&](float py, float ny, float shade) {
+                const float xP = kAnchorX - py;                     // beam-top crossing at this plane
+                const float c0 = xP - 0.5f, c1 = xP + 2.5f;         // corridor: beam body + wanderer passage
+                const float aE = (c0 < u1) ? c0 : u1;               // strip A = [u0, min(c0,u1)]
+                const float bS = (c1 > u0) ? c1 : u0;               // strip B = [max(c1,u0), u1]
+                if (aE - u0 > 0.05f)
+                    detail::face(out, V{u0,py,zi0}, V{aE,py,zi0}, V{aE,py,zi1}, V{u0,py,zi1}, 0, ny, 0, shade);
+                if (u1 - bS > 0.05f)
+                    detail::face(out, V{bS,py,zi0}, V{u1,py,zi0}, V{u1,py,zi1}, V{bS,py,zi1}, 0, ny, 0, shade);
+            };
+            plate(v1 - 0.02f, -1.0f, 0.12f);   // top plate (seen looking UP through the hole)
+            plate(v0 + 0.02f,  1.0f, 0.15f);   // bottom plate (seen looking DOWN)
+        }
     }
 }
 

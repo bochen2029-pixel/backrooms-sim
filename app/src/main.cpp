@@ -2102,8 +2102,8 @@ int run_game(const Options& o) {
                 std::vector<contracts::ResidentChunk> withShog;
                 app::ladder::carve_residents(sm->resident(), ladderCarvePool, withShog);  // open the band shaft out of the world mesh
                 withShog.push_back(contracts::ResidentChunk{contracts::ChunkKey{9999, static_cast<int64_t>(frames), 0}, shogBody.data(), static_cast<uint32_t>(shogBody.size())});
-                const int64_t lcell = static_cast<int64_t>(std::floor(cam.pos[0] / 24.0f));   // the infinite 45-deg ladder (raster):
-                if (lcell != ladderCell) { app::ladder::build_mesh(ladderMesh, (static_cast<float>(lcell) + 0.5f) * 24.0f, 38.0f); ladderCell = lcell; }  // rebuild + re-upload only on a 24 m cell cross (a STABLE key, so it never starves the 8-upload budget)
+                const int64_t lcell = static_cast<int64_t>(std::floor(cam.pos[0] / 8.0f));   // the infinite 45-deg ladder (raster):
+                if (lcell != ladderCell) { app::ladder::build_mesh(ladderMesh, (static_cast<float>(lcell) + 0.5f) * 8.0f, app::ladder::kFarReach); ladderCell = lcell; }  // rebuild on an 8 m cell cross (STABLE key -> never starves the upload budget; fine-grained so the E38 far-fade window tracks the wanderer)
                 withShog.push_back(contracts::ResidentChunk{contracts::ChunkKey{9998, lcell, 0}, ladderMesh.data(), static_cast<uint32_t>(ladderMesh.size())});
                 // Director SUBTITLES (raster path): alpha-blended overlay drawn over the world inside
                 // render_chunks_windowed (same frame, no HUD/post pass) while the line is fresh (~6 s).
@@ -5003,11 +5003,16 @@ int run_game_shot(const Options& o) {
     cam.pos[0] = s.wanderer.pos.x; cam.pos[1] = s.wanderer.pos.y + kEyeHeight; cam.pos[2] = s.wanderer.pos.z;
     cam.yaw = s.wanderer.yaw; cam.pitch = 0.0f;
     cam.fov_y = 1.2217305f; cam.aspect = static_cast<float>(o.width) / static_cast<float>(o.height);
-    if (o.ladder_shot && o.pose == 1u) {   // ladder QC: stand up-ramp on the stair, look DOWN the descent through the floor-holes
-        cam.pos[0] = app::ladder::kAnchorX - 2.0f;                   // up-ramp (X=0 -> Y=2, a level up)
+    if (o.ladder_shot && o.pose == 1u) {   // ladder QC: on the run mid-level, sight ALONG the -45 deg descent -- the
+        cam.pos[0] = app::ladder::kAnchorX + 2.5f;                   // aligned holes + fading beam = the infinite down
         cam.pos[2] = app::ladder::kAnchorZ;                          // band centre
-        cam.pos[1] = app::ladder::surface_y(cam.pos[0]) + kEyeHeight; // eye height above the step
-        cam.yaw = 1.5707963f; cam.pitch = -0.48f;                   // +X, look down the stairwell
+        cam.pos[1] = app::ladder::surface_y(cam.pos[0]) + kEyeHeight; // eye height above the step (mid level -1 airspace)
+        cam.yaw = 1.5707963f; cam.pitch = -0.75f;                   // +X, hugging the slope
+    } else if (o.ladder_shot && o.pose == 2u) {   // ladder QC (E38): same spot, sight ALONG the +45 deg ascent (infinite up)
+        cam.pos[0] = app::ladder::kAnchorX + 2.5f;
+        cam.pos[2] = app::ladder::kAnchorZ;
+        cam.pos[1] = app::ladder::surface_y(cam.pos[0]) + kEyeHeight;
+        cam.yaw = -1.5707963f; cam.pitch = 0.75f;                   // -X, hugging the slope
     } else if (o.ladder_shot) {            // ladder QC: from the SPAWN, look +Z toward the ladder (a short walk away, glowing)
         cam.pos[0] = 2.0f; cam.pos[1] = 1.0f + kEyeHeight; cam.pos[2] = 2.0f;   // spawn, eye height
         cam.yaw = 0.0f; cam.pitch = -0.04f;                                     // +Z toward the band Z[6,10]
@@ -5050,7 +5055,7 @@ int run_game_shot(const Options& o) {
         std::vector<contracts::ResidentChunk> withLadder;
         app::ladder::carve_residents(sm.resident(), carvePool, withLadder);  // open the band shaft out of the world mesh
         std::vector<contracts::ChunkVertex> ladderMesh;
-        app::ladder::build_mesh(ladderMesh, cam.pos[0], 40.0f);
+        app::ladder::build_mesh(ladderMesh, cam.pos[0], app::ladder::kFarReach);
         withLadder.push_back(contracts::ResidentChunk{contracts::ChunkKey{9998, 0, 0}, ladderMesh.data(), static_cast<uint32_t>(ladderMesh.size())});
         uint32_t drawn = 0;
         const size_t targetN = withLadder.size();

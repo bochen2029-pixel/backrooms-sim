@@ -839,3 +839,24 @@ job is audit + fast, unambiguous rollback.
   bit-identical = the `*m` identity proven by oracle); `--ladder-walk` PASS seeds 1 + 7 (59 m down/up, ~15 levels,
   no fall-through — the collision spur carve is safe); `--ladder-shot` pose 0/1 A/B: flat cyan cutout + black
   lane → shaded stepped beam in a clean gallery; live `--play` raster smoke debug-clean.
+
+## E38 — 2026-07-02 — the escalator polished: warm palette, the "infinite run" far-fade, void collars
+- **What/why:** operator: "color is way off — match it; and I want to travel down and see the run disappear up and
+  down into infinite distance; polish it up." Three changes, all in the ladder's own mesh (raster-only, app-layer):
+  (1) **warm amber-gold palette** (`kBody` 1.00/0.87/0.52 — the old chemlight cyan fought the yellow facility;
+  baked hue pushed warm since the lit shader half-desaturates tints); risers now alternate shades too, so the
+  stacked-riser view (looking up the run) reads as banded steps, not a flat mass. (2) **The infinite visualization**:
+  stepped geometry only within ±18 m (`kNearReach`); beyond, the beam continues as a smooth 45° prism out to
+  ±220 m (`kFarReach`, 12 segments/side) whose brightness fades to black via per-vertex gradient (`face_grad` +
+  `fade_at` t^1.5) — the run visibly VANISHES up and down (no pop-out; the mesh end is already black). The 45°
+  sightline passes inside every aligned punch-through hole, so the shaft is a true unobstructed infinite diagonal.
+  Mesh rebuild key finer (24 m → 8 m) so the fade window tracks the wanderer. (3) **Void collars**: the 1 m slab
+  void at every crossing is lined with dark warm panels (2 z-linings + top/bottom plates per level) — the rims
+  read as finished stairwell openings; the plates are emitted as two strips flanking the TRAVEL CORRIDOR
+  (`xP−0.5 .. xP+2.5` at each plane) so the run + the wanderer pass through untouched (the first cut sealed the
+  shaft and sandwiched the pose-2 camera between plates — caught by the new `--ladder-shot --pose 2` QC angle).
+- **Budget:** steps 73×36 + prisms 2×12×24 + collars ≈ 3.7 k verts (slot cap 6144). New QC pose 2 (sight up the
+  ascent); poses 1/2 hug the ±45° slope from mid-airspace on the run.
+- **Verified:** audit PASS (ctest 116/116, determ `409129a0` unchanged); **gates M5 + M8 PASSED** (raster goldens
+  bit-identical); `--ladder-walk` PASS seeds 1 + 7 (collision untouched); shot series v2→v5
+  (`runs/ladder_v5_p{0,1,2}.png`); live `--play` raster smoke debug-clean.
